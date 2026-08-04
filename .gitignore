@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+venv/
+.venv/
+
+# Environment variables
+.env
+
+# IDEs
+.vscode/
+.idea/
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+
+# Build files
+dist/
+build/
+
+# Runtime data
+downloads/
+counter.txt
+offline_queue.json
+sales_db.json
+payments_db.json
+purchases_db.json
+
+# Tally caches
+tally_*_cache.json

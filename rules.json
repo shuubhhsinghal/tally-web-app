@@ -1,0 +1,60 @@
+{
+    "Federal Bank Gulshan": {
+        "northarcapital": {
+            "ledger": "PAYTM 845 Loan",
+            "cost_center": null
+        },
+        "paytmpayments": {
+            "ledger": "Paytm Gulshan",
+            "cost_center": null
+        },
+        "poweraccess": {
+            "ledger": "Paytm Gulshan",
+            "cost_center": null
+        },
+        "mamta": {
+            "ledger": "Rent",
+            "cost_center": null
+        },
+        "shree shyam": {
+            "ledger": "union bank mahagun 133",
+            "cost_center": null
+        },
+        "shubh": {
+            "ledger": "drawings 3024",
+            "cost_center": null
+        },
+        "Sanchi": {
+            "ledger": "drawings 3024",
+            "cost_center": null
+        },
+        "society.payment": {
+            "ledger": "drawings 3024",
+            "cost_center": null
+        },
+        "zepto": {
+            "ledger": "drawings 3024",
+            "cost_center": null
+        }
+    },
+    "Union Bank Mahagun 133": {
+        "shubh": {
+            "ledger": "drawings 3024",
+            "cost_center": null
+        },
+        "poweraccess": {
+            "ledger": "paytm mahagun",
+            "cost_center": null
+        },
+        "PAYTM PAYMENTS SERVICES": {
+            "ledger": "paytm mahagun",
+            "cost_center": null
+        }
+    },
+    "Union Bank Vvip 2170": {
+        "shubh": {
+            "ledger": "drawings 3024",
+            "cost_center": null
+        }
+    }
+}
