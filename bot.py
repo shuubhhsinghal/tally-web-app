@@ -34,6 +34,7 @@ from workflows import purchase_inventory as purchase_inventory_workflow
 from workflows import purchase_item_interactive as pii_workflow
 from workflows.bank_statement import bank_statement_handlers, BANK_STATEMENT_LEDGERS, handle_rule_ledger_selection, handle_viewrules_account
 from workflows.tally_buffer import add_to_queue, get_queue, clear_queue, fetch_and_cache_masters, TALLY_CACHE_FILE
+from workflows.stock_transfer import handle_transfer_message, handle_transfer_callback, stock_transfer_router
 
 
 TALLY_URL = os.getenv("TALLY_URL", "http://100.125.198.3:9000")
@@ -573,6 +574,7 @@ async def process_invoice_text(update: Update, context: ContextTypes.DEFAULT_TYP
     if mode == "Transfer":
         await transfer_workflow.process_text(update, context, generate_gemini)
         return
+
     
         processing_msg = await update.message.reply_text("Processing invoice text with Gemini...")
         try:
@@ -1239,6 +1241,9 @@ async def main_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("🔄 Fund Transfer", callback_data="setmode_Transfer")
             ],
             [
+                InlineKeyboardButton("📦 Stock Transfer", callback_data="setmode_StockTransfer")
+            ],
+            [
                 InlineKeyboardButton("🔙 Back", callback_data="main_menu")
             ]
         ]
@@ -1275,6 +1280,9 @@ async def transactions_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYP
             [
                 InlineKeyboardButton("📈 Sales", callback_data="setmode_Sales"),
                 InlineKeyboardButton("💳 Payment", callback_data="setmode_Payment")
+            ],
+            [
+                InlineKeyboardButton("📦 Stock Transfer", callback_data="setmode_StockTransfer")
             ],
             [
                 InlineKeyboardButton("🔙 Back", callback_data="main_menu")
@@ -1348,6 +1356,12 @@ async def transactions_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYP
                 "🔄 *Fund Transfer mode ready.*\n\n"
                 "Type your transfer instruction. Example:\n"
                 "`2000 from cash mahagun to cash vvip`"
+            )
+        elif mode == "StockTransfer":
+            msg = (
+                "📦 *Stock Transfer mode ready.*\n\n"
+                "Type your stock transfer instruction. Example:\n"
+                "`I transferred 7 pcs of item a from mahagun to vvip`"
             )
         else:
             msg = f"**{mode}** mode ready."
@@ -1642,12 +1656,15 @@ def main():
         
     application.add_handler(CallbackQueryHandler(handle_rule_ledger_selection, pattern="^rule_ledger:"), group=1)
     application.add_handler(CallbackQueryHandler(handle_viewrules_account, pattern="^viewrules_acct:"), group=1)
+    application.add_handler(CallbackQueryHandler(handle_transfer_callback, pattern="^st_"), group=-1)
     
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(start, pattern="^main_menu$"))
     application.add_handler(CommandHandler("addledger", addledger_command))
     application.add_handler(CommandHandler("addexpense", addexpense_command))
     application.add_handler(CommandHandler("removeledger", removeledger_command))
+    
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, stock_transfer_router), group=-1)
     
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_natural_language))
 
