@@ -16,7 +16,7 @@ export default function TopBar({ title, showBack = false, onBack }) {
     // Simple mock ping to check Tally sync status based on user instruction
     const checkSync = async () => {
       try {
-        const res = await fetch('http://127.0.0.1:8000/api/sync/status');
+        const res = await fetch('/api/sync/status');
         if (res.ok) {
           const data = await res.json();
           setIsOnline(data.online !== false);

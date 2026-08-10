@@ -36,7 +36,7 @@ export default function PaymentVoucher() {
   const [creatingAccount, setCreatingAccount] = useState(false);
 
   const fetchMetadata = () => {
-    fetch("http://127.0.0.1:8000/api/payment/metadata")
+    fetch("/api/payment/metadata")
       .then(res => res.json())
       .then(data => setMeta(prev => ({
         ...prev,
@@ -68,7 +68,7 @@ export default function PaymentVoucher() {
     }
     setCreatingAccount(true);
     try {
-      const res = await fetch("http://127.0.0.1:8000/api/payment/create-ledger", {
+      const res = await fetch("/api/payment/create-ledger", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: newAccount.name, parent: newAccount.group }),
@@ -120,7 +120,7 @@ export default function PaymentVoucher() {
         cost_center: formData.mode === "expenses" ? formData.cost_center : null,
       };
 
-      const response = await fetch("http://127.0.0.1:8000/api/payment/post", {
+      const response = await fetch("/api/payment/post", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),

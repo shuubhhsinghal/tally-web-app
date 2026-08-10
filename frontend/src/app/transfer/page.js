@@ -26,7 +26,7 @@ export default function FundTransfer() {
   const [accounts, setAccounts] = useState([]);
 
   useEffect(() => {
-    fetch("http://127.0.0.1:8000/api/transfer/metadata")
+    fetch("/api/transfer/metadata")
       .then(res => res.json())
       .then(data => setAccounts(data.accounts || []))
       .catch(err => console.error("Failed to load accounts", err));
@@ -40,7 +40,7 @@ export default function FundTransfer() {
     e.preventDefault();
     setLoading(true);
     try {
-      const response = await fetch("http://127.0.0.1:8000/api/transfer/preview", {
+      const response = await fetch("/api/transfer/preview", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -71,7 +71,7 @@ export default function FundTransfer() {
         ? preview.narration
         : `Transferred INR ${preview.amount} from ${preview.from_account} to ${preview.to_account}`;
 
-      const response = await fetch("http://127.0.0.1:8000/api/transfer/post", {
+      const response = await fetch("/api/transfer/post", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

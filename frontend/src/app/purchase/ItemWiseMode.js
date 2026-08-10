@@ -246,12 +246,12 @@ export function ItemWiseMode({ onPostSuccess }) {
   const [forceManual, setForceManual] = useState(false);
 
   useEffect(() => {
-    fetch("http://127.0.0.1:8000/api/purchase-item/metadata")
+    fetch("/api/purchase-item/metadata")
       .then(res => res.json())
       .then(data => setMeta(prev => ({ ...prev, ...data })))
       .catch(err => console.error(err));
 
-    fetch('http://127.0.0.1:8000/api/purchase-item/items')
+    fetch('/api/purchase-item/items')
       .then(res => res.json())
       .then(data => setItemCache(data))
       .catch(err => console.error(err));
@@ -337,7 +337,7 @@ export function ItemWiseMode({ onPostSuccess }) {
     });
 
     try {
-      const res = await fetch("http://127.0.0.1:8000/api/purchase-item/extract", { method: "POST", body: fd });
+      const res = await fetch("/api/purchase-item/extract", { method: "POST", body: fd });
       if (!res.ok) {
         const errorData = await res.json();
         throw new Error(errorData.detail || "Extraction failed");
@@ -388,7 +388,7 @@ export function ItemWiseMode({ onPostSuccess }) {
 
     setCreatingMaster({ type: 'ITEM', name: nameToCreate });
     try {
-      const res = await fetch("http://127.0.0.1:8000/api/purchase-item/create-item", {
+      const res = await fetch("/api/purchase-item/create-item", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: nameToCreate, uom: uom || "PCS", parent_group: "Primary" })
@@ -398,7 +398,7 @@ export function ItemWiseMode({ onPostSuccess }) {
       showToast(`Created new Tally item: ${nameToCreate}`);
 
       // Re-fetch metadata instead of manual cache mutation
-      await fetch("http://127.0.0.1:8000/api/purchase-item/metadata")
+      await fetch("/api/purchase-item/metadata")
         .then(r => r.json())
         .then(d => setMeta(prev => ({ ...prev, ...d })))
         .catch(err => console.error(err));
@@ -426,7 +426,7 @@ export function ItemWiseMode({ onPostSuccess }) {
     setItems(newItems);
 
     if (mappedName) {
-      fetch("http://127.0.0.1:8000/api/purchase-item/save-alias", {
+      fetch("/api/purchase-item/save-alias", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ original_name: newItems[index].name, mapped_name: mappedName })
@@ -496,7 +496,7 @@ export function ItemWiseMode({ onPostSuccess }) {
       let tallyDate = new Date().toISOString().split('T')[0].replace(/-/g, '');
       if (invoice.date) tallyDate = invoice.date.replace(/-/g, '');
 
-      const res = await fetch("http://127.0.0.1:8000/api/purchase-item/post", {
+      const res = await fetch("/api/purchase-item/post", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...invoice, tally_date: tallyDate, items })
@@ -524,7 +524,7 @@ export function ItemWiseMode({ onPostSuccess }) {
   const handleCreateSupplier = async (supplierName) => {
     setCreatingMaster({ type: 'LEDGER', name: supplierName });
     try {
-      const res = await fetch("http://127.0.0.1:8000/api/purchase/create-supplier", {
+      const res = await fetch("/api/purchase/create-supplier", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: supplierName })
@@ -536,7 +536,7 @@ export function ItemWiseMode({ onPostSuccess }) {
       setInvoice(prev => ({ ...prev, supplier: supplierName }));
       
       // Re-fetch metadata
-      fetch("http://127.0.0.1:8000/api/purchase-item/metadata")
+      fetch("/api/purchase-item/metadata")
         .then(r => r.json())
         .then(d => setMeta(prev => ({ ...prev, ...d })))
         .catch(err => console.error(err));
@@ -560,7 +560,7 @@ export function ItemWiseMode({ onPostSuccess }) {
 
     fd.append("column_mapping", JSON.stringify(payload));
     try {
-      const res = await fetch("http://127.0.0.1:8000/api/purchase-item/extract", { method: "POST", body: fd });
+      const res = await fetch("/api/purchase-item/extract", { method: "POST", body: fd });
       if (!res.ok) {
         const errorData = await res.json();
         throw new Error(errorData.detail || "Extraction failed");

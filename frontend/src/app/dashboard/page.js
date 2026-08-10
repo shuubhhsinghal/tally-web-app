@@ -175,14 +175,14 @@ export default function Dashboard() {
 
   const fetchStats = async () => {
     try {
-      const res = await fetch('http://127.0.0.1:8000/api/dashboard/stats');
+      const res = await fetch('/api/dashboard/stats');
       if (res.ok) {
         const data = await res.json();
         setStats(data);
         localStorage.setItem('dash_stats', JSON.stringify(data));
       }
 
-      const actRes = await fetch('http://127.0.0.1:8000/api/dashboard/activity');
+      const actRes = await fetch('/api/dashboard/activity');
       if (actRes.ok) {
         const data = await actRes.json();
         setActivities(data);
@@ -238,7 +238,7 @@ export default function Dashboard() {
 
   const handleCardClick = async (id) => {
     try {
-      const res = await fetch(`http://127.0.0.1:8000/api/dashboard/activity/${id}`);
+      const res = await fetch(`/api/dashboard/activity/${id}`);
       if (res.ok) {
         const data = await res.json();
         setSelectedItem(data);
@@ -266,7 +266,7 @@ export default function Dashboard() {
   const handleRebuildSave = async () => {
     setIsSaving(true);
     try {
-      const res = await fetch(`http://127.0.0.1:8000/api/dashboard/activity/${selectedItem.id}/rebuild`, {
+      const res = await fetch(`/api/dashboard/activity/${selectedItem.id}/rebuild`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ payload: editPayload })
@@ -288,7 +288,7 @@ export default function Dashboard() {
   const handleSaveItem = async () => {
     setIsSaving(true);
     try {
-      const res = await fetch(`http://127.0.0.1:8000/api/dashboard/activity/${selectedItem.id}`, {
+      const res = await fetch(`/api/dashboard/activity/${selectedItem.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(itemDetails)
@@ -307,7 +307,7 @@ export default function Dashboard() {
 
   const handleRetryItem = async () => {
     try {
-      const res = await fetch(`http://127.0.0.1:8000/api/dashboard/activity/${selectedItem.id}/retry`, { method: 'POST' });
+      const res = await fetch(`/api/dashboard/activity/${selectedItem.id}/retry`, { method: 'POST' });
       if (!res.ok) throw new Error("Retry failed");
 
       showToast("Item queued for retry");
@@ -327,7 +327,7 @@ export default function Dashboard() {
       danger: true,
       onConfirm: async () => {
         try {
-          const res = await fetch(`http://127.0.0.1:8000/api/dashboard/activity/${selectedItem.id}`, { method: 'DELETE' });
+          const res = await fetch(`/api/dashboard/activity/${selectedItem.id}`, { method: 'DELETE' });
           if (!res.ok) throw new Error("Delete failed");
 
           showToast("Item deleted");

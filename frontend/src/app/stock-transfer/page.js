@@ -42,12 +42,12 @@ export default function StockTransfer() {
     }
 
     // 2. Silently refetch in background to keep cache fresh
-    fetch("http://127.0.0.1:8000/api/stock-transfer/metadata")
+    fetch("/api/stock-transfer/metadata")
       .then(res => res.json())
       .then(data => { setMeta(data); localStorage.setItem('st_meta_cache', JSON.stringify(data)); })
       .catch(err => console.error("Failed to load metadata", err));
       
-    fetch("http://127.0.0.1:8000/api/stock-transfer/items")
+    fetch("/api/stock-transfer/items")
       .then(res => res.json())
       .then(data => {
         setItemCache(data);
@@ -66,7 +66,7 @@ export default function StockTransfer() {
     setLoading(true);
     
     try {
-      const response = await fetch("http://127.0.0.1:8000/api/stock-transfer/preview", {
+      const response = await fetch("/api/stock-transfer/preview", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -96,7 +96,7 @@ export default function StockTransfer() {
   const handlePost = async () => {
     setPosting(true);
     try {
-      const response = await fetch("http://127.0.0.1:8000/api/stock-transfer/post", {
+      const response = await fetch("/api/stock-transfer/post", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

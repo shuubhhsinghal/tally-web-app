@@ -42,7 +42,7 @@ export default function BankStatementInteractive() {
 
   const fetchAllRules = async () => {
     try {
-      const res = await fetch("http://127.0.0.1:8000/api/bank-statement/mappings");
+      const res = await fetch("/api/bank-statement/mappings");
       if (res.ok) {
         const data = await res.json();
         const grouped = {};
@@ -60,7 +60,7 @@ export default function BankStatementInteractive() {
 
   const fetchLedgers = async () => {
     try {
-      const res = await fetch("http://127.0.0.1:8000/api/bank-statement/ledgers");
+      const res = await fetch("/api/bank-statement/ledgers");
       if (res.ok) setLedgerCache(await res.json());
     } catch (e) {
       console.error("Failed to load ledgers", e);
@@ -85,7 +85,7 @@ export default function BankStatementInteractive() {
     if (password) fd.append("password", password);
 
     try {
-      const res = await fetch("http://127.0.0.1:8000/api/bank-statement/upload", {
+      const res = await fetch("/api/bank-statement/upload", {
         method: "POST",
         body: fd
       });
@@ -105,7 +105,7 @@ export default function BankStatementInteractive() {
 
   const createRule = async (keyword, ledger) => {
     try {
-      await fetch(`http://127.0.0.1:8000/api/bank-statement/mappings`, {
+      await fetch(`/api/bank-statement/mappings`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
@@ -169,7 +169,7 @@ export default function BankStatementInteractive() {
       onConfirm: async () => {
         setDeletingRuleId(mappingId);
         try {
-          const res = await fetch(`http://127.0.0.1:8000/api/bank-statement/mappings/${mappingId}`, {
+          const res = await fetch(`/api/bank-statement/mappings/${mappingId}`, {
             method: 'DELETE'
           });
           if (!res.ok) throw new Error("Delete failed");
@@ -200,8 +200,8 @@ export default function BankStatementInteractive() {
 
     try {
       const url = editingRule.id 
-        ? `http://127.0.0.1:8000/api/bank-statement/mappings/${editingRule.id}`
-        : `http://127.0.0.1:8000/api/bank-statement/mappings`;
+        ? `/api/bank-statement/mappings/${editingRule.id}`
+        : `/api/bank-statement/mappings`;
       
       const method = editingRule.id ? "PUT" : "POST";
       
@@ -237,7 +237,7 @@ export default function BankStatementInteractive() {
         bank_ledger_name: bankLedger
       };
 
-      const res = await fetch("http://127.0.0.1:8000/api/bank-statement/post", {
+      const res = await fetch("/api/bank-statement/post", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
@@ -437,7 +437,7 @@ export default function BankStatementInteractive() {
                           target_ledger: quickRuleModal.target_ledger.trim(),
                           cost_center: quickRuleModal.cost_center ? quickRuleModal.cost_center.trim() : null
                         };
-                        const res = await fetch(`http://127.0.0.1:8000/api/bank-statement/mappings`, {
+                        const res = await fetch(`/api/bank-statement/mappings`, {
                           method: 'POST',
                           headers: { "Content-Type": "application/json" },
                           body: JSON.stringify(payload)

@@ -50,7 +50,7 @@ export default function MastersPage() {
   const fetchMasters = async () => {
     setLoading(true);
     try {
-      const res = await fetch("http://127.0.0.1:8000/api/masters");
+      const res = await fetch("/api/masters");
       if (!res.ok) throw new Error("Failed to fetch masters");
       const json = await res.json();
       setData(json);

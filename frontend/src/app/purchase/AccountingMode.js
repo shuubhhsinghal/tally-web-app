@@ -24,7 +24,7 @@ export function AccountingMode({ onPostSuccess }) {
   const [meta, setMeta] = useState({ suppliers: [], stores: ["Mahagun", "Vvip", "Gulshan"] });
 
   useEffect(() => {
-    fetch("http://127.0.0.1:8000/api/purchase/metadata")
+    fetch("/api/purchase/metadata")
       .then(res => res.json())
       .then(data => setMeta(prev => ({...prev, suppliers: data.suppliers || []})))
       .catch(err => console.error("Failed to load metadata", err));
@@ -52,7 +52,7 @@ export function AccountingMode({ onPostSuccess }) {
         cost_center: formData.cost_center,
       };
 
-      const response = await fetch("http://127.0.0.1:8000/api/purchase/post", {
+      const response = await fetch("/api/purchase/post", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),

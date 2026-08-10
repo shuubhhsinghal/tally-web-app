@@ -38,12 +38,12 @@ GEMINI_API_KEY=your_google_ai_studio_key
 TALLY_URL=http://127.0.0.1:9000
 ```
 
-**Run the Backend:**
+**Run the Backend (Development/Local):**
 ```bash
 cd backend
-python main.py
+uvicorn main:app --reload --port 8000
 ```
-*(This starts the FastAPI server and the Tally background synchronization worker.)*
+*(This starts the FastAPI server and the Tally background synchronization worker on `127.0.0.1:8000`.)*
 
 ### 2. Frontend Setup (Next.js)
 
@@ -55,7 +55,8 @@ npm install
 npm run dev
 ```
 
-The frontend will start at `http://localhost:3000`.
+The frontend will start at `http://localhost:3000`. 
+**Note:** The Next.js frontend is configured to automatically proxy all API requests (`/api/*`) to the backend running locally at `http://127.0.0.1:8000`. When deploying to a VM, you only need to expose the Next.js frontend port (3000) to the internet; the backend can safely remain bound to `127.0.0.1`.
 
 ## Detailed Documentation
 

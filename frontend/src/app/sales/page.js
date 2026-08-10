@@ -37,7 +37,7 @@ export default function SalesVoucher() {
   const [meta, setMeta] = useState({ customers: [] });
 
   useEffect(() => {
-    fetch("http://127.0.0.1:8000/api/sales/metadata")
+    fetch("/api/sales/metadata")
       .then(res => res.json())
       .then(data => setMeta(data))
       .catch(err => console.error("Failed to load metadata", err));
@@ -51,7 +51,7 @@ export default function SalesVoucher() {
     e.preventDefault();
     setLoading(true);
     try {
-      const response = await fetch("http://127.0.0.1:8000/api/sales/preview", {
+      const response = await fetch("/api/sales/preview", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -81,7 +81,7 @@ export default function SalesVoucher() {
         ? formData.narration 
         : `Recorded sales of ₹${formData.amount} for ${formData.ledger}`;
 
-      const response = await fetch("http://127.0.0.1:8000/api/sales/post", {
+      const response = await fetch("/api/sales/post", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
