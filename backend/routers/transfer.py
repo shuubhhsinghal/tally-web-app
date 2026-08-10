@@ -3,7 +3,7 @@ from pydantic import BaseModel
 import requests
 import os
 from xml.sax.saxutils import escape
-from backend.database import get_all_ledgers, queue_operation
+from backend.database import get_all_ledgers, queue_operation, update_queue_status
 from backend.services.tally_response import parse_tally_response
 
 router = APIRouter()
@@ -82,16 +82,24 @@ async def post_transfer(payload: TransferRequest):
   </BODY>
 </ENVELOPE>"""
 
+    # Queue-First Architecture: Always save transaction to DB before attempting to send
+    queue_id = queue_operation("POST_VOUCHER", xml_data, payload.model_dump(), f"Transfer: {payload.amount} from {payload.from_account}")
+
     try:
         response = requests.post(TALLY_URL, data=xml_data.encode('utf-8'), timeout=10)
         parsed = parse_tally_response(response.text, "POST_VOUCHER")
+        
         if not parsed["is_success"]:
+            update_queue_status(queue_id, "FAILED", parsed['error_message'])
             raise HTTPException(status_code=400, detail=f"Tally rejected the entry: {parsed['error_message']}")
+            
+        update_queue_status(queue_id, "SYNCED")
         return {"status": "success", "message": "Contra entry posted successfully"}
     except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
-        queue_operation("POST_VOUCHER", xml_data, payload.model_dump(), f"Transfer: {payload.amount} from {payload.from_account}")
+        # Already marked as PENDING in the DB, leave it for the background worker
         return {"status": "queued", "message": "Saved to offline queue."}
     except HTTPException:
         raise
     except Exception as e:
+        update_queue_status(queue_id, "FAILED", str(e))
         raise HTTPException(status_code=500, detail=str(e))

@@ -3,7 +3,7 @@ from pydantic import BaseModel
 import json
 import os
 from fastapi import HTTPException
-from backend.database import get_all_stock_items, queue_operation
+from backend.database import get_all_stock_items, queue_operation, update_queue_status
 import requests
 from backend.services.tally_response import parse_tally_response
 
@@ -174,16 +174,24 @@ async def post_transfer(payload: PostRequest):
   </BODY>
 </ENVELOPE>"""
 
+    # Queue-First Architecture: Always save transaction to DB before attempting to send
+    queue_id = queue_operation("POST_VOUCHER", xml_payload, payload.model_dump(), f"Stock Transfer: {payload.qty} pcs of {safe_item}")
+
     try:
         response = requests.post(TALLY_URL, data=xml_payload.encode('utf-8'), timeout=10)
         parsed = parse_tally_response(response.text, "POST_VOUCHER")
+        
         if not parsed["is_success"]:
+            update_queue_status(queue_id, "FAILED", parsed['error_message'])
             raise HTTPException(status_code=400, detail=f"Tally rejected the entry: {parsed['error_message']}")
+            
+        update_queue_status(queue_id, "SYNCED")
         return {"status": "success", "message": "Successfully posted to Tally"}
     except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
-        queue_operation("POST_VOUCHER", xml_payload, payload.model_dump(), f"Stock Transfer: {payload.qty} pcs of {safe_item}")
+        # Already marked as PENDING in the DB, leave it for the background worker
         return {"status": "queued", "message": "Saved to offline queue."}
     except HTTPException:
         raise
     except Exception as e:
+        update_queue_status(queue_id, "FAILED", str(e))
         raise HTTPException(status_code=500, detail=str(e))

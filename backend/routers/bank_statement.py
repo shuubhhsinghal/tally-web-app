@@ -523,19 +523,23 @@ async def post_to_tally(payload: TransactionPayload):
             "description": desc
         })
 
-    # Preflight Check
-    tally_online = False
-    try:
-        r = requests.get(TALLY_URL, timeout=2)
-        tally_online = (r.status_code == 200)
-    except:
-        tally_online = False
-        
-    if not tally_online:
-        # Definite offline -> Queue individually
-        operations = []
-        for pv in prepared_vouchers:
-            single_envelope = f"""<ENVELOPE>
+    # Queue-First Architecture: Insert individually first
+    queue_ids = []
+    xml_lines = [
+        '<ENVELOPE>',
+        '  <HEADER>',
+        '    <TALLYREQUEST>Import Data</TALLYREQUEST>',
+        '  </HEADER>',
+        '  <BODY>',
+        '    <IMPORTDATA>',
+        '      <REQUESTDESC>',
+        '        <REPORTNAME>Vouchers</REPORTNAME>',
+        '      </REQUESTDESC>',
+        '      <REQUESTDATA>'
+    ]
+    
+    for pv in prepared_vouchers:
+        single_envelope = f"""<ENVELOPE>
   <HEADER>
     <TALLYREQUEST>Import Data</TALLYREQUEST>
   </HEADER>
@@ -549,32 +553,13 @@ async def post_to_tally(payload: TransactionPayload):
     </IMPORTDATA>
   </BODY>
 </ENVELOPE>"""
-            operations.append({
-                "operation_type": "POST_VOUCHER",
-                "xml_data": single_envelope,
-                "payload": pv["payload"],
-                "description": pv["description"]
-            })
-        if operations:
-            queue_operations_bulk(operations)
-        return {"status": "queued", "message": f"{len(operations)} individual vouchers saved to offline queue."}
-
-    # Online -> Combine and send
-    xml_lines = [
-        '<ENVELOPE>',
-        '  <HEADER>',
-        '    <TALLYREQUEST>Import Data</TALLYREQUEST>',
-        '  </HEADER>',
-        '  <BODY>',
-        '    <IMPORTDATA>',
-        '      <REQUESTDESC>',
-        '        <REPORTNAME>Vouchers</REPORTNAME>',
-        '      </REQUESTDESC>',
-        '      <REQUESTDATA>'
-    ]
-    for pv in prepared_vouchers:
-        xml_lines.append(pv['xml_block'])
+        # Save as PENDING
+        qid = queue_operation("POST_VOUCHER", single_envelope, pv["payload"], pv["description"])
+        queue_ids.append(qid)
         
+        # Prepare combined for online send
+        xml_lines.append(pv['xml_block'])
+
     xml_lines.extend([
         '      </REQUESTDATA>',
         '    </IMPORTDATA>',
@@ -587,14 +572,20 @@ async def post_to_tally(payload: TransactionPayload):
     try:
         response = requests.post(TALLY_URL, data=xml_data, timeout=5)
         if "<LINEERROR>" in response.text:
+            for qid in queue_ids:
+                update_queue_status(qid, "FAILED", "Tally rejected the vouchers. See response for details.")
             raise HTTPException(status_code=400, detail="Tally rejected the vouchers.")
+            
+        for qid in queue_ids:
+            update_queue_status(qid, "SYNCED")
         return {"status": "success", "message": "Successfully posted to Tally"}
-    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
-        # Ambiguous failure -> Grouped FAILED record
-        failed_payload = payload.model_dump()
-        failed_payload["delivery_uncertain"] = True
-        failed_payload["delivery_uncertain_reason"] = "post_attempt_no_confirmation"
         
-        qid = queue_operation("POST_VOUCHER", xml_data.decode('utf-8'), failed_payload, "Bank Statement Vouchers")
-        update_queue_status(qid, "FAILED", "Bank statement delivery status is unknown. The request was sent toward Tally but confirmation was not received. Verify vouchers in Tally before retrying to avoid duplicates.")
-        return {"status": "queued", "message": "Saved to offline queue as FAILED due to unknown delivery status."}
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+        # Network down. They are already PENDING in the db!
+        return {"status": "queued", "message": f"{len(queue_ids)} individual vouchers saved to offline queue."}
+    except HTTPException:
+        raise
+    except Exception as e:
+        for qid in queue_ids:
+            update_queue_status(qid, "FAILED", str(e))
+        raise HTTPException(status_code=500, detail=str(e))

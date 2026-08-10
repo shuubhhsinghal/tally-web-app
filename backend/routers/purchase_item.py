@@ -20,7 +20,7 @@ import sqlite3
 from backend.database import (
     get_all_ledgers, get_all_stock_items, get_all_uoms, get_all_aliases,
     save_alias as db_save_alias, queue_operation, record_purchase_rate, get_purchase_rates,
-    get_db
+    get_db, update_queue_status
 )
 from backend.services.tally_response import parse_tally_response
 from backend.utils.math_reconciler import reconcile_full_invoice
@@ -781,6 +781,9 @@ async def post_purchase_item(payload: PurchaseItemPostRequest):
     print("\n--- FINAL TALLY XML PAYLOAD ---", flush=True)
     print(xml, flush=True)
     print("-------------------------------\n", flush=True)
+    
+    # Queue-First Architecture: Always save transaction to DB before attempting to send
+    queue_id = queue_operation("POST_VOUCHER", xml, payload.model_dump(), f"Purchase Item Invoice: {inv_no} from {supplier}")
 
     try:
         from backend.database import get_master_dependency_state, is_master_pending_sync
@@ -798,25 +801,32 @@ async def post_purchase_item(payload: PurchaseItemPostRequest):
         for entity_type, raw_name, definition_payload in dependencies:
             state, error_msg = get_master_dependency_state(entity_type, raw_name, definition_payload)
             if state == "FAILED":
+                update_queue_status(queue_id, "FAILED", f"Cannot post invoice because {entity_type.lower()} '{raw_name}' failed to sync to Tally.")
                 raise HTTPException(status_code=400, detail=f"Cannot post invoice because {entity_type.lower()} '{raw_name}' failed to sync to Tally. Resolve the master first.")
             elif state == "MISSING":
+                update_queue_status(queue_id, "FAILED", f"Cannot post invoice because {entity_type.lower()} '{raw_name}' is not available in Tally or pending sync.")
                 raise HTTPException(status_code=400, detail=f"Cannot post invoice because {entity_type.lower()} '{raw_name}' is not available in Tally or pending sync. Create or refresh the master before posting.")
             elif state == "CONFLICT":
+                update_queue_status(queue_id, "FAILED", f"Definition conflict for {entity_type.lower()} '{raw_name}': {error_msg}")
                 raise HTTPException(status_code=409, detail=f"Cannot post invoice due to definition conflict for {entity_type.lower()} '{raw_name}': {error_msg}")
             elif is_master_pending_sync(state):
                 has_pending = True
                 
         if has_pending:
-            queue_operation("POST_VOUCHER", xml, payload.model_dump(), f"Purchase Item Invoice: {inv_no} from {supplier}")
+            # Leave as PENDING
             return {"status": "queued", "reason": "pending_master_dependency", "message": "Invoice saved to offline queue because a required master is still pending sync to Tally."}
             
         response = requests.post(TALLY_URL, data=xml.encode('utf-8'), timeout=15)
         parsed = parse_tally_response(response.text, "POST_VOUCHER")
+        
         if not parsed["is_success"]:
+            update_queue_status(queue_id, "FAILED", parsed['error_message'])
             raise HTTPException(status_code=400, detail=f"Tally rejected the entry: {parsed['error_message']}")
+            
+        update_queue_status(queue_id, "SYNCED")
         return {"status": "success", "message": "Successfully posted to Tally."}
     except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
-        queue_operation("POST_VOUCHER", xml, payload.model_dump(), f"Purchase Item Invoice: {inv_no} from {supplier}")
+        # Already marked as PENDING in the DB, leave it for the background worker
         return {"status": "queued", "message": "Tally is offline. Invoice saved to queue and will push automatically."}
     except HTTPException:
         raise
@@ -824,4 +834,5 @@ async def post_purchase_item(payload: PurchaseItemPostRequest):
         print("\n!!! EXCEPTION IN PURCHASE-ITEM POST !!!", flush=True)
         traceback.print_exc()
         print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n", flush=True)
+        update_queue_status(queue_id, "FAILED", str(e))
         raise HTTPException(status_code=500, detail=str(e))

@@ -320,10 +320,8 @@ export default function Dashboard() {
 
   const handleDeleteItem = async () => {
     showConfirmDialog({
-      title: "Delete Transaction",
-      message: "Are you sure you want to delete this from the queue? This cannot be undone.",
-      confirmText: "Delete",
-      cancelText: "Cancel",
+      title: "Delete Item?",
+      message: "Are you sure you want to permanently delete this item from the queue?",
       danger: true,
       onConfirm: async () => {
         try {
@@ -333,11 +331,23 @@ export default function Dashboard() {
           showToast("Item deleted");
           setSelectedItem(null);
           fetchStats();
-        } catch (e) {
-          showToast(e.message, 'error');
+        } catch (err) {
+          showToast("Failed to delete", "error");
         }
       }
     });
+  };
+
+  const handleClearFinished = async () => {
+    try {
+      const res = await fetch('/api/dashboard/activity/clear', { method: 'POST' });
+      if (!res.ok) throw new Error("Clear failed");
+      showToast("Cleared finished activities");
+      fetchStats();
+    } catch (err) {
+      console.error(err);
+      showToast("Failed to clear", "error");
+    }
   };
 
   if (!mounted) return null;
@@ -554,14 +564,7 @@ export default function Dashboard() {
           <div className="flex justify-between items-center px-1">
             <h2 className="text-sm font-bold text-gray-900 dark:text-white uppercase tracking-wider">Recent Activity</h2>
             <button 
-              onClick={() => {
-                const idsToHide = activities
-                  .filter(a => getStatus(a.status) === 'failed' || getStatus(a.status) === 'synced')
-                  .map(a => a.id);
-                if (idsToHide.length > 0) {
-                  setHiddenActivityIds(prev => new Set([...prev, ...idsToHide]));
-                }
-              }}
+              onClick={handleClearFinished}
               className="text-[10px] font-bold uppercase tracking-wider text-teal-600 dark:text-teal-400 hover:text-teal-700 hover:underline"
             >
               Clear Finished

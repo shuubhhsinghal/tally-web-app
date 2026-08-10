@@ -7,7 +7,7 @@ import datetime
 import traceback
 from xml.sax.saxutils import escape
 
-from backend.database import get_all_ledgers, queue_operation, get_db
+from backend.database import get_all_ledgers, queue_operation, get_db, update_queue_status
 from backend.services.tally_response import parse_tally_response
 
 router = APIRouter()
@@ -208,28 +208,39 @@ async def post_purchase(payload: PurchaseRequest):
   </IMPORTDATA></BODY>
 </ENVELOPE>"""
 
+    # Queue-First Architecture: Always save transaction to DB before attempting to send
+    queue_id = queue_operation("POST_VOUCHER", xml_data, payload.model_dump(), f"Purchase Invoice: {payload.invoice_number} from {payload.supplier}")
+
     try:
         from backend.database import get_master_dependency_state, is_master_pending_sync
         state, error_msg = get_master_dependency_state("LEDGER", payload.supplier, None)
         if state == "FAILED":
+            update_queue_status(queue_id, "FAILED", f"Cannot post purchase because ledger '{payload.supplier}' failed to sync to Tally.")
             raise HTTPException(status_code=400, detail=f"Cannot post purchase because ledger '{payload.supplier}' failed to sync to Tally. Resolve the master first.")
         elif state == "MISSING":
+            update_queue_status(queue_id, "FAILED", f"Cannot post purchase because ledger '{payload.supplier}' is not available in Tally or pending sync.")
             raise HTTPException(status_code=400, detail=f"Cannot post purchase because ledger '{payload.supplier}' is not available in Tally or pending sync. Create or refresh the master before posting.")
         elif state == "CONFLICT":
+            update_queue_status(queue_id, "FAILED", f"Definition conflict for ledger '{payload.supplier}': {error_msg}")
             raise HTTPException(status_code=409, detail=f"Cannot post purchase due to definition conflict for ledger '{payload.supplier}': {error_msg}")
         elif is_master_pending_sync(state):
-            queue_operation("POST_VOUCHER", xml_data, payload.model_dump(), f"Purchase Voucher: {payload.invoice_number} from {payload.supplier}")
+            # Leave as PENDING
             return {"status": "queued", "reason": "pending_master_dependency", "message": "Purchase saved to offline queue because a required master is still pending sync to Tally."}
             
         response = requests.post(TALLY_URL, data=xml_data.encode('utf-8'), timeout=10)
         parsed = parse_tally_response(response.text, "POST_VOUCHER")
+        
         if not parsed["is_success"]:
+            update_queue_status(queue_id, "FAILED", parsed['error_message'])
             raise HTTPException(status_code=400, detail=f"Tally rejected the entry: {parsed['error_message']}")
+            
+        update_queue_status(queue_id, "SYNCED")
         return {"status": "success", "message": "Purchase entry posted successfully"}
     except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
-        queue_operation("POST_VOUCHER", xml_data, payload.model_dump(), f"Purchase Invoice: {payload.invoice_number}")
+        # Already marked as PENDING in the DB, leave it for the background worker
         return {"status": "queued", "message": "Saved to offline queue."}
     except HTTPException:
         raise
     except Exception as e:
+        update_queue_status(queue_id, "FAILED", str(e))
         raise HTTPException(status_code=500, detail=str(e))

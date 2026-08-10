@@ -178,6 +178,16 @@ def init_db():
             cursor.execute("ALTER TABLE stock_items ADD COLUMN last_purchase_date TEXT")
         except Exception:
             pass # Column exists
+            
+        try:
+            cursor.execute("ALTER TABLE offline_queue ADD COLUMN updated_at TEXT")
+        except sqlite3.OperationalError:
+            pass # Column exists
+            
+        try:
+            cursor.execute("ALTER TABLE offline_queue ADD COLUMN is_hidden BOOLEAN DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass # Column exists
 
         conn.commit()
 

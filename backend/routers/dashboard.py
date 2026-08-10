@@ -49,7 +49,7 @@ def get_recent_activity():
     try:
         with get_db() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT id, operation_type, status, description, created_at FROM offline_queue ORDER BY id DESC LIMIT 10")
+            cursor.execute("SELECT id, operation_type, status, description, created_at FROM offline_queue WHERE COALESCE(is_hidden, 0) = 0 ORDER BY id DESC LIMIT 10")
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
     except Exception as e:
@@ -111,6 +111,17 @@ def delete_activity(item_id: int):
             cursor.execute("DELETE FROM offline_queue WHERE id = ?", (item_id,))
             conn.commit()
             return {"message": "Deleted successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/activity/clear")
+def clear_finished_activity():
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE offline_queue SET is_hidden = 1 WHERE status IN ('SYNCED', 'FAILED')")
+            conn.commit()
+            return {"message": "Finished activities cleared successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
