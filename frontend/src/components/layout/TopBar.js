@@ -9,7 +9,7 @@ export default function TopBar({ title, showBack = false, onBack }) {
   const { theme, setTheme } = useTheme();
   const router = useRouter();
   const [mounted, setMounted] = useState(false);
-  const [isOnline, setIsOnline] = useState(true);
+  const [isOnline, setIsOnline] = useState(null);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -48,9 +48,9 @@ export default function TopBar({ title, showBack = false, onBack }) {
             </button>
           ) : (
             <div className="flex items-center gap-2">
-              <div className={`w-2.5 h-2.5 rounded-full ${isOnline ? 'bg-green-500' : 'bg-red-500'}`} />
+              <div className={`w-2.5 h-2.5 rounded-full ${isOnline === null ? 'bg-yellow-500 animate-pulse' : isOnline ? 'bg-green-500' : 'bg-red-500'}`} />
               <span className="text-xs font-semibold text-gray-500 dark:text-gray-400">
-                {isOnline ? 'Tally connected' : 'Tally offline'}
+                {isOnline === null ? 'Connecting...' : isOnline ? 'Tally connected' : 'Tally offline'}
               </span>
             </div>
           )}
