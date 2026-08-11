@@ -84,7 +84,8 @@ def reconcile_item_math(item: dict, gst_rate_pct: float) -> dict:
     amt = float(item.get("amount") or item.get("printed_amount") or 0.0)
     uom = str(item.get("uom") or "PCS").strip().upper()
 
-    safe_gst = float(gst_rate_pct or 0.0)
+    item_gst = item.get("printed_gst_pct")
+    safe_gst = float(item_gst if item_gst is not None else gst_rate_pct or 0.0)
     tax_factor = 1.0 + (safe_gst / 100.0)
 
     # Effective pre/post discount rates
@@ -139,7 +140,8 @@ def reconcile_mapped_item(item: dict, gst_rate_pct: float, column_mapping: dict)
     amount_includes_gst = column_mapping.get("amount_includes_gst", False)
     discount_treatment = column_mapping.get("discount_treatment", "ignore")
 
-    safe_gst = float(gst_rate_pct or 0.0)
+    item_gst = item.get("printed_gst_pct")
+    safe_gst = float(item_gst if item_gst is not None else gst_rate_pct or 0.0)
     tax_factor = 1.0 + (safe_gst / 100.0)
 
     taxable_rate = round(rate / tax_factor, 2) if rate_includes_gst else rate

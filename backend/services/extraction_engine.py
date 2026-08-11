@@ -54,6 +54,7 @@ class PrintedItemRow(BaseModel):
     ))
     printed_rate: Optional[float] = Field(default=None, description="Rate as printed on the invoice row.")
     printed_discount_pct: Optional[float] = Field(default=None, description="Discount percentage as printed on the invoice row.")
+    printed_gst_pct: Optional[float] = Field(default=None, description="GST percentage as printed on the invoice row (e.g., 5.0, 18.0).")
     printed_amount: Optional[float] = Field(default=None, description="Amount as printed on the invoice row.")
 
 
@@ -107,6 +108,7 @@ ITEM EXTRACTION OUTPUT FORMAT:
         - "printed_uom": unit of measure (e.g. "PCS", "KGS", "PKT")
         - "printed_rate": the printed unit rate/price as a number (e.g. 106.66)
         - "printed_discount_pct": printed discount percentage as a number (e.g. 0.0 or 50.0)
+        - "printed_gst_pct": printed GST percentage as a number (e.g. 5.0, 18.0, 40.0)
         - "printed_amount": printed line amount/total as a number (e.g. 671.96)
 
         Also return "detected_headers" as a list of strings at the root level, containing the 
@@ -147,6 +149,7 @@ and in which printed columns. This is for auditability and enables downstream
            - "printed_uom": unit of measure (e.g., "PCS", "KGS")
            - "printed_rate": the actual billed unit price (Look for headers like "Price Rs.", "Net Rate", "Billed Rate", or "Taxable Rate"). 
            - "printed_discount_pct": printed discount percentage
+           - "printed_gst_pct": printed GST or tax percentage
            - "printed_amount": printed line amount/total
 
            CRITICAL CONSTRAINTS FOR RATE: 
@@ -157,9 +160,9 @@ and in which printed columns. This is for auditability and enables downstream
            Do NOT return nested arrays like `rate_columns`, `amount_columns`,
            `_rate_columns`, or `_amount_columns`. Only the flat keys `reasoning`,
            `name`, `printed_qty`, `printed_uom`, `printed_rate`,
-           `printed_discount_pct`, and `printed_amount` are allowed.
+           `printed_discount_pct`, `printed_gst_pct`, and `printed_amount` are allowed.
         9. DO NOT OMIT PRINTED NUMBERS (CRITICAL): If a number is visibly printed in the
-           rate column or the amount column on the invoice image, you MUST transcribe it.
+           rate column, tax column, or the amount column on the invoice image, you MUST transcribe it.
            Do NOT return 0 or null for `printed_rate` or `printed_amount` when there are numbers printed
            in those columns. Only return null when the column is genuinely absent or blank
            on that row.

@@ -161,8 +161,17 @@ async def extract_invoice(
                 "printed_uom": it.get("printed_uom", it.get("uom")),
                 "printed_rate": it.get("printed_rate", it.get("rate")),
                 "printed_discount_pct": it.get("printed_discount_pct", it.get("discount")),
+                "printed_gst_pct": it.get("printed_gst_pct"),
                 "printed_amount": it.get("printed_amount", it.get("amount")),
             })
+
+        if gst_rate == 0.0:
+            gst_rates = [it.get("printed_gst_pct") for it in raw_printed_items if it.get("printed_gst_pct") is not None]
+            if gst_rates:
+                from collections import Counter
+                most_common = Counter(gst_rates).most_common(1)[0][0]
+                gst_rate = float(most_common)
+                data["gst_rate"] = gst_rate
 
         reconciled_items = reconcile_full_invoice(raw_printed_items, data, column_mapping=parsed_mapping)
 
@@ -237,9 +246,18 @@ async def extract_invoice(
                                     "printed_uom": it.get("printed_uom", it.get("uom")),
                                     "printed_rate": it.get("printed_rate", it.get("rate")),
                                     "printed_discount_pct": it.get("printed_discount_pct", it.get("discount")),
+                                    "printed_gst_pct": it.get("printed_gst_pct"),
                                     "printed_amount": it.get("printed_amount", it.get("amount")),
                                 })
                             
+                            gst_rate2 = float(data2.get("gst_rate") or 0.0)
+                            if gst_rate2 == 0.0:
+                                gst_rates2 = [it.get("printed_gst_pct") for it in raw_printed_items2 if it.get("printed_gst_pct") is not None]
+                                if gst_rates2:
+                                    from collections import Counter
+                                    most_common2 = Counter(gst_rates2).most_common(1)[0][0]
+                                    data2["gst_rate"] = float(most_common2)
+
                             reconciled_items2 = reconcile_full_invoice(raw_printed_items2, data2, column_mapping=saved_mapping)
                             calc_grand2 = calculate_grand_total(reconciled_items2, data2)
                             diff2 = abs(calc_grand2 - printed_grand_total)
