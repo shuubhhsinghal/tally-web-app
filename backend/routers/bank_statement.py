@@ -197,12 +197,12 @@ async def create_tally_ledger(payload: dict):
         raise
 
 @router.post("/upload")
-async def upload_bank_statement(
+def upload_bank_statement(
     file: UploadFile = File(...),
     bank_ledger_name: str = Form(...),
     password: Optional[str] = Form(None)
 ):
-    contents = await file.read()
+    contents = file.file.read()
     ext = os.path.splitext(file.filename)[1].lower()
     
     json_txns = []
@@ -425,7 +425,7 @@ async def upload_bank_statement(
     return {"transactions": transactions}
 
 @router.post("/post")
-async def post_to_tally(payload: TransactionPayload):
+def post_to_tally(payload: TransactionPayload):
     transactions = payload.transactions
     bank_ledger_name = payload.bank_ledger_name
     
