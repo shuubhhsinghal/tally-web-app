@@ -1,9 +1,15 @@
 import cv2
 import pytesseract
 import numpy as np
+import shutil
+import logging
 
-# For Apple Silicon (M1/M2/M3) Macs:
-pytesseract.pytesseract.tesseract_cmd = '/opt/homebrew/bin/tesseract'
+# Dynamically discover Tesseract path for cross-platform compatibility (macOS/Linux)
+tesseract_path = shutil.which('tesseract')
+if tesseract_path:
+    pytesseract.pytesseract.tesseract_cmd = tesseract_path
+else:
+    logging.warning("Tesseract executable not found in system PATH. Ensure it is installed.")
 
 def crop_item_table(image_bytes: bytes) -> bytes:
     """Finds the table header and footer, and crops the image strictly to the items."""
