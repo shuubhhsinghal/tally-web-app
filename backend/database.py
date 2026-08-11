@@ -8,6 +8,8 @@ from contextlib import contextmanager
 from typing import Optional, List
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "tally_sync.db")
+if os.environ.get("TESTING") == "true":
+    DB_PATH = os.path.join(os.path.dirname(__file__), "test_tally_sync.db")
 
 @contextmanager
 def get_db():
