@@ -8,6 +8,7 @@ from xml.sax.saxutils import escape
 from typing import List, Optional, Dict, Any
 
 from fastapi import APIRouter, File, UploadFile, HTTPException, Form
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 import requests
 
@@ -132,7 +133,7 @@ async def extract_invoice(
                 pass
 
         from backend.services.extraction_engine import process_invoice
-        data = process_invoice(file_bytes_list, column_mapping=parsed_mapping)
+        data = await run_in_threadpool(process_invoice, file_bytes_list, parsed_mapping)
 
         if not isinstance(data, dict):
             data = {}
