@@ -166,7 +166,7 @@ async def extract_invoice(
             })
 
         if gst_rate == 0.0:
-            gst_rates = [it.get("printed_gst_pct") for it in raw_printed_items if it.get("printed_gst_pct") is not None]
+            gst_rates = [float(it.get("printed_gst_pct")) for it in raw_printed_items if it.get("printed_gst_pct") is not None and float(it.get("printed_gst_pct")) > 0]
             if gst_rates:
                 from collections import Counter
                 most_common = Counter(gst_rates).most_common(1)[0][0]
@@ -252,7 +252,7 @@ async def extract_invoice(
                             
                             gst_rate2 = float(data2.get("gst_rate") or 0.0)
                             if gst_rate2 == 0.0:
-                                gst_rates2 = [it.get("printed_gst_pct") for it in raw_printed_items2 if it.get("printed_gst_pct") is not None]
+                                gst_rates2 = [float(it.get("printed_gst_pct")) for it in raw_printed_items2 if it.get("printed_gst_pct") is not None and float(it.get("printed_gst_pct")) > 0]
                                 if gst_rates2:
                                     from collections import Counter
                                     most_common2 = Counter(gst_rates2).most_common(1)[0][0]

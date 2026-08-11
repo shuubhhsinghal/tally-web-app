@@ -37,10 +37,10 @@ def crop_item_table(image_bytes: bytes) -> bytes:
     for i, word in enumerate(d['text']):
         clean_word = word.strip().lower()
         if clean_word in ["sgst", "cgst", "subtotal", "total", "round"]:
-            # Set the crop line just above the footer text
+            # Set the crop line just above the footer text (with generous margin to not slice items)
             # Only accept it if it's in the bottom half of the page to avoid false positives
             if d['top'][i] > (img.shape[0] / 3):
-                bottom_y = d['top'][i] - 10
+                bottom_y = d['top'][i] + 30
                 break
                 
     # 3. Crop the image

@@ -112,7 +112,10 @@ ITEM EXTRACTION OUTPUT FORMAT:
         - "printed_amount": printed line amount/total as a number (e.g. 671.96)
 
         Also return "detected_headers" as a list of strings at the root level, containing the 
-        actual visible table header names as closely as possible, from left to right.
+        actual visible table header names from left to right. IMPORTANT: Do NOT split multi-line 
+        headers into multiple list items. For example, if a column header spans two lines like 
+        "Description" over "of Goods", combine them into a single string like "Description of Goods". 
+        The length of the `detected_headers` list MUST exactly match the number of columns in the table.
         Do not convert every heading into generic terms. Preserve terms like "Rate (Incl. of Tax)".
 
         DO NOT return empty lists or nested objects for `printed_rate` or `printed_amount`. Return raw numbers

@@ -54,6 +54,25 @@ def _matches(actual: float, expected: float, tolerance: float = MATCH_TOLERANCE)
     return abs(actual - expected) <= tolerance
 
 
+def get_normalized_gst(item: dict, gst_rate_pct: float, is_inclusive: bool = False, qty: float = 0.0, rate: float = 0.0, amt: float = 0.0) -> float:
+    item_gst = float(item.get("printed_gst_pct") or 0.0)
+    
+    # Reverse-engineer if missing, inclusive, and we have the math
+    if item_gst == 0.0 and is_inclusive and qty > 0 and rate > 0 and amt > 0:
+        pre_tax = qty * rate
+        if amt > pre_tax:
+            inferred_pct = ((amt - pre_tax) / pre_tax) * 100.0
+            brackets = [0.0, 5.0, 12.0, 18.0, 28.0, 40.0]
+            item_gst = min(brackets, key=lambda x: abs(x - inferred_pct))
+
+    safe_gst = item_gst if item_gst > 0 else float(gst_rate_pct or 0.0)
+
+    # Normalize half-rates (CGST/SGST -> Total GST)
+    if safe_gst in [2.5, 6.0, 9.0, 14.0, 20.0]:
+        safe_gst *= 2.0
+
+    return safe_gst
+
 def reconcile_item_math(item: dict, gst_rate_pct: float) -> dict:
     """
     Test algebraic hypotheses against the printed numbers to deduce the
@@ -84,8 +103,7 @@ def reconcile_item_math(item: dict, gst_rate_pct: float) -> dict:
     amt = float(item.get("amount") or item.get("printed_amount") or 0.0)
     uom = str(item.get("uom") or "PCS").strip().upper()
 
-    item_gst = item.get("printed_gst_pct")
-    safe_gst = float(item_gst if item_gst is not None else gst_rate_pct or 0.0)
+    safe_gst = get_normalized_gst(item, gst_rate_pct)
     tax_factor = 1.0 + (safe_gst / 100.0)
 
     # Effective pre/post discount rates
@@ -140,8 +158,7 @@ def reconcile_mapped_item(item: dict, gst_rate_pct: float, column_mapping: dict)
     amount_includes_gst = column_mapping.get("amount_includes_gst", False)
     discount_treatment = column_mapping.get("discount_treatment", "ignore")
 
-    item_gst = item.get("printed_gst_pct")
-    safe_gst = float(item_gst if item_gst is not None else gst_rate_pct or 0.0)
+    safe_gst = get_normalized_gst(item, gst_rate_pct, is_inclusive=amount_includes_gst, qty=qty, rate=rate, amt=amt)
     tax_factor = 1.0 + (safe_gst / 100.0)
 
     taxable_rate = round(rate / tax_factor, 2) if rate_includes_gst else rate
