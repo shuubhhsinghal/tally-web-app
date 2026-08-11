@@ -18,7 +18,7 @@ export default function StockTransfer() {
     qty: "",
     from_store: "",
     to_store: "",
-    date: new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().split('T')[0]
+    date: ""
   });
   
   const [preview, setPreview] = useState(null);
@@ -29,6 +29,12 @@ export default function StockTransfer() {
   const [itemsLoading, setItemsLoading] = useState(true);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setFormData(prev => ({
+      ...prev,
+      date: new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().split('T')[0]
+    }));
+    
     // --- Stale-while-revalidate from localStorage ---
 
     // 1. Load from cache instantly (0ms)

@@ -12,6 +12,7 @@ export default function TopBar({ title, showBack = false, onBack }) {
   const [isOnline, setIsOnline] = useState(true);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setMounted(true);
     // Simple mock ping to check Tally sync status based on user instruction
     const checkSync = async () => {

@@ -17,7 +17,7 @@ export default function PaymentVoucher() {
     debit_ledger: "",
     credit_ledger: "",
     amount: "",
-    date: new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().split('T')[0],
+    date: "",
     cost_center: "",
     narration: ""
   });
@@ -49,6 +49,11 @@ export default function PaymentVoucher() {
   };
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setFormData(prev => ({
+      ...prev,
+      date: new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().split('T')[0]
+    }));
     fetchMetadata();
   }, []);
 

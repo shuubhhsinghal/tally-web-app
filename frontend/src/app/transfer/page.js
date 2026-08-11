@@ -18,7 +18,7 @@ export default function FundTransfer() {
     from_account: "",
     to_account: "",
     narration: "",
-    date: new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().split('T')[0] // Local YYYY-MM-DD
+    date: "" // Local YYYY-MM-DD
   });
   const [preview, setPreview] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -26,6 +26,12 @@ export default function FundTransfer() {
   const [accounts, setAccounts] = useState([]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setFormData(prev => ({
+      ...prev,
+      date: new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().split('T')[0]
+    }));
+
     fetch("/api/transfer/metadata")
       .then(res => res.json())
       .then(data => setAccounts(data.accounts || []))

@@ -27,7 +27,7 @@ export default function SalesVoucher() {
     ledger: "",
     amount: "",
     narration: "",
-    date: new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().split('T')[0] // Local YYYY-MM-DD
+    date: "" // Local YYYY-MM-DD
   });
   
   const [preview, setPreview] = useState(null);
@@ -37,6 +37,12 @@ export default function SalesVoucher() {
   const [meta, setMeta] = useState({ customers: [] });
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setFormData(prev => ({
+      ...prev,
+      date: new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().split('T')[0]
+    }));
+
     fetch("/api/sales/metadata")
       .then(res => res.json())
       .then(data => setMeta(data))

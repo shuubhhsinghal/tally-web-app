@@ -24,9 +24,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Accounting Web App API", version="1.0.0", lifespan=lifespan)
 
+frontend_url = os.environ.get("FRONTEND_URL", "http://localhost:3000")
+allow_origins = [url.strip() for url in frontend_url.split(",")]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allow_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

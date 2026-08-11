@@ -80,6 +80,7 @@ function MasterAutocomplete({ value, onChange, placeholder, confirmed = [], mast
   }, []);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setFocusedIndex(-1);
   }, [search, isOpen]);
 
@@ -130,6 +131,7 @@ function MasterAutocomplete({ value, onChange, placeholder, confirmed = [], mast
       <input
         role="combobox"
         aria-expanded={isOpen}
+        aria-controls="listbox"
         type="text"
         value={isOpen ? search : value}
         onChange={(e) => {
@@ -199,7 +201,7 @@ function MasterAutocomplete({ value, onChange, placeholder, confirmed = [], mast
               ) : (
                 <>
                   <PlusCircle className="w-4 h-4" />
-                  <span className="text-sm font-medium">Create "{search.trim()}" as new Tally {createLabel}</span>
+                  <span className="text-sm font-medium">Create &quot;{search.trim()}&quot; as new Tally {createLabel}</span>
                 </>
               )}
             </div>

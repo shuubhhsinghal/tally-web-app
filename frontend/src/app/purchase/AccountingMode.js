@@ -12,7 +12,7 @@ export function AccountingMode({ onPostSuccess }) {
   const { showToast } = useUI();
 
   const [formData, setFormData] = useState({
-    date: new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().split('T')[0],
+    date: "",
     supplier: "",
     invoice_number: "",
     amount: "",
@@ -24,6 +24,11 @@ export function AccountingMode({ onPostSuccess }) {
   const [meta, setMeta] = useState({ suppliers: [], stores: ["Mahagun", "Vvip", "Gulshan"] });
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setFormData(prev => ({
+      ...prev,
+      date: new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().split('T')[0]
+    }));
     fetch("/api/purchase/metadata")
       .then(res => res.json())
       .then(data => setMeta(prev => ({...prev, suppliers: data.suppliers || []})))
