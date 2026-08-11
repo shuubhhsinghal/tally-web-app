@@ -553,7 +553,9 @@ export function ItemWiseMode({ onPostSuccess }) {
   const handleApplyMapping = async () => {
     setIsExtracting(true);
     const fd = new FormData();
-    fd.append("file", file);
+    stagedFiles.forEach(sf => {
+      fd.append("files", sf.file);
+    });
     
     const payload = { ...colMapping };
     if (!payload.discount_header) {
@@ -565,7 +567,10 @@ export function ItemWiseMode({ onPostSuccess }) {
       const res = await fetch("/api/purchase-item/extract", { method: "POST", body: fd });
       if (!res.ok) {
         const errorData = await res.json();
-        throw new Error(errorData.detail || "Extraction failed");
+        const errorMessage = Array.isArray(errorData.detail) 
+          ? JSON.stringify(errorData.detail) 
+          : errorData.detail;
+        throw new Error(errorMessage || "Extraction failed");
       }
       const data = await res.json();
       
