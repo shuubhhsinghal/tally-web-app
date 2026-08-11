@@ -172,7 +172,11 @@ async def extract_invoice(
                 from collections import Counter
                 most_common = Counter(gst_rates).most_common(1)[0][0]
                 gst_rate = float(most_common)
-                data["gst_rate"] = gst_rate
+                
+        if gst_rate in [2.5, 6.0, 9.0, 14.0, 20.0]:
+            gst_rate *= 2.0
+            
+        data["gst_rate"] = gst_rate
 
         reconciled_items = reconcile_full_invoice(raw_printed_items, data, column_mapping=parsed_mapping)
 
@@ -185,6 +189,12 @@ async def extract_invoice(
             i = float(tx.get("igst", inv_data.get("igst", 0.0)))
             r = float(inv_data.get("rounding_off", 0.0))
             return calc_sub + c + s + i + r
+
+        calc_sub = sum(r["amount"] for r in reconciled_items)
+        if data.get("cgst", 0.0) == 0.0 and data.get("sgst", 0.0) == 0.0 and data.get("igst", 0.0) == 0.0 and gst_rate > 0.0:
+            total_tax = calc_sub * (gst_rate / 100.0)
+            data["cgst"] = round(total_tax / 2, 2)
+            data["sgst"] = round(total_tax / 2, 2)
 
         calculated_grand_total = calculate_grand_total(reconciled_items, data)
         printed_grand_total = data.get("printed_grand_total")
@@ -257,9 +267,21 @@ async def extract_invoice(
                                 if gst_rates2:
                                     from collections import Counter
                                     most_common2 = Counter(gst_rates2).most_common(1)[0][0]
-                                    data2["gst_rate"] = float(most_common2)
+                                    gst_rate2 = float(most_common2)
+
+                            if gst_rate2 in [2.5, 6.0, 9.0, 14.0, 20.0]:
+                                gst_rate2 *= 2.0
+                                
+                            data2["gst_rate"] = gst_rate2
 
                             reconciled_items2 = reconcile_full_invoice(raw_printed_items2, data2, column_mapping=saved_mapping)
+                            
+                            calc_sub2 = sum(r["amount"] for r in reconciled_items2)
+                            if data2.get("cgst", 0.0) == 0.0 and data2.get("sgst", 0.0) == 0.0 and data2.get("igst", 0.0) == 0.0 and gst_rate2 > 0.0:
+                                total_tax2 = calc_sub2 * (gst_rate2 / 100.0)
+                                data2["cgst"] = round(total_tax2 / 2, 2)
+                                data2["sgst"] = round(total_tax2 / 2, 2)
+                                
                             calc_grand2 = calculate_grand_total(reconciled_items2, data2)
                             diff2 = abs(calc_grand2 - printed_grand_total)
                             
