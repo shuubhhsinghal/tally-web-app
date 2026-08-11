@@ -339,7 +339,7 @@ export function ItemWiseMode({ onPostSuccess }) {
     });
 
     try {
-      const res = await fetch("/api/purchase-item/extract", { method: "POST", body: fd });
+      const res = await fetch("/api/extract-proxy", { method: "POST", body: fd });
       if (!res.ok) {
         const errorData = await res.json();
         throw new Error(errorData.detail || "Extraction failed");
@@ -564,7 +564,7 @@ export function ItemWiseMode({ onPostSuccess }) {
 
     fd.append("column_mapping", JSON.stringify(payload));
     try {
-      const res = await fetch("/api/purchase-item/extract", { method: "POST", body: fd });
+      const res = await fetch("/api/extract-proxy", { method: "POST", body: fd });
       if (!res.ok) {
         const errorData = await res.json();
         const errorMessage = Array.isArray(errorData.detail) 
