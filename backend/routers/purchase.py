@@ -88,7 +88,7 @@ async def create_supplier(payload: NewSupplierRequest):
     return {"status": "success", "message": f"Supplier '{payload.name}' processed.", "name": payload.name}
 
 @router.post("/extract")
-async def extract_invoice(file: UploadFile = File(...)):
+def extract_invoice(file: UploadFile = File(...)):
     print(f"--- [EXTRACT] Received file: {file.filename} ({file.content_type}) ---", flush=True)
     import tempfile
     from google import genai
@@ -101,7 +101,7 @@ async def extract_invoice(file: UploadFile = File(...)):
 
         client = genai.Client(api_key=api_key)
         
-        file_bytes = await file.read()
+        file_bytes = file.file.read()
         print(f"--- [EXTRACT] Read {len(file_bytes)} bytes. Calling AI extraction... ---", flush=True)
         
         with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:

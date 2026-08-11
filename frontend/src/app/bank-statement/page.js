@@ -85,7 +85,7 @@ export default function BankStatementInteractive() {
     if (password) fd.append("password", password);
 
     try {
-      const res = await fetch("/api/bank-statement/upload", {
+      const res = await fetch("/api/bank-statement-proxy", {
         method: "POST",
         body: fd
       });

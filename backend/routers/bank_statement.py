@@ -291,7 +291,9 @@ def upload_bank_statement(
             })
 
     elif ext == '.pdf':
-        temp_path = f"temp_{file.filename}"
+        import tempfile
+        temp_dir = tempfile.gettempdir()
+        temp_path = os.path.join(temp_dir, f"temp_{file.filename}")
         with open(temp_path, "wb") as f:
             f.write(contents)
             
@@ -302,7 +304,7 @@ def upload_bank_statement(
                     os.remove(temp_path)
                     raise HTTPException(status_code=403, detail="PDF is encrypted. Password required.")
                     
-            unlocked_pdf_path = f"unlocked_{temp_path}"
+            unlocked_pdf_path = os.path.join(temp_dir, f"unlocked_{file.filename}")
             writer = pypdf.PdfWriter()
             for page in reader.pages:
                 writer.add_page(page)

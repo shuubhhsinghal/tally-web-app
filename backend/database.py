@@ -656,33 +656,36 @@ def get_purchase_rate(item_name: str) -> float:
             return app_rate
 
 def clear_and_bulk_insert_ledgers(ledgers: list):
+    if not ledgers:
+        return
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM ledgers")
-        if ledgers:
-            cursor.executemany("""
-                INSERT INTO ledgers (name, parent, cost_centre)
-                VALUES (?, ?, ?)
-            """, [(l['name'], l.get('parent'), l.get('cost_centre', False)) for l in ledgers])
+        cursor.executemany("""
+            INSERT INTO ledgers (name, parent, cost_centre)
+            VALUES (?, ?, ?)
+        """, [(l['name'], l.get('parent'), l.get('cost_centre', False)) for l in ledgers])
         conn.commit()
 
 def clear_and_bulk_insert_stock_items(items: list):
+    if not items:
+        return
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM stock_items")
-        if items:
-            cursor.executemany("""
-                INSERT INTO stock_items (name, unit, last_purchase_rate, last_purchase_date)
-                VALUES (?, ?, ?, ?)
-            """, [(i['name'], i.get('unit'), i.get('last_purchase_rate', 0.0), i.get('last_purchase_date', '')) for i in items])
+        cursor.executemany("""
+            INSERT INTO stock_items (name, unit, last_purchase_rate, last_purchase_date)
+            VALUES (?, ?, ?, ?)
+        """, [(i['name'], i.get('unit'), i.get('last_purchase_rate', 0.0), i.get('last_purchase_date', '')) for i in items])
         conn.commit()
 
 def clear_and_bulk_insert_uoms(uoms: list):
+    if not uoms:
+        return
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM uoms")
-        if uoms:
-            cursor.executemany("INSERT INTO uoms (name) VALUES (?)", [(u,) for u in uoms])
+        cursor.executemany("INSERT INTO uoms (name) VALUES (?)", [(u,) for u in uoms])
         conn.commit()
 
 # --- Helper Functions for Bank Mappings ---

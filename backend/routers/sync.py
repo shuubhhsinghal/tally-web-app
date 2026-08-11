@@ -12,7 +12,7 @@ async def flush_queue():
     return {"status": "success", "message": f"Manual sync triggered. Processed {processed} items. {failed} failed."}
 
 @router.get("/status")
-async def sync_status():
+def sync_status():
     # Short-timeout connectivity check against Tally.
     # Tally being offline is an expected operating state, not an API crash.
     try:
