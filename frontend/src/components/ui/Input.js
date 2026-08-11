@@ -9,7 +9,7 @@ export function Input({ label, error, className = '', ...props }) {
         </label>
       )}
       <input 
-        className={`w-full min-h-[48px] px-4 rounded-xl border bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 text-base
+        className={`appearance-none min-w-0 w-full min-h-[48px] px-4 rounded-xl border bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 text-base
           placeholder-gray-400 dark:placeholder-gray-500
           focus:outline-none focus:ring-2 focus:ring-teal-500/50 focus:border-teal-500 transition-all
           ${error ? 'border-red-500 focus:ring-red-500/50 focus:border-red-500' : 'border-gray-200 dark:border-gray-700'}

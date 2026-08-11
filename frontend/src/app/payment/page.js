@@ -17,7 +17,7 @@ export default function PaymentVoucher() {
     debit_ledger: "",
     credit_ledger: "",
     amount: "",
-    date: new Date().toISOString().split('T')[0],
+    date: new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().split('T')[0],
     cost_center: "",
     narration: ""
   });

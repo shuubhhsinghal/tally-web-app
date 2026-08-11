@@ -18,7 +18,7 @@ export default function FundTransfer() {
     from_account: "",
     to_account: "",
     narration: "",
-    date: new Date().toISOString().split('T')[0] // YYYY-MM-DD
+    date: new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().split('T')[0] // Local YYYY-MM-DD
   });
   const [preview, setPreview] = useState(null);
   const [loading, setLoading] = useState(false);

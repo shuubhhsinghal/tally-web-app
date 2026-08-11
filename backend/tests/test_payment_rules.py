@@ -62,6 +62,7 @@ def test_metadata_categorization():
     
     # A
     assert "Electricity Expense" in expense_paid_to
+    assert "Electricity Expense" not in party_paid_to
     
     # B
     assert "Misc Expense" not in expense_paid_to

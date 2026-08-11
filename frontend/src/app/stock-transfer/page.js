@@ -18,7 +18,7 @@ export default function StockTransfer() {
     qty: "",
     from_store: "",
     to_store: "",
-    date: new Date().toISOString().split('T')[0]
+    date: new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().split('T')[0]
   });
   
   const [preview, setPreview] = useState(null);

@@ -296,6 +296,11 @@ def _check_confirmed_master_exists(cursor, entity_type: str, normalized_name: st
             return True
     return False
 
+def is_master_confirmed_locally(entity_type: str, normalized_name: str, payload: dict) -> bool:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        return _check_confirmed_master_exists(cursor, entity_type, normalized_name, payload)
+
 def check_master_exists_locally(entity_type: str, normalized_name: str, new_payload: dict) -> bool:
     with get_db() as conn:
         cursor = conn.cursor()

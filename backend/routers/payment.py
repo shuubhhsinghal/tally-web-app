@@ -59,7 +59,7 @@ async def get_payment_metadata():
                 expense_paid_to.append({"name": name, "is_pending": False})
                 
             # PARTY / OTHER PAID TO
-            if not is_ps and not is_bc:
+            if not has_cc and not is_ps and not is_bc:
                 party_paid_to.append({"name": name, "is_pending": False})
                 
             # PAID FROM
@@ -85,7 +85,7 @@ async def get_payment_metadata():
                 if has_cc and not is_ps and not is_bc:
                     expense_paid_to.append({"name": name, "is_pending": True})
                     
-                if not is_ps and not is_bc:
+                if not has_cc and not is_ps and not is_bc:
                     party_paid_to.append({"name": name, "is_pending": True})
                 
     except Exception as e:

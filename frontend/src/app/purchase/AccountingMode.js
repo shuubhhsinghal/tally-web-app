@@ -12,7 +12,7 @@ export function AccountingMode({ onPostSuccess }) {
   const { showToast } = useUI();
 
   const [formData, setFormData] = useState({
-    date: new Date().toISOString().split('T')[0],
+    date: new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().split('T')[0],
     supplier: "",
     invoice_number: "",
     amount: "",

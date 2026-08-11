@@ -592,7 +592,7 @@ export default function Dashboard() {
                       {activity.description || activity.operation_type}
                     </p>
                     <p className="text-xs font-medium text-gray-500 dark:text-gray-400 mt-0.5">
-                      {new Date(activity.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      {new Date(activity.created_at + (activity.created_at.includes('Z') ? '' : 'Z')).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                     </p>
                   </div>
                   <StatusBadge status={getStatus(activity.status)} />

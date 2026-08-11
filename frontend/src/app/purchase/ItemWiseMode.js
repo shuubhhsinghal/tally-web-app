@@ -493,7 +493,7 @@ export function ItemWiseMode({ onPostSuccess }) {
 
     setIsPosting(true);
     try {
-      let tallyDate = new Date().toISOString().split('T')[0].replace(/-/g, '');
+      let tallyDate = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().split('T')[0].replace(/-/g, '');
       if (invoice.date) tallyDate = invoice.date.replace(/-/g, '');
 
       const res = await fetch("/api/purchase-item/post", {
