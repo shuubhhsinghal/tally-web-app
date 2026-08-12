@@ -344,6 +344,8 @@ async def sync_worker_loop():
             except Exception:
                 tally_online = False
 
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Pinging Tally... Online: {tally_online}")
+
             if tally_online:
                 # 2. Flush Offline Queue
                 flush_offline_queue()

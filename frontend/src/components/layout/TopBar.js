@@ -3,13 +3,16 @@
 import React, { useState, useEffect } from 'react';
 import { useTheme } from 'next-themes';
 import { useRouter } from 'next/navigation';
-import { Moon, Sun, ArrowLeft, Wifi, WifiOff } from 'lucide-react';
+import { Moon, Sun, ArrowLeft, Wifi, WifiOff, RefreshCw } from 'lucide-react';
+import { useUI } from '@/context/UIContext';
 
 export default function TopBar({ title, showBack = false, onBack }) {
   const { theme, setTheme } = useTheme();
   const router = useRouter();
+  const { showToast } = useUI();
   const [mounted, setMounted] = useState(false);
   const [isOnline, setIsOnline] = useState(null);
+  const [isSyncing, setIsSyncing] = useState(false);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -32,6 +35,23 @@ export default function TopBar({ title, showBack = false, onBack }) {
     const interval = setInterval(checkSync, 10000);
     return () => clearInterval(interval);
   }, []);
+
+  const handleManualSync = async () => {
+    setIsSyncing(true);
+    try {
+      const res = await fetch('/api/sync/sync-queue', { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        showToast(data.message || 'Manual sync triggered', 'success');
+      } else {
+        showToast('Failed to trigger manual sync', 'error');
+      }
+    } catch (e) {
+      showToast('Error triggering sync', 'error');
+    } finally {
+      setIsSyncing(false);
+    }
+  };
 
   return (
     <div className="sticky top-0 z-30 bg-white/80 dark:bg-gray-900/80 backdrop-blur-md border-b border-gray-100 dark:border-gray-800">
@@ -62,7 +82,15 @@ export default function TopBar({ title, showBack = false, onBack }) {
         </h1>
 
         {/* Right Section */}
-        <div className="flex-1 flex items-center justify-end">
+        <div className="flex-1 flex items-center justify-end gap-1">
+          <button
+            onClick={handleManualSync}
+            disabled={isSyncing}
+            className="p-2 text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-full transition-colors disabled:opacity-50"
+            aria-label="Manual Sync"
+          >
+            <RefreshCw className={`w-5 h-5 ${isSyncing ? 'animate-spin' : ''}`} />
+          </button>
           {mounted && (
             <button
               onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
