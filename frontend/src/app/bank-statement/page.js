@@ -1,5 +1,5 @@
 'use client';
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
 import TopBar from '@/components/layout/TopBar';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
@@ -12,7 +12,7 @@ export default function BankStatementInteractive() {
   const { showToast, showConfirmDialog, showActionSheet } = useUI();
 
   const [file, setFile] = useState(null);
-  const [bankLedger, setBankLedger] = useState("Federal Bank Gulshan");
+  const [bankLedger, setBankLedger] = useState("");
   const [password, setPassword] = useState("");
   
   const [transactions, setTransactions] = useState([]);
@@ -29,11 +29,18 @@ export default function BankStatementInteractive() {
   const [deletingRuleId, setDeletingRuleId] = useState(null);
   const fileInputRef = useRef(null);
 
-  const bankOptions = [
-    "Federal Bank Gulshan",
-    "Union Bank Mahagun 133",
-    "Union Bank Vvip 2170"
-  ];
+  const bankOptions = useMemo(() => {
+    return Object.values(ledgerCache)
+      .filter(l => l.parent === "Bank Accounts" || l.parent === "Bank OD A/c")
+      .map(l => l.name)
+      .sort((a, b) => a.localeCompare(b));
+  }, [ledgerCache]);
+
+  useEffect(() => {
+    if (bankOptions.length > 0 && (!bankLedger || !bankOptions.includes(bankLedger))) {
+      setBankLedger(bankOptions[0]);
+    }
+  }, [bankOptions, bankLedger]);
 
   useEffect(() => {
     fetchAllRules();

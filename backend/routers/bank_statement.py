@@ -103,6 +103,7 @@ def get_tally_ledgers():
         result = {}
         for l in ledgers:
             result[l['name'].lower()] = {
+                "name": l['name'],
                 "parent": l['parent'],
                 "cost_centre": bool(l['cost_centre'])
             }
