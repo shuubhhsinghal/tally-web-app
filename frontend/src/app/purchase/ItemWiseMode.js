@@ -7,6 +7,8 @@ import { Select } from '@/components/ui/Select';
 import { SearchableSelect } from '@/components/ui/SearchableSelect';
 import { useUI } from '@/context/UIContext';
 import { UploadCloud, Image as ImageIcon, AlertCircle, CheckCircle2, ChevronDown, ChevronRight, PlusCircle, Trash2 } from "lucide-react";
+import Cropper from 'react-easy-crop';
+import getCroppedImg from '@/utils/cropImage';
 
 function MasterAutocomplete({ value, onChange, placeholder, confirmed = [], masterStates = [], onCreate, disabled, rawItemName = "", inputClassName = "", createLabel = "item", isCreating = false }) {
   const [isOpen, setIsOpen] = useState(false);
@@ -230,6 +232,13 @@ export function ItemWiseMode({ onPostSuccess }) {
   const [previewUrl, setPreviewUrl] = useState(null);
   const [stagedFiles, setStagedFiles] = useState([]);
   const fileInputRef = useRef(null);
+  
+  const [imageToCrop, setImageToCrop] = useState(null);
+  const [fileToCrop, setFileToCrop] = useState(null);
+  const [crop, setCrop] = useState({ x: 0, y: 0 });
+  const [zoom, setZoom] = useState(1);
+  const [croppedAreaPixels, setCroppedAreaPixels] = useState(null);
+  const [isCropping, setIsCropping] = useState(false);
 
   const [validationStatus, setValidationStatus] = useState("matched"); // "matched", "needs_mapping", "unverified"
   const [mappingFailed, setMappingFailed] = useState(false);
@@ -308,16 +317,46 @@ export function ItemWiseMode({ onPostSuccess }) {
     const newFiles = Array.from(e.target.files);
     if (newFiles.length === 0) return;
     
-    setStagedFiles(prev => [
-      ...prev,
-      ...newFiles.filter(f => f.size > 0).map(f => ({
-        file: f,
-        previewUrl: URL.createObjectURL(f)
-      }))
-    ]);
+    const file = newFiles[0];
+    if (file.type.startsWith('image/')) {
+        setFileToCrop(file);
+        setImageToCrop(URL.createObjectURL(file));
+        setIsCropping(true);
+    } else {
+        setStagedFiles(prev => [
+          ...prev,
+          { file, previewUrl: URL.createObjectURL(file) }
+        ]);
+    }
     
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
+    }
+  };
+
+  const onCropComplete = (croppedArea, croppedAreaPixels) => {
+    setCroppedAreaPixels(croppedAreaPixels);
+  };
+
+  const handleCropConfirm = async () => {
+    try {
+      const croppedBlob = await getCroppedImg(imageToCrop, croppedAreaPixels);
+      const croppedFile = new File([croppedBlob], fileToCrop.name, { type: 'image/jpeg' });
+      
+      setStagedFiles(prev => [
+        ...prev,
+        { file: croppedFile, previewUrl: URL.createObjectURL(croppedFile) }
+      ]);
+    } catch (e) {
+      console.error(e);
+      setStagedFiles(prev => [
+        ...prev,
+        { file: fileToCrop, previewUrl: imageToCrop }
+      ]);
+    } finally {
+      setIsCropping(false);
+      setImageToCrop(null);
+      setFileToCrop(null);
     }
   };
 
@@ -602,11 +641,37 @@ export function ItemWiseMode({ onPostSuccess }) {
     }
   };
 
+  if (isCropping) {
+    return (
+      <div className="fixed inset-0 z-[100] bg-black flex flex-col">
+        <div className="relative flex-1">
+          <Cropper
+            image={imageToCrop}
+            crop={crop}
+            zoom={zoom}
+            aspect={3 / 4}
+            onCropChange={setCrop}
+            onCropComplete={onCropComplete}
+            onZoomChange={setZoom}
+          />
+        </div>
+        <div className="p-6 bg-black/90 flex gap-4 pb-10">
+          <Button variant="outline" className="flex-1 text-black bg-white border-white hover:bg-gray-200" onClick={() => {
+            setIsCropping(false);
+            setImageToCrop(null);
+            setFileToCrop(null);
+          }}>Cancel</Button>
+          <Button className="flex-1 bg-teal-600 hover:bg-teal-700 text-white" onClick={handleCropConfirm}>Confirm Crop</Button>
+        </div>
+      </div>
+    );
+  }
+
   if (!invoice) {
     return (
       <div className="space-y-6">
         <div className="flex flex-col items-center justify-center p-8 text-center bg-gray-50 dark:bg-gray-800/50 rounded-2xl border-2 border-dashed border-gray-200 dark:border-gray-700 relative">
-          <input type="file" multiple accept="image/*,.pdf,.heic,.heif,image/heic,image/heif" className="hidden" id="file-upload" onChange={handleFileChange} ref={fileInputRef} />
+          <input type="file" accept="image/*,.heic,.heif,image/heic,image/heif" className="hidden" id="file-upload" onChange={handleFileChange} ref={fileInputRef} />
           <label htmlFor="file-upload" className="cursor-pointer flex flex-col items-center">
             {isExtracting ? (
               <div className="w-12 h-12 rounded-full border-4 border-teal-200 border-t-teal-600 animate-spin mb-4" />
