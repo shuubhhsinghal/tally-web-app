@@ -84,23 +84,21 @@ def process_async_extraction(draft_id: str, files_data: list):
             """, (json.dumps({"error": str(e)}), now, draft_id))
             conn.commit()
 
-@router.post("/async-extract")
-async def create_purchase_draft_async(
-    background_tasks: BackgroundTasks,
-    files: list[UploadFile] = File(...)
-):
-    if not files:
-        raise HTTPException(status_code=400, detail="No files uploaded")
-        
+def enqueue_draft_extraction(background_tasks: BackgroundTasks, files_data: list) -> str:
+    """
+    Shared logic to create a draft, save the file, and queue background extraction.
+    files_data: list of tuples (file_bytes, filename, content_type)
+    Returns: draft_id
+    """
     draft_id = str(uuid.uuid4())
-    ext = os.path.splitext(files[0].filename)[1]
-    if not ext:
-        ext = ".pdf" if files[0].content_type == "application/pdf" else ".jpg"
-
-    first_file_bytes = await files[0].read()
+    first_file_bytes, first_filename, first_content_type = files_data[0]
     
+    ext = os.path.splitext(first_filename)[1]
+    if not ext:
+        ext = ".pdf" if first_content_type == "application/pdf" else ".jpg"
+
     # Normalize HEIC to JPEG for browser preview
-    first_file_bytes = normalize_uploaded_invoice(first_file_bytes, files[0].filename, files[0].content_type)
+    first_file_bytes = normalize_uploaded_invoice(first_file_bytes, first_filename, first_content_type)
     if ext.lower() in [".heic", ".heif"]:
         ext = ".jpg"
         
@@ -111,11 +109,8 @@ async def create_purchase_draft_async(
     with open(filepath, "wb") as buffer:
         buffer.write(first_file_bytes)
 
-    # But we read all files for extraction
-    files_data = [(first_file_bytes, files[0].filename, files[0].content_type)]
-    for i in range(1, len(files)):
-        fb = await files[i].read()
-        files_data.append((fb, files[i].filename, files[i].content_type))
+    # Update the files_data with normalized bytes for the first file
+    files_data[0] = (first_file_bytes, first_filename, first_content_type)
 
     image_path = f"/uploads/drafts/{filename}"
     now = datetime.datetime.now().isoformat()
@@ -135,6 +130,25 @@ async def create_purchase_draft_async(
         conn.commit()
 
     background_tasks.add_task(process_async_extraction, draft_id, files_data)
+    
+    return draft_id
+
+@router.post("/async-extract")
+async def create_purchase_draft_async(
+    background_tasks: BackgroundTasks,
+    files: list[UploadFile] = File(...)
+):
+    if not files:
+        raise HTTPException(status_code=400, detail="No files uploaded")
+        
+    first_file_bytes = await files[0].read()
+    files_data = [(first_file_bytes, files[0].filename, files[0].content_type)]
+    
+    for i in range(1, len(files)):
+        fb = await files[i].read()
+        files_data.append((fb, files[i].filename, files[i].content_type))
+
+    draft_id = enqueue_draft_extraction(background_tasks, files_data)
     
     return {"id": draft_id, "message": "Draft creation and extraction started"}
 

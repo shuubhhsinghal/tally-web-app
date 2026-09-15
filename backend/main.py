@@ -57,6 +57,9 @@ app.include_router(repack.router, prefix="/api/repack", tags=["Repack"])
 app.include_router(reporting.router, prefix="/api")
 app.include_router(reporting_pl.router)
 
+from backend.routers import whatsapp
+app.include_router(whatsapp.router, prefix="/api/whatsapp", tags=["WhatsApp"])
+
 @app.get("/api/health")
 async def health_check():
     return {"status": "ok", "message": "Backend API is running!"}

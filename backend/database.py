@@ -98,6 +98,13 @@ def init_db():
         """)
         
         cursor.execute("""
+            CREATE TABLE IF NOT EXISTS whatsapp_processed_messages (
+                message_id TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL
+            )
+        """)
+        
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS offline_queue (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 operation_type TEXT NOT NULL,
