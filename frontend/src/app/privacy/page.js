@@ -6,11 +6,7 @@ export const metadata = {
 };
 
 export default function PrivacyPolicy() {
-  const lastUpdated = new Date().toLocaleDateString('en-US', {
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric',
-  });
+  const lastUpdated = "September 16, 2026";
 
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-gray-900 pb-24 text-gray-900 dark:text-gray-100">
