@@ -13,7 +13,7 @@ router = APIRouter()
 META_VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN")
 META_ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN")
 META_APP_SECRET = os.getenv("META_APP_SECRET")
-META_API_VERSION = os.getenv("META_API_VERSION", "v19.0")
+META_API_VERSION = os.getenv("META_API_VERSION", "v26.0")
 
 
 def verify_signature(payload: bytes, signature: str) -> bool:
