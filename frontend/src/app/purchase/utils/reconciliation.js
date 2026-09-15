@@ -61,7 +61,7 @@ export function detectGstBasis(extractedData) {
   return "unknown";
 }
 
-export function calculateAndReconcileV4(extractedData, gstRecordingMethod, userGstBasisOverride = null, selectedAmountHeader = null) {
+export function calculateAndReconcileV4(extractedData, gstRecordingMethod, userGstBasisOverride = null, userGstRate = 0.0, selectedAmountHeader = null) {
   const rawItems = extractedData.items || [];
   
   // 0. Extract all unique amount headers
@@ -117,7 +117,7 @@ export function calculateAndReconcileV4(extractedData, gstRecordingMethod, userG
   if (userGstBasisOverride && userGstBasisOverride !== "unknown") {
     gstBasis = userGstBasisOverride;
   } else {
-    gstBasis = detectGstBasis(processedData);
+    gstBasis = "exclusive";
   }
   
   const calculatedItems = [];
@@ -131,7 +131,7 @@ export function calculateAndReconcileV4(extractedData, gstRecordingMethod, userG
   for (const item of items) {
     const qty = safeFloat(item.qty);
     const lineAmount = safeFloat(item.line_amount);
-    const itemGstRate = safeFloat(item.gst_rate_on_row) || safeFloat(extractedData.gst_rate_metadata);
+    const itemGstRate = userGstRate;
     
     let rate = 0.0;
     let exGstAmount = 0.0;

@@ -256,7 +256,7 @@ async def extract_invoice(
                                 
                         if all_headers_exist:
                             print(f"--- [PURCHASE-ITEM EXTRACT] Retrying with saved mapping... ---", flush=True)
-                            data2 = process_invoice(file_bytes, column_mapping=saved_mapping)
+                            data2 = await run_in_threadpool(process_invoice, file_bytes_list, saved_mapping)
                             raw_items2 = data2.get("items", [])
                             
                             raw_printed_items2 = []
@@ -999,8 +999,23 @@ async def post_purchase_item(payload: PurchaseItemPostRequest):
                 update_queue_status(queue_id, "FAILED", f"Cannot post invoice because {entity_type.lower()} '{raw_name}' failed to sync to Tally.")
                 raise HTTPException(status_code=400, detail=f"Cannot post invoice because {entity_type.lower()} '{raw_name}' failed to sync to Tally. Resolve the master first.")
             elif state == "MISSING":
-                update_queue_status(queue_id, "FAILED", f"Cannot post invoice because {entity_type.lower()} '{raw_name}' is not available in Tally or pending sync.")
-                raise HTTPException(status_code=400, detail=f"Cannot post invoice because {entity_type.lower()} '{raw_name}' is not available in Tally or pending sync. Create or refresh the master before posting.")
+                if entity_type == "UOM":
+                    uom_xml = f"""<ENVELOPE>
+        <HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+        <BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>Vouchers</REPORTNAME></REQUESTDESC><REQUESTDATA>
+            <TALLYMESSAGE xmlns:UDF="TallyUDF">
+                <UNIT ACTION="Create" NAME="{escape(raw_name)}">
+                    <NAME>{escape(raw_name)}</NAME><ISSIMPLEUNIT>Yes</ISSIMPLEUNIT>
+                </UNIT>
+            </TALLYMESSAGE>
+        </REQUESTDATA></IMPORTDATA></BODY>
+    </ENVELOPE>"""
+                    from backend.database import queue_master_operation
+                    queue_master_operation("UOM", raw_name, "CREATE_UOM", uom_xml, {"uom": raw_name})
+                    has_pending = True
+                else:
+                    update_queue_status(queue_id, "FAILED", f"Cannot post invoice because {entity_type.lower()} '{raw_name}' is not available in Tally or pending sync.")
+                    raise HTTPException(status_code=400, detail=f"Cannot post invoice because {entity_type.lower()} '{raw_name}' is not available in Tally or pending sync. Create or refresh the master before posting.")
             elif state == "CONFLICT":
                 update_queue_status(queue_id, "FAILED", f"Definition conflict for {entity_type.lower()} '{raw_name}': {error_msg}")
                 raise HTTPException(status_code=409, detail=f"Cannot post invoice due to definition conflict for {entity_type.lower()} '{raw_name}': {error_msg}")

@@ -62,7 +62,7 @@ def detect_gst_basis(extracted_data):
             
     return "unknown"
 
-def calculate_and_reconcile_v4(extracted_data: dict, gst_recording_method: str, user_gst_basis_override: str = None, selected_amount_header: str = None) -> dict:
+def calculate_and_reconcile_v4(extracted_data: dict, gst_recording_method: str, user_gst_basis_override: str = None, user_gst_rate: float = 0.0, selected_amount_header: str = None) -> dict:
     """
     Takes extracted_data, applies calculation paths, and runs reconciliation checks.
     Returns { calculated_data, reconciliation_data }
@@ -113,10 +113,11 @@ def calculate_and_reconcile_v4(extracted_data: dict, gst_recording_method: str, 
     extracted_data["active_amount_header"] = active_amount_header
 
     # 1. Determine GST Basis
+    # Final source of truth: User-selected basis. Default to 'exclusive' if not provided.
     if user_gst_basis_override and user_gst_basis_override != "unknown":
         gst_basis = user_gst_basis_override
     else:
-        gst_basis = detect_gst_basis(extracted_data)
+        gst_basis = "exclusive"
         
     calculated_items = []
     
@@ -131,7 +132,9 @@ def calculate_and_reconcile_v4(extracted_data: dict, gst_recording_method: str, 
     for item in items:
         qty = safe_float(item.get("qty"))
         line_amount = safe_float(item.get("line_amount"))
-        item_gst_rate = safe_float(item.get("gst_rate_on_row")) or safe_float(extracted_data.get("gst_rate_metadata"))
+        
+        # User requirement: Final source of truth is user-entered GST rate. Do not use extracted rate.
+        item_gst_rate = user_gst_rate
         
         rate = 0.0
         ex_gst_amount = 0.0

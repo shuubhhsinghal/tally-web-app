@@ -526,8 +526,9 @@ def _check_definitions_conflict(entity_type: str, pending_payload: dict, new_pay
     return False
 
 def _check_confirmed_master_exists(cursor, entity_type: str, normalized_name: str, new_payload: dict) -> bool:
+    raw_name = new_payload.get('name', '')
     if entity_type == 'LEDGER':
-        cursor.execute("SELECT parent FROM ledgers WHERE LOWER(name) = ?", (normalized_name,))
+        cursor.execute("SELECT parent FROM ledgers WHERE LOWER(name) = ? OR name = ?", (normalized_name, raw_name))
         row = cursor.fetchone()
         if row:
             p1 = normalize_master_name(row['parent'])[0] if row['parent'] else ''
@@ -536,7 +537,7 @@ def _check_confirmed_master_exists(cursor, entity_type: str, normalized_name: st
                 raise MasterConflictException("A master with this name already exists in Tally with a conflicting definition.")
             return True
     elif entity_type == 'ITEM':
-        cursor.execute("SELECT unit FROM stock_items WHERE LOWER(name) = ?", (normalized_name,))
+        cursor.execute("SELECT unit FROM stock_items WHERE LOWER(name) = ? OR name = ?", (normalized_name, raw_name))
         row = cursor.fetchone()
         if row:
             u1 = normalize_master_name(row['unit'])[0] if row['unit'] else ''
@@ -545,7 +546,7 @@ def _check_confirmed_master_exists(cursor, entity_type: str, normalized_name: st
                 raise MasterConflictException("A master with this name already exists in Tally with a conflicting definition.")
             return True
     elif entity_type == 'UOM':
-        cursor.execute("SELECT name FROM uoms WHERE LOWER(name) = ?", (normalized_name,))
+        cursor.execute("SELECT name FROM uoms WHERE LOWER(name) = ? OR name = ?", (normalized_name, raw_name))
         if cursor.fetchone():
             return True
     return False
@@ -643,10 +644,10 @@ def get_master_dependency_state(entity_type: str, raw_name: str, definition_payl
             return row['status'], None
             
         if entity_type == 'LEDGER':
-            cursor.execute("SELECT 1 FROM ledgers WHERE LOWER(name) = ?", (norm_name,))
+            cursor.execute("SELECT 1 FROM ledgers WHERE LOWER(name) = ? OR name = ?", (norm_name, raw_name))
             if cursor.fetchone(): return "CONFIRMED", None
         elif entity_type == 'ITEM':
-            cursor.execute("SELECT unit FROM stock_items WHERE LOWER(name) = ?", (norm_name,))
+            cursor.execute("SELECT unit FROM stock_items WHERE LOWER(name) = ? OR name = ?", (norm_name, raw_name))
             irow = cursor.fetchone()
             if irow:
                 if definition_payload:
@@ -658,7 +659,7 @@ def get_master_dependency_state(entity_type: str, raw_name: str, definition_payl
                         return "CONFLICT", f"Item '{raw_name}' already exists with unit {existing_uom}. This invoice is using {attempted_uom}."
                 return "CONFIRMED", None
         elif entity_type == 'UOM':
-            cursor.execute("SELECT 1 FROM uoms WHERE LOWER(name) = ?", (norm_name,))
+            cursor.execute("SELECT 1 FROM uoms WHERE LOWER(name) = ? OR name = ?", (norm_name, raw_name))
             if cursor.fetchone(): return "CONFIRMED", None
             
         return "MISSING", None

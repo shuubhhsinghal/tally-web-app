@@ -339,9 +339,10 @@ export function ItemWiseMode({ onPostSuccess }) {
       v4RawData.extracted_data,
       v4Config.gst_recording_method,
       v4Config.gst_basis_override,
+      invoice?.gst_rate || 0,
       v4Config.selected_amount_header
     );
-  }, [v4RawData, v4Config]);
+  }, [v4RawData, v4Config, invoice?.gst_rate]);
 
   useEffect(() => {
     if (useV4 && v4Data && v4Data.calculated_data) {
@@ -376,25 +377,63 @@ export function ItemWiseMode({ onPostSuccess }) {
   const handleTaxRecalculation = (newRate, newTaxType, newGstMethod = null) => {
     const rate = Number(newRate);
     const methodToUse = newGstMethod || (v4Config?.gst_recording_method || "included_in_rate");
-    const isGstIncluded = (useV4 && v4Data?.calculated_data?.gst_treatment === 'included_in_rate') || (forceManual && methodToUse === 'included_in_rate');
+    const gstBasis = (useV4 ? v4Config?.gst_basis_override : "exclusive") || "exclusive";
 
     let updatedItems = [...items];
 
-    if (isGstIncluded) {
-       updatedItems = updatedItems.map(item => {
-         const fAmt = item.final_amount !== undefined ? Number(item.final_amount) : Number(item.amount) || 0;
-         const fRate = item.final_rate !== undefined ? Number(item.final_rate) : Number(item.rate) || 0;
-         const exGstAmount = fAmt / (1 + (rate / 100));
-         const exGstRate = fRate / (1 + (rate / 100));
-         return { ...item, final_amount: fAmt, final_rate: fRate, amount: parseFloat(exGstAmount.toFixed(2)), rate: parseFloat(exGstRate.toFixed(2)) };
-       });
-    } else if (forceManual && !isGstIncluded) {
-       updatedItems = updatedItems.map(item => {
-         const exAmt = item.amount !== undefined ? Number(item.amount) : Number(item.final_amount) || 0;
-         const exRate = item.rate !== undefined ? Number(item.rate) : Number(item.final_rate) || 0;
-         return { ...item, amount: exAmt, rate: exRate, final_amount: exAmt, final_rate: exRate };
-       });
-    }
+    updatedItems = updatedItems.map(item => {
+      const isGstIncluded = methodToUse === 'included_in_rate';
+      
+      let exAmt = Number(item.amount !== undefined ? item.amount : (item.final_amount || 0));
+      let exRate = Number(item.rate !== undefined ? item.rate : (item.final_rate || 0));
+      const fAmt = Number(item.final_amount !== undefined ? item.final_amount : (item.amount || 0));
+      const fRate = Number(item.final_rate !== undefined ? item.final_rate : (item.rate || 0));
+      
+      let newExAmt = exAmt;
+      let newExRate = exRate;
+      let newFAmt = fAmt;
+      let newFRate = fRate;
+
+      if (!useV4) {
+        // Legacy manual mode behavior
+        if (isGstIncluded) {
+          newExAmt = fAmt / (1 + (rate / 100));
+          newExRate = fRate / (1 + (rate / 100));
+        } else {
+          newExAmt = exAmt;
+          newExRate = exRate;
+          newFAmt = exAmt;
+          newFRate = exRate;
+        }
+      } else {
+        // V4 mode prediction (will be overwritten by v4Data anyway, but needed for immediate subtotal/tax calc)
+        if (methodToUse === "separate_ledger" && gstBasis === "exclusive") {
+            newFAmt = exAmt + (exAmt * rate / 100);
+            newFRate = exRate + (exRate * rate / 100);
+        } else if (methodToUse === "separate_ledger" && gstBasis === "inclusive") {
+            newExAmt = fAmt / (1 + rate / 100);
+            newExRate = fRate / (1 + rate / 100);
+            newFAmt = fAmt;
+            newFRate = fRate;
+        } else if (methodToUse === "included_in_rate" && gstBasis === "exclusive") {
+            newFAmt = exAmt + (exAmt * rate / 100);
+            newFRate = exRate + (exRate * rate / 100);
+        } else if (methodToUse === "included_in_rate" && gstBasis === "inclusive") {
+            newExAmt = fAmt / (1 + rate / 100);
+            newExRate = fRate / (1 + rate / 100);
+            newFAmt = fAmt;
+            newFRate = fRate;
+        }
+      }
+      
+      return { 
+        ...item, 
+        amount: parseFloat(newExAmt.toFixed(2)), 
+        rate: parseFloat(newExRate.toFixed(2)), 
+        final_amount: parseFloat(newFAmt.toFixed(2)), 
+        final_rate: parseFloat(newFRate.toFixed(2)) 
+      };
+    });
 
     const subtotal = updatedItems.reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
     const totalTax = subtotal * (rate / 100);
@@ -413,7 +452,9 @@ export function ItemWiseMode({ onPostSuccess }) {
     if (newGstMethod) {
       setV4Config(prev => ({ ...prev, gst_recording_method: newGstMethod }));
     }
-    setItems(updatedItems);
+    if (!useV4) {
+      setItems(updatedItems);
+    }
   };
 
   const getSupplierStatus = (name) => {
@@ -597,7 +638,7 @@ export function ItemWiseMode({ onPostSuccess }) {
 
     const newItems = [...items];
     const isGstInc = forceManual && v4Config?.gst_recording_method === 'included_in_rate';
-    const gstRate = invoice.gst_rate ? parseFloat(invoice.gst_rate) : 0;
+    const gstRate = invoice?.gst_rate ? parseFloat(invoice?.gst_rate) : 0;
 
     if (field === 'qty') {
       newItems[index].qty = value;
@@ -1130,7 +1171,7 @@ export function ItemWiseMode({ onPostSuccess }) {
                 type="checkbox" 
                 className="sr-only peer" 
                 checked={v4Config?.gst_recording_method !== 'exclude_gst'} 
-                onChange={e => handleTaxRecalculation(invoice.gst_rate, invoice.tax_type, e.target.checked ? "included_in_rate" : "exclude_gst")} 
+                onChange={e => handleTaxRecalculation(invoice?.gst_rate, invoice.tax_type, e.target.checked ? "included_in_rate" : "exclude_gst")} 
               />
               <div className="w-11 h-6 bg-gray-300 peer-focus:outline-none rounded-full peer dark:bg-gray-600 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-teal-600"></div>
             </label>
@@ -1421,11 +1462,11 @@ export function ItemWiseMode({ onPostSuccess }) {
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1.5">
                   <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">GST Rate (%)</label>
-                  <input type="number" value={invoice.gst_rate} onChange={e => handleTaxRecalculation(e.target.value, invoice.tax_type)} className="w-full p-2 text-sm rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 outline-none" />
+                  <input type="number" value={invoice?.gst_rate} onChange={e => handleTaxRecalculation(e.target.value, invoice.tax_type)} className="w-full p-2 text-sm rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 outline-none" />
                 </div>
                 <div className="space-y-1.5">
                   <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Tax Type</label>
-                  <select value={invoice.tax_type} onChange={e => handleTaxRecalculation(invoice.gst_rate, e.target.value)} className="w-full p-2 text-sm rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 outline-none">
+                  <select value={invoice.tax_type} onChange={e => handleTaxRecalculation(invoice?.gst_rate, e.target.value)} className="w-full p-2 text-sm rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 outline-none">
                     <option value="local">Local</option>
                     <option value="interstate">Interstate</option>
                   </select>
@@ -1475,17 +1516,17 @@ export function ItemWiseMode({ onPostSuccess }) {
                   {invoice.tax_type === 'local' ? (
                     <>
                       <div className="flex justify-between">
-                        <span>CGST {(invoice.gst_rate / 2)}%</span>
+                        <span>CGST {(invoice?.gst_rate / 2)}%</span>
                         <span>₹ {computedCgst.toFixed(2)}</span>
                       </div>
                       <div className="flex justify-between">
-                        <span>SGST {(invoice.gst_rate / 2)}%</span>
+                        <span>SGST {(invoice?.gst_rate / 2)}%</span>
                         <span>₹ {computedSgst.toFixed(2)}</span>
                       </div>
                     </>
                   ) : (
                     <div className="flex justify-between">
-                      <span>IGST {invoice.gst_rate}%</span>
+                      <span>IGST {invoice?.gst_rate}%</span>
                       <span>₹ {computedIgst.toFixed(2)}</span>
                     </div>
                   )}

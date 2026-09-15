@@ -1,0 +1,42 @@
+{
+    "results": {
+        "Mahagun": {
+            "Sales": 3636960.440000002,
+            "Purchases": 737303.7599999997,
+            "Direct Expenses": 7777.4400000000005,
+            "Indirect Expenses": 800090.7100000002
+        },
+        "Gulshan": {
+            "Sales": 3693777.179999999,
+            "Purchases": 737228.37,
+            "Direct Expenses": 7484.07,
+            "Indirect Expenses": 708175.2399999996
+        },
+        "Vvip": {
+            "Sales": 3849616.389999999,
+            "Purchases": 791634.4099999999,
+            "Direct Expenses": 7362.8099999999995,
+            "Indirect Expenses": 792249.0199999999
+        },
+        "Unallocated": {
+            "Sales": 0.0,
+            "Purchases": 0.0,
+            "Direct Expenses": 0.0,
+            "Indirect Expenses": 1061.86
+        }
+    },
+    "stocks": {
+        "Mahagun": {
+            "30-Sep": 75000.0,
+            "31-Oct": 95000.0
+        },
+        "Gulshan": {
+            "30-Sep": 55000.0,
+            "31-Oct": 72000.0
+        },
+        "Vvip": {
+            "30-Sep": 65000.0,
+            "31-Oct": 83000.0
+        }
+    }
+}
