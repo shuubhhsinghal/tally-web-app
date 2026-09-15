@@ -42,11 +42,6 @@ export default function BankStatementInteractive() {
     }
   }, [bankOptions, bankLedger]);
 
-  useEffect(() => {
-    fetchAllRules();
-    fetchLedgers();
-  }, []);
-
   const fetchAllRules = async () => {
     try {
       const res = await fetch("/api/bank-statement/mappings");
@@ -64,6 +59,11 @@ export default function BankStatementInteractive() {
       console.error("Failed to load all rules", e);
     }
   };
+
+  useEffect(() => {
+    fetchAllRules();
+    fetchLedgers();
+  }, []);
 
   const fetchLedgers = async () => {
     try {

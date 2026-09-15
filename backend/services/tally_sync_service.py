@@ -17,7 +17,16 @@ def sanitize_tally_xml(raw_xml: str) -> str:
     return clean_xml
 
 def fetch_and_cache_masters(tally_url=TALLY_URL):
-    payload = """<ENVELOPE>
+    from datetime import datetime
+    dt = datetime.now()
+    if dt.month >= 4:
+        fy_start = f"{dt.year}0401"
+        fy_end = f"{dt.year + 1}0331"
+    else:
+        fy_start = f"{dt.year - 1}0401"
+        fy_end = f"{dt.year}0331"
+
+    payload = f"""<ENVELOPE>
   <HEADER>
     <VERSION>1</VERSION>
     <TALLYREQUEST>Export</TALLYREQUEST>
@@ -36,6 +45,7 @@ def fetch_and_cache_masters(tally_url=TALLY_URL):
             <NATIVEMETHOD>Name</NATIVEMETHOD>
             <NATIVEMETHOD>Parent</NATIVEMETHOD>
             <NATIVEMETHOD>IsCostCentresOn</NATIVEMETHOD>
+            <NATIVEMETHOD>OpeningBalance</NATIVEMETHOD>
           </COLLECTION>
         </TDLMESSAGE>
       </TDL>
@@ -73,10 +83,19 @@ def fetch_and_cache_masters(tally_url=TALLY_URL):
             if cc_elem is not None and cc_elem.text:
                 cost_centre = cc_elem.text.strip().lower() == 'yes'
                 
+            ob_elem = ledger_elem.find('OPENINGBALANCE')
+            ob_val = None
+            if ob_elem is not None and ob_elem.text:
+                try:
+                    ob_val = float(ob_elem.text.strip())
+                except ValueError:
+                    print(f"Warning: Invalid OPENINGBALANCE '{ob_elem.text}' for ledger '{name}'")
+                
             ledger_cache[name.lower()] = {
                 "name": name,
                 "parent": parent,
-                "cost_centre": cost_centre
+                "cost_centre": cost_centre,
+                "opening_balance": ob_val
             }
             
         with open(TALLY_CACHE_FILE, 'w', encoding="utf-8") as f:

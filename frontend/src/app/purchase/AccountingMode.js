@@ -31,7 +31,7 @@ export function AccountingMode({ onPostSuccess }) {
     }));
     fetch("/api/purchase/metadata")
       .then(res => res.json())
-      .then(data => setMeta(prev => ({...prev, suppliers: data.suppliers || []})))
+      .then(data => setMeta(prev => ({...prev, suppliers: data.suppliers || [], stores: data.stores || prev.stores})))
       .catch(err => console.error("Failed to load metadata", err));
   }, []);
 

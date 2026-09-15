@@ -62,6 +62,12 @@ class PurchaseItemRow(BaseModel):
     mapped_unit: Optional[str] = None
     is_mapped: bool = False
 
+class PurchaseAdjustment(BaseModel):
+    amount: float
+    store: str
+    reason: Optional[str] = None
+    notes: Optional[str] = None
+
 class PurchaseItemPostRequest(BaseModel):
     supplier: str
     invoice_number: str
@@ -72,6 +78,7 @@ class PurchaseItemPostRequest(BaseModel):
     igst: float = 0.0
     rounding_off: float = 0.0
     items: List[PurchaseItemRow]
+    adjustment: Optional[PurchaseAdjustment] = None
 
 @router.get("/items")
 def get_item_cache():
@@ -92,15 +99,19 @@ async def get_metadata():
 
     stock_item_names = [i['name'] for i in stock_items]
 
-    from backend.database import get_master_states
+    from backend.database import get_master_states, get_active_stores
     master_states = get_master_states()
+    
+    active_stores = get_active_stores()
+    store_names = [s['store_name'] for s in active_stores]
 
     return {
         "suppliers": sorted(list(set(suppliers))),
         "stock_items": sorted(stock_item_names),
         "uoms": uoms,
         "aliases": aliases,
-        "master_states": master_states
+        "master_states": master_states,
+        "stores": store_names
     }
 
 @router.post("/extract")
@@ -491,6 +502,44 @@ async def extract_invoice(
         print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n", flush=True)
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.post("/extract-v4")
+async def extract_invoice_v4(
+    files: List[UploadFile] = File(...),
+    gst_recording_method: str = Form("separate_ledger")
+):
+    print(f"--- [PURCHASE-ITEM EXTRACT V4] Received {len(files)} files. Recording Method: {gst_recording_method} ---", flush=True)
+    try:
+        file_bytes_list = []
+        for file in files:
+            f_bytes = await file.read()
+            f_bytes = normalize_uploaded_invoice(f_bytes, file.filename, file.content_type)
+            file_bytes_list.append(f_bytes)
+            
+        print(f"--- [PURCHASE-ITEM EXTRACT V4] Read {len(file_bytes_list)} files. Calling V4 Engine... ---", flush=True)
+
+        from backend.services.extraction_v4.extraction_engine import process_invoice_v4
+        extracted_data = await run_in_threadpool(process_invoice_v4, file_bytes_list)
+        
+        # Apply text mapping safely directly to extracted items
+        from backend.services.extraction_v4.text_mapper import map_items_to_tally, map_supplier_to_tally
+        
+        mapped_items = map_items_to_tally(extracted_data.get("items", []))
+        extracted_data["items"] = mapped_items
+        
+        # Mapped supplier
+        mapped_supplier = map_supplier_to_tally(extracted_data.get("supplier", ""))
+        extracted_data["supplier_mapped"] = mapped_supplier
+        
+        return {
+            "extracted_data": extracted_data
+        }
+
+    except Exception as e:
+        print("\n!!! EXCEPTION IN PURCHASE-ITEM EXTRACTION V4 !!!", flush=True)
+        traceback.print_exc()
+        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n", flush=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/create-supplier")
 async def create_supplier(payload: NewSupplierRequest):
     xml_data = f"""<ENVELOPE>
@@ -657,8 +706,33 @@ async def post_purchase_item(payload: PurchaseItemPostRequest):
     print(f"--- [PURCHASE-ITEM POST] Received payload ---", flush=True)
     supplier = escape(payload.supplier)
     inv_no = escape(payload.invoice_number)
-    tally_date = payload.tally_date
-    cc = escape(payload.cost_center)
+    
+    # Robustly parse tally_date to YYYYMMDD
+    raw_date = payload.tally_date
+    if '/' in raw_date:
+        parts = raw_date.split('/')
+        if len(parts) == 3:
+            # Assume DD/MM/YYYY
+            tally_date = f"{parts[2]}{parts[1].zfill(2)}{parts[0].zfill(2)}"
+        else:
+            tally_date = raw_date.replace('/', '')
+    elif '-' in raw_date:
+        parts = raw_date.split('-')
+        if len(parts) == 3 and len(parts[0]) == 4:
+            # Assume YYYY-MM-DD
+            tally_date = f"{parts[0]}{parts[1].zfill(2)}{parts[2].zfill(2)}"
+        else:
+            tally_date = raw_date.replace('-', '')
+    else:
+        tally_date = raw_date
+
+    from backend.database import get_store_mapping
+    store_mapping = get_store_mapping(payload.cost_center)
+    if not store_mapping or not store_mapping.get('godown_name'):
+        raise HTTPException(status_code=400, detail=f"Store '{payload.cost_center}' does not have a mapped Cost Centre or Godown. Please configure it.")
+        
+    cc = escape(store_mapping['cost_center_name'])
+    godown = escape(store_mapping['godown_name'])
 
     inventory_xml = ""
     item_subtotal = 0.0
@@ -667,6 +741,8 @@ async def post_purchase_item(payload: PurchaseItemPostRequest):
         name = escape(item.mapped_name or item.name)
         qty = item.qty
         unit = item.mapped_unit or item.uom
+        if unit:
+            unit = unit.replace('.', '').strip()
         if not unit or unit == 'Not Applicable':
             unit = 'PCS'
         unit = escape(unit)
@@ -678,6 +754,10 @@ async def post_purchase_item(payload: PurchaseItemPostRequest):
 
         item_subtotal += amount
 
+        # Check if batch allocation is needed
+        # Since batches are not active, we omit <BATCHNAME> or use "Primary Batch" if Tally strictly requires it. 
+        # Usually, when "Maintain Multiple Godowns" is on, but batches are off, Tally only requires <GODOWNNAME> and <BATCHNAME>Primary Batch</BATCHNAME>.
+        
         inventory_xml += f"""
         <INVENTORYENTRIES.LIST>
             <STOCKITEMNAME>{name}</STOCKITEMNAME>
@@ -687,6 +767,13 @@ async def post_purchase_item(payload: PurchaseItemPostRequest):
             <AMOUNT>-{amount:.2f}</AMOUNT>
             <ACTUALQTY> {qty} {unit}</ACTUALQTY>
             <BILLEDQTY> {qty} {unit}</BILLEDQTY>
+            <BATCHALLOCATIONS.LIST>
+                <GODOWNNAME>{godown}</GODOWNNAME>
+                <BATCHNAME>Primary Batch</BATCHNAME>
+                <AMOUNT>-{amount:.2f}</AMOUNT>
+                <ACTUALQTY> {qty} {unit}</ACTUALQTY>
+                <BILLEDQTY> {qty} {unit}</BILLEDQTY>
+            </BATCHALLOCATIONS.LIST>
             <ACCOUNTINGALLOCATIONS.LIST>
                 <LEDGERNAME>Purchase</LEDGERNAME>
                 <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
@@ -825,6 +912,68 @@ async def post_purchase_item(payload: PurchaseItemPostRequest):
     
     # Queue-First Architecture: Always save transaction to DB before attempting to send
     queue_id = queue_operation("POST_VOUCHER", xml, payload.model_dump(), f"Purchase Item Invoice: {inv_no} from {supplier}")
+    
+    # Handle Adjustment (Purchase Return via Journal)
+    adjustment_queue_id = None
+    if payload.adjustment and payload.adjustment.amount > 0:
+        adjustment = payload.adjustment
+        adj_amount = f"{adjustment.amount:.2f}"
+        adj_guid = f"PRJ-{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
+        
+        journal_xml = f"""<ENVELOPE>
+    <HEADER>
+        <TALLYREQUEST>Import Data</TALLYREQUEST>
+    </HEADER>
+    <BODY>
+        <IMPORTDATA>
+            <REQUESTDESC>
+                <REPORTNAME>All Masters</REPORTNAME>
+                <STATICVARIABLES>
+                    <SVCURRENTCOMPANY>##SVCURRENTCOMPANY</SVCURRENTCOMPANY>
+                </STATICVARIABLES>
+            </REQUESTDESC>
+            <REQUESTDATA>
+                <TALLYMESSAGE xmlns:UDF="TallyUDF">
+                    <LEDGER ACTION="Alter" NAME="Purchase Return">
+                        <NAME.LIST><NAME>Purchase Return</NAME></NAME.LIST>
+                        <PARENT>Purchase Accounts</PARENT>
+                    </LEDGER>
+                </TALLYMESSAGE>
+                <TALLYMESSAGE xmlns:UDF="TallyUDF">
+                    <VOUCHER VCHTYPE="Journal" ACTION="Create">
+                        <DATE>{tally_date}</DATE>
+                        <GUID>{adj_guid}</GUID>
+                        <VOUCHERTYPENAME>Journal</VOUCHERTYPENAME>
+                        <REFERENCE>{inv_no}</REFERENCE>
+                        <PARTYLEDGERNAME>{supplier}</PARTYLEDGERNAME>
+                        <PARTYNAME>{supplier}</PARTYNAME>
+                        <PERSISTEDVIEW>Accounting Voucher View</PERSISTEDVIEW>
+                        <ISINVOICE>No</ISINVOICE>
+                        <LEDGERENTRIES.LIST>
+                            <LEDGERNAME>{supplier}</LEDGERNAME>
+                            <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+                            <AMOUNT>-{adj_amount}</AMOUNT>
+                        </LEDGERENTRIES.LIST>
+                        <LEDGERENTRIES.LIST>
+                            <LEDGERNAME>Purchase Return</LEDGERNAME>
+                            <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+                            <AMOUNT>{adj_amount}</AMOUNT>
+                            <CATEGORYALLOCATIONS.LIST>
+                                <CATEGORY>Primary Cost Category</CATEGORY>
+                                <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+                                <COSTCENTREALLOCATIONS.LIST>
+                                    <NAME>{escape(get_store_mapping(adjustment.store)['cost_center_name']) if get_store_mapping(adjustment.store) else escape(adjustment.store)}</NAME>
+                                    <AMOUNT>{adj_amount}</AMOUNT>
+                                </COSTCENTREALLOCATIONS.LIST>
+                            </CATEGORYALLOCATIONS.LIST>
+                        </LEDGERENTRIES.LIST>
+                    </VOUCHER>
+                </TALLYMESSAGE>
+            </REQUESTDATA>
+        </IMPORTDATA>
+    </BODY>
+</ENVELOPE>"""
+        adjustment_queue_id = queue_operation("POST_VOUCHER", journal_xml, payload.model_dump(), f"Purchase Return (Adjustment): {inv_no} from {supplier}")
 
     try:
         from backend.database import get_master_dependency_state, is_master_pending_sync
@@ -834,9 +983,14 @@ async def post_purchase_item(payload: PurchaseItemPostRequest):
         dependencies = [("LEDGER", payload.supplier, None)]
         for item in payload.items:
             uom = item.mapped_unit or item.uom
+            if uom:
+                uom = uom.replace('.', '').strip()
             if not uom or uom == 'Not Applicable':
                 uom = 'PCS'
-            dependencies.append(("ITEM", item.mapped_name or item.name, {"uom": uom}))
+            if item.is_mapped:
+                dependencies.append(("ITEM", item.mapped_name, None))
+            else:
+                dependencies.append(("ITEM", item.name, {"uom": uom}))
             dependencies.append(("UOM", uom, None))
             
         for entity_type, raw_name, definition_payload in dependencies:
@@ -857,14 +1011,30 @@ async def post_purchase_item(payload: PurchaseItemPostRequest):
             # Leave as PENDING
             return {"status": "queued", "reason": "pending_master_dependency", "message": "Invoice saved to offline queue because a required master is still pending sync to Tally."}
             
+        # Post Purchase Voucher
         response = requests.post(TALLY_URL, data=xml.encode('utf-8'), timeout=15)
         parsed = parse_tally_response(response.text, "POST_VOUCHER")
         
         if not parsed["is_success"]:
             update_queue_status(queue_id, "FAILED", parsed['error_message'])
-            raise HTTPException(status_code=400, detail=f"Tally rejected the entry: {parsed['error_message']}")
+            raise HTTPException(status_code=400, detail=f"Tally rejected the purchase entry: {parsed['error_message']}")
             
         update_queue_status(queue_id, "SYNCED")
+        
+        # Post Adjustment Voucher if present
+        if adjustment_queue_id:
+            try:
+                adj_response = requests.post(TALLY_URL, data=journal_xml.encode('utf-8'), timeout=15)
+                adj_parsed = parse_tally_response(adj_response.text, "POST_VOUCHER")
+                if not adj_parsed["is_success"]:
+                    update_queue_status(adjustment_queue_id, "FAILED", adj_parsed['error_message'])
+                    # We do not fail the request entirely since the purchase posted successfully.
+                    # The UI will just tell them the adjustment failed and is in queue.
+                else:
+                    update_queue_status(adjustment_queue_id, "SYNCED")
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+                pass # Leave adjustment in queue
+        
         return {"status": "success", "message": "Successfully posted to Tally."}
     except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
         # Already marked as PENDING in the DB, leave it for the background worker
@@ -876,4 +1046,6 @@ async def post_purchase_item(payload: PurchaseItemPostRequest):
         traceback.print_exc()
         print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n", flush=True)
         update_queue_status(queue_id, "FAILED", str(e))
+        if adjustment_queue_id:
+            update_queue_status(adjustment_queue_id, "FAILED", str(e))
         raise HTTPException(status_code=500, detail=str(e))

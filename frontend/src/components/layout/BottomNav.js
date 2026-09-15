@@ -3,7 +3,7 @@
 import React from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { Home, Plus, Landmark, ListChecks, ShoppingBag, ShoppingCart, CreditCard, ArrowRightLeft, ArrowRight } from 'lucide-react';
+import { Home, Plus, Landmark, ListChecks, ShoppingBag, ShoppingCart, CreditCard, ArrowRightLeft, ArrowRight, Inbox, BarChart3, Package } from 'lucide-react';
 import { useUI } from '@/context/UIContext';
 
 export default function BottomNav() {
@@ -14,7 +14,8 @@ export default function BottomNav() {
   // Highlight 'home' if on dashboard, 'bank' if on bank-statement, 'queue' if on queue
   const isHome = pathname === '/dashboard' || pathname === '/';
   const isBank = pathname.startsWith('/bank-statement');
-  const isQueue = false; // Queue links to dashboard, Home tab handles that highlight
+  const isReview = pathname.startsWith('/review');
+  const isReports = pathname.startsWith('/reporting');
 
   const handleNewEntry = () => {
     showActionSheet({
@@ -22,6 +23,7 @@ export default function BottomNav() {
       options: [
         { label: 'Record a sale', icon: <ShoppingCart className="w-5 h-5" />, colorClass: 'bg-blue-100 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400', onClick: () => router.push('/sales') },
         { label: 'Record a purchase', icon: <ShoppingBag className="w-5 h-5" />, colorClass: 'bg-purple-100 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400', onClick: () => router.push('/purchase') },
+        { label: 'Repack / Pack Stock', icon: <Package className="w-5 h-5" />, colorClass: 'bg-rose-100 text-rose-600 dark:bg-rose-900/30 dark:text-rose-400', onClick: () => router.push('/repack') },
         { label: 'Record a payment', icon: <CreditCard className="w-5 h-5" />, colorClass: 'bg-orange-100 text-orange-600 dark:bg-orange-900/30 dark:text-orange-400', onClick: () => router.push('/payment') },
         { label: 'Move money between accounts', icon: <ArrowRightLeft className="w-5 h-5" />, colorClass: 'bg-green-100 text-green-600 dark:bg-green-900/30 dark:text-green-400', onClick: () => router.push('/transfer') },
         { label: 'Move stock between stores', icon: <ArrowRight className="w-5 h-5" />, colorClass: 'bg-indigo-100 text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400', onClick: () => router.push('/stock-transfer') },
@@ -57,9 +59,14 @@ export default function BottomNav() {
             <span className={`text-[10px] font-medium ${isBank ? 'text-teal-600 dark:text-teal-400' : 'text-gray-400 dark:text-gray-500'}`}>Bank</span>
           </Link>
 
-          <Link href="/dashboard" className="flex flex-col items-center justify-center w-16 h-full gap-1">
-            <ListChecks className={`w-6 h-6 ${isQueue ? 'text-teal-600 dark:text-teal-400' : 'text-gray-400 dark:text-gray-500'}`} />
-            <span className={`text-[10px] font-medium ${isQueue ? 'text-teal-600 dark:text-teal-400' : 'text-gray-400 dark:text-gray-500'}`}>Queue</span>
+          <Link href="/reporting" className="flex flex-col items-center justify-center w-16 h-full gap-1">
+            <BarChart3 className={`w-6 h-6 ${isReports ? 'text-teal-600 dark:text-teal-400' : 'text-gray-400 dark:text-gray-500'}`} />
+            <span className={`text-[10px] font-medium ${isReports ? 'text-teal-600 dark:text-teal-400' : 'text-gray-400 dark:text-gray-500'}`}>Reports</span>
+          </Link>
+
+          <Link href="/review" className="flex flex-col items-center justify-center w-16 h-full gap-1">
+            <Inbox className={`w-6 h-6 ${isReview ? 'text-teal-600 dark:text-teal-400' : 'text-gray-400 dark:text-gray-500'}`} />
+            <span className={`text-[10px] font-medium ${isReview ? 'text-teal-600 dark:text-teal-400' : 'text-gray-400 dark:text-gray-500'}`}>Review</span>
           </Link>
 
         </div>

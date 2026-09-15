@@ -69,7 +69,7 @@ def parse_tally_response(raw_xml: str, operation_type: str) -> dict:
         result["error_message"] = f"Tally reported ERRORS={result['errors']} without a LINEERROR message."
         return result
             
-    if result["created"] > 0:
+    if result["created"] > 0 or result["altered"] > 0:
         result["is_success"] = True
         return result
         

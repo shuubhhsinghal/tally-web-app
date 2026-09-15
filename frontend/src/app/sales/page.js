@@ -115,30 +115,33 @@ export default function SalesVoucher() {
       <div className="min-h-screen bg-gray-50 dark:bg-gray-900 pb-20">
         <TopBar title="Confirm Sale" />
         <div className="max-w-md mx-auto p-4 space-y-6 mt-4">
-          <Card className="flex flex-col gap-4">
-            <div className="text-center">
+          <Card className="flex flex-col gap-4 text-center">
+            <div>
               <p className="text-xs font-semibold text-gray-500 uppercase">Amount</p>
-              <p className="text-3xl font-black text-gray-900 dark:text-white">₹ {preview.amount}</p>
+              <p className="text-4xl font-black text-gray-900 dark:text-white mt-1">₹ {preview.amount}</p>
             </div>
             <div className="h-px bg-gray-100 dark:bg-gray-800 my-2" />
             <div>
               <p className="text-xs font-semibold text-gray-500 uppercase">Ledger</p>
-              <p className="text-base font-medium text-gray-900 dark:text-white mt-1">{preview.ledger}</p>
+              <p className="text-xl font-bold text-gray-900 dark:text-white mt-1">{preview.ledger}</p>
             </div>
             {formData.narration && (
-              <div>
-                <p className="text-xs font-semibold text-gray-500 uppercase">Notes</p>
-                <p className="text-sm font-medium text-gray-900 dark:text-white mt-1">{formData.narration}</p>
-              </div>
+              <>
+                <div className="h-px bg-gray-100 dark:bg-gray-800 my-2" />
+                <div>
+                  <p className="text-xs font-semibold text-gray-500 uppercase">Notes</p>
+                  <p className="text-base font-medium text-gray-900 dark:text-white mt-1">{formData.narration}</p>
+                </div>
+              </>
             )}
           </Card>
           
-          <div className="flex gap-3">
-            <Button variant="secondary" onClick={() => setPreview(null)} disabled={posting}>
-              Back
-            </Button>
-            <Button onClick={handlePost} disabled={posting} className="flex-1">
+          <div className="flex flex-col gap-3">
+            <Button onClick={handlePost} disabled={posting} className="w-full text-base py-3 font-bold">
               {posting ? "Sending..." : "Send to Tally"}
+            </Button>
+            <Button variant="secondary" onClick={() => setPreview(null)} disabled={posting} className="w-full text-base py-3 font-bold">
+              Back
             </Button>
           </div>
         </div>

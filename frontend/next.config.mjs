@@ -7,6 +7,10 @@ const nextConfig = {
         source: '/api/:path*',
         destination: process.env.BACKEND_URL ? `${process.env.BACKEND_URL}/api/:path*` : 'http://127.0.0.1:8000/api/:path*', // Proxy to Backend
       },
+      {
+        source: '/uploads/:path*',
+        destination: process.env.BACKEND_URL ? `${process.env.BACKEND_URL}/uploads/:path*` : 'http://127.0.0.1:8000/uploads/:path*', // Proxy uploads to Backend
+      },
     ]
   },
 };

@@ -29,7 +29,8 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT UNIQUE NOT NULL,
                 parent TEXT,
-                cost_centre BOOLEAN DEFAULT 0
+                cost_centre BOOLEAN DEFAULT 0,
+                opening_balance REAL DEFAULT 0.0
             )
         """)
         
@@ -55,6 +56,36 @@ def init_db():
                 mapped_name TEXT NOT NULL
             )
         """)
+        
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS godowns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                parent TEXT
+            )
+        """)
+        
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS stores (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                store_name TEXT UNIQUE NOT NULL,
+                cost_center_name TEXT NOT NULL,
+                godown_name TEXT NOT NULL,
+                active BOOLEAN DEFAULT 1
+            )
+        """)
+        
+        # Seed default stores if they don't exist
+        cursor.execute("SELECT COUNT(*) as count FROM stores")
+        if cursor.fetchone()['count'] == 0:
+            cursor.executemany("""
+                INSERT INTO stores (store_name, cost_center_name, godown_name)
+                VALUES (?, ?, ?)
+            """, [
+                ("Mahagun", "Mahagun", "Mahagun"),
+                ("Gulshan", "Gulshan", "Gulshan"),
+                ("VVIP", "VVIP", "VVIP")
+            ])
         
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS purchase_rates (
@@ -105,6 +136,72 @@ def init_db():
             )
         """)
         
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS product_conversions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_stock_item TEXT NOT NULL,
+                finished_stock_item TEXT NOT NULL UNIQUE,
+                source_unit TEXT NOT NULL,
+                output_unit TEXT NOT NULL,
+                weight_per_output_unit REAL,
+                weight_unit TEXT,
+                conversion_factor REAL NOT NULL,
+                active INTEGER DEFAULT 1,
+                status TEXT DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'ACTIVE', 'FAILED')),
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS repack_operations (
+                id TEXT PRIMARY KEY,
+                store_name TEXT NOT NULL,
+                source_item_name TEXT NOT NULL,
+                dest_item_name TEXT NOT NULL,
+                source_qty REAL NOT NULL,
+                source_rate REAL NOT NULL,
+                source_amount REAL NOT NULL,
+                dest_qty REAL NOT NULL,
+                conversion_id INTEGER NOT NULL REFERENCES product_conversions(id),
+                status TEXT DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'COMPLETED', 'FAILED')),
+                tally_guid TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS repack_recipe_components (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversion_id INTEGER NOT NULL REFERENCES product_conversions(id),
+                component_item_name TEXT NOT NULL,
+                component_unit TEXT NOT NULL,
+                quantity_per_finished_unit REAL NOT NULL
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS repack_operation_components (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                operation_id TEXT NOT NULL REFERENCES repack_operations(id),
+                component_item_name TEXT NOT NULL,
+                quantity REAL NOT NULL,
+                rate REAL NOT NULL,
+                amount REAL NOT NULL,
+                godown_name TEXT NOT NULL
+            )
+        """)
+        
+        # --- Migration: product_conversions to repack_recipe_components ---
+        # For existing product_conversions that don't have components yet, migrate them.
+        cursor.execute("""
+            INSERT INTO repack_recipe_components (conversion_id, component_item_name, component_unit, quantity_per_finished_unit)
+            SELECT pc.id, pc.source_stock_item, pc.source_unit, pc.conversion_factor
+            FROM product_conversions pc
+            WHERE NOT EXISTS (
+                SELECT 1 FROM repack_recipe_components rrc WHERE rrc.conversion_id = pc.id
+            )
+        """)
+
         # --- Phase 2B.2B: Bank Import Session Tables ---
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS bank_import_sessions (
@@ -158,6 +255,23 @@ def init_db():
             WHERE status = 'IN_FLIGHT'
         """, (now,))
 
+        # --- Purchase Drafts (Review Inbox) ---
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS purchase_drafts (
+                id TEXT PRIMARY KEY,
+                supplier_name TEXT,
+                invoice_number TEXT,
+                invoice_date TEXT,
+                grand_total REAL,
+                item_count INTEGER,
+                status TEXT DEFAULT 'PENDING_REVIEW',
+                draft_data TEXT NOT NULL,
+                image_path TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+
         # --- Supplier Column Mappings ---
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS supplier_column_mappings (
@@ -166,6 +280,15 @@ def init_db():
                 supplier_name TEXT NOT NULL,
                 mapping_json TEXT NOT NULL,
                 created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        
+        # --- App Settings ---
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS app_settings (
+                setting_key TEXT PRIMARY KEY,
+                setting_value TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
         """)
@@ -190,8 +313,137 @@ def init_db():
             cursor.execute("ALTER TABLE offline_queue ADD COLUMN is_hidden BOOLEAN DEFAULT 0")
         except sqlite3.OperationalError:
             pass # Column exists
+            
+        try:
+            cursor.execute("ALTER TABLE ledgers ADD COLUMN opening_balance REAL DEFAULT 0.0")
+        except sqlite3.OperationalError:
+            pass # Column exists
+            
+        try:
+            cursor.execute("ALTER TABLE reporting_vouchers ADD COLUMN reference TEXT")
+        except sqlite3.OperationalError:
+            pass
+            
+        try:
+            cursor.execute("ALTER TABLE reporting_vouchers ADD COLUMN reference_date TEXT")
+        except sqlite3.OperationalError:
+            pass
+            
+        try:
+            cursor.execute("ALTER TABLE reporting_vouchers ADD COLUMN effective_date TEXT")
+        except sqlite3.OperationalError:
+            pass
+            
+        try:
+            cursor.execute("ALTER TABLE reporting_vouchers ADD COLUMN cheque_number TEXT")
+        except sqlite3.OperationalError:
+            pass
+            
+        try:
+            cursor.execute("ALTER TABLE reporting_vouchers ADD COLUMN cheque_date TEXT")
+        except sqlite3.OperationalError:
+            pass
+            
+        try:
+            cursor.execute("ALTER TABLE reporting_vouchers ADD COLUMN bank_name TEXT")
+        except sqlite3.OperationalError:
+            pass
+
+        _init_reporting_db(cursor)
 
         conn.commit()
+
+def _init_reporting_db(cursor):
+    # Phase 1: Reporting System Data Foundation
+    
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS cost_centres (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL,
+            parent TEXT
+        )
+    """)
+    
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS reporting_vouchers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tally_guid TEXT UNIQUE NOT NULL,
+            date TEXT NOT NULL,
+            voucher_number TEXT,
+            voucher_type TEXT NOT NULL,
+            party_ledger_name TEXT,
+            narration TEXT,
+            reference TEXT,
+            reference_date TEXT,
+            effective_date TEXT,
+            cheque_number TEXT,
+            cheque_date TEXT,
+            bank_name TEXT
+        )
+    """)
+    
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS reporting_ledger_entries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            voucher_id INTEGER NOT NULL REFERENCES reporting_vouchers(id) ON DELETE CASCADE,
+            ledger_name TEXT NOT NULL,
+            amount REAL NOT NULL,
+            is_deemed_positive BOOLEAN NOT NULL
+        )
+    """)
+    
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS reporting_cost_centre_allocations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ledger_entry_id INTEGER NOT NULL REFERENCES reporting_ledger_entries(id) ON DELETE CASCADE,
+            cost_centre_name TEXT NOT NULL,
+            amount REAL NOT NULL
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS reporting_ledger_closing_balances (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ledger_name TEXT NOT NULL,
+            date TEXT NOT NULL,
+            amount REAL NOT NULL,
+            UNIQUE(ledger_name, date)
+        )
+    """)
+    
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS reporting_inventory_entries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            voucher_id INTEGER NOT NULL REFERENCES reporting_vouchers(id) ON DELETE CASCADE,
+            stock_item_name TEXT NOT NULL,
+            godown_name TEXT,
+            billed_qty REAL,
+            amount REAL,
+            rate REAL
+        )
+    """)
+    
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS reporting_sync_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            start_date TEXT NOT NULL,
+            end_date TEXT NOT NULL,
+            synced_at TEXT NOT NULL
+        )
+    """)
+    
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS reporting_monthly_stock (
+            year_month TEXT NOT NULL,
+            ledger_name TEXT NOT NULL,
+            opening_balance REAL NOT NULL,
+            debit_movement REAL NOT NULL,
+            credit_movement REAL NOT NULL,
+            closing_balance REAL NOT NULL,
+            synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (year_month, ledger_name)
+        )
+    """)
 
 # --- Helper Functions for Offline Queue ---
 def queue_operation(operation_type: str, xml_data: str, payload: dict = None, description: str = ""):
@@ -655,16 +907,57 @@ def get_purchase_rate(item_name: str) -> float:
         else:
             return app_rate
 
+def clear_and_bulk_insert_godowns(godowns_data):
+    with get_db() as db:
+        cursor = db.cursor()
+        cursor.execute("DELETE FROM godowns")
+        if godowns_data:
+            cursor.executemany(
+                "INSERT INTO godowns (name, parent) VALUES (?, ?)",
+                [(g['name'], g['parent']) for g in godowns_data]
+            )
+        db.commit()
+
+def get_active_stores():
+    with get_db() as db:
+        cursor = db.cursor()
+        cursor.execute("SELECT store_name, cost_center_name, godown_name FROM stores WHERE active = 1")
+        return [dict(r) for r in cursor.fetchall()]
+
+def get_store_mapping(store_name):
+    with get_db() as db:
+        cursor = db.cursor()
+        cursor.execute("SELECT store_name, cost_center_name, godown_name FROM stores WHERE store_name = ? AND active = 1", (store_name,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
 def clear_and_bulk_insert_ledgers(ledgers: list):
     if not ledgers:
         return
     with get_db() as conn:
         cursor = conn.cursor()
+        
+        # Preserve existing opening balances in case of missing XML data
+        cursor.execute("SELECT name, opening_balance FROM ledgers")
+        existing = {r['name']: r['opening_balance'] for r in cursor.fetchall()}
+        
         cursor.execute("DELETE FROM ledgers")
+        
+        insert_data = []
+        for l in ledgers:
+            new_ob = l.get('opening_balance')
+            if new_ob is None:
+                # Missing/invalid from Tally XML, preserve existing or default to 0.0 for brand new ledgers
+                final_ob = existing.get(l['name'], 0.0)
+            else:
+                final_ob = float(new_ob)
+                
+            insert_data.append((l['name'], l.get('parent'), l.get('cost_centre', False), final_ob))
+            
         cursor.executemany("""
-            INSERT INTO ledgers (name, parent, cost_centre)
-            VALUES (?, ?, ?)
-        """, [(l['name'], l.get('parent'), l.get('cost_centre', False)) for l in ledgers])
+            INSERT INTO ledgers (name, parent, cost_centre, opening_balance)
+            VALUES (?, ?, ?, ?)
+        """, insert_data)
         conn.commit()
 
 def clear_and_bulk_insert_stock_items(items: list):
@@ -771,6 +1064,29 @@ def save_supplier_column_mapping(supplier_name: str, mapping: dict):
         """, (supplier_key, supplier_name, mapping_str, now, now))
         conn.commit()
 
+
+# --- Helper Functions for App Settings ---
+def get_app_setting(key: str, default: str = None) -> Optional[str]:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT setting_value FROM app_settings WHERE setting_key = ?", (key,))
+        row = cursor.fetchone()
+        if row:
+            return row['setting_value']
+    return default
+
+def set_app_setting(key: str, value: str):
+    now = datetime.now().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO app_settings (setting_key, setting_value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(setting_key) DO UPDATE SET 
+                setting_value=excluded.setting_value,
+                updated_at=excluded.updated_at
+        """, (key, value, now))
+        conn.commit()
 
 # =============================================================================
 # Phase 2B.2B — Bank Import Session Persistence
@@ -1259,3 +1575,49 @@ def set_bank_import_session_offline_queued(session_key: str) -> bool:
         """, (now, session_key))
         conn.commit()
         return cursor.rowcount > 0
+
+# ---------------------------------------------------------------------------
+# Repack / Product Conversion Phase 1 Helpers
+# ---------------------------------------------------------------------------
+
+def insert_product_conversion(finished_stock_item: str, output_unit: str, components: list) -> int:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # Create recipe header
+        cursor.execute("""
+            INSERT INTO product_conversions (
+                source_stock_item, finished_stock_item, source_unit, output_unit, 
+                weight_per_output_unit, weight_unit, conversion_factor, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING')
+        """, ("", finished_stock_item, "", output_unit, 0.0, "", 0.0))
+        
+        conversion_id = cursor.lastrowid
+        
+        # Insert components
+        for comp in components:
+            cursor.execute("""
+                INSERT INTO repack_recipe_components (
+                    conversion_id, component_item_name, component_unit, quantity_per_finished_unit
+                ) VALUES (?, ?, ?, ?)
+            """, (conversion_id, comp["item_name"], comp["unit"], comp["quantity"]))
+            
+        conn.commit()
+        return conversion_id
+
+def get_product_conversions():
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM product_conversions ORDER BY id DESC")
+        conversions = [dict(row) for row in cursor.fetchall()]
+        
+        for c in conversions:
+            cursor.execute("SELECT * FROM repack_recipe_components WHERE conversion_id = ?", (c["id"],))
+            c["components"] = [dict(r) for r in cursor.fetchall()]
+            
+        return conversions
+
+def update_product_conversion_status(finished_stock_item: str, status: str):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE product_conversions SET status = ? WHERE finished_stock_item = ?", (status, finished_stock_item))
+        conn.commit()

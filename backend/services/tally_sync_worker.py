@@ -11,7 +11,7 @@ from backend.services.tally_response import sanitize_tally_xml, parse_tally_resp
 
 from backend.database import (
     get_pending_queue, update_queue_status,
-    clear_and_bulk_insert_ledgers, clear_and_bulk_insert_stock_items, clear_and_bulk_insert_uoms
+    clear_and_bulk_insert_ledgers, clear_and_bulk_insert_stock_items, clear_and_bulk_insert_uoms, clear_and_bulk_insert_godowns
 )
 
 from backend.config import TALLY_URL
@@ -20,7 +20,16 @@ from backend.config import TALLY_URL
 
 def fetch_and_cache_masters():
     # 1. Ledgers
-    ledger_payload = """<ENVELOPE>
+    from datetime import datetime
+    dt = datetime.now()
+    if dt.month >= 4:
+        fy_start = f"{dt.year}0401"
+        fy_end = f"{dt.year + 1}0331"
+    else:
+        fy_start = f"{dt.year - 1}0401"
+        fy_end = f"{dt.year}0331"
+
+    ledger_payload = f"""<ENVELOPE>
       <HEADER>
         <VERSION>1</VERSION>
         <TALLYREQUEST>Export</TALLYREQUEST>
@@ -39,6 +48,7 @@ def fetch_and_cache_masters():
                 <NATIVEMETHOD>Name</NATIVEMETHOD>
                 <NATIVEMETHOD>Parent</NATIVEMETHOD>
                 <NATIVEMETHOD>IsCostCentresOn</NATIVEMETHOD>
+                <NATIVEMETHOD>OpeningBalance</NATIVEMETHOD>
               </COLLECTION>
             </TDLMESSAGE>
           </TDL>
@@ -56,10 +66,96 @@ def fetch_and_cache_masters():
             parent = (ledger_elem.find('PARENT').text if ledger_elem.find('PARENT') is not None else ledger_elem.get('PARENT', '')).strip()
             cc_elem = ledger_elem.find('ISCOSTCENTRESON')
             cost_centre = cc_elem is not None and cc_elem.text and cc_elem.text.strip().lower() == 'yes'
-            ledgers.append({"name": name, "parent": parent, "cost_centre": cost_centre})
+            
+            ob_elem = ledger_elem.find('OPENINGBALANCE')
+            ob_val = None
+            if ob_elem is not None and ob_elem.text:
+                try:
+                    ob_val = float(ob_elem.text.strip())
+                except ValueError:
+                    print(f"Warning: Invalid OPENINGBALANCE '{ob_elem.text}' for ledger '{name}'")
+                    
+            ledgers.append({"name": name, "parent": parent, "cost_centre": cost_centre, "opening_balance": ob_val})
         clear_and_bulk_insert_ledgers(ledgers)
     except Exception as e:
         print(f"Error syncing ledgers: {e}")
+
+    # 1.5. Stock Ledger Closing Balances
+    try:
+        closing_payload = """<ENVELOPE>
+          <HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER>
+          <BODY>
+            <EXPORTDATA>
+              <REQUESTDESC>
+                <REPORTNAME>List of Accounts</REPORTNAME>
+                <STATICVARIABLES><ACCOUNTTYPE>Ledgers</ACCOUNTTYPE></STATICVARIABLES>
+              </REQUESTDESC>
+            </EXPORTDATA>
+          </BODY>
+        </ENVELOPE>"""
+        closing_resp = requests.post(TALLY_URL, data=closing_payload.encode('utf-8'), timeout=45)
+        closing_resp.raise_for_status()
+        c_root = ET.fromstring(sanitize_tally_xml(closing_resp.text))
+        
+        closing_data = []
+        for ledger_elem in c_root.findall('.//LEDGER'):
+            name_node = ledger_elem.find('NAME')
+            if name_node is None or not name_node.text:
+                continue
+            lname = name_node.text.strip()
+            
+            # We filter for only the stock ledgers to save processing time
+            # though the table can safely hold any ledger's closing balance.
+            if not lname.lower().startswith('stock'):
+                continue
+
+            for cl in ledger_elem.findall('LEDGERCLOSINGVALUES.LIST'):
+                date_node = cl.find('DATE')
+                amount_node = cl.find('AMOUNT')
+                if date_node is not None and date_node.text and amount_node is not None and amount_node.text:
+                    try:
+                        amt = float(amount_node.text.strip())
+                        closing_data.append((lname, date_node.text.strip(), amt))
+                    except ValueError:
+                        pass
+        
+        if closing_data:
+            from backend.database import get_db
+            with get_db() as db:
+                db.executemany('''
+                    INSERT INTO reporting_ledger_closing_balances (ledger_name, date, amount)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(ledger_name, date) DO UPDATE SET amount = excluded.amount
+                ''', closing_data)
+                db.commit()
+    except Exception as e:
+        print(f"Error syncing closing balances: {e}")
+
+    # 1.6 Godowns
+    godown_payload = """<ENVELOPE>
+      <HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER>
+      <BODY>
+        <EXPORTDATA>
+          <REQUESTDESC>
+            <REPORTNAME>List of Accounts</REPORTNAME>
+            <STATICVARIABLES><ACCOUNTTYPE>Godowns</ACCOUNTTYPE></STATICVARIABLES>
+          </REQUESTDESC>
+        </EXPORTDATA>
+      </BODY>
+    </ENVELOPE>"""
+    try:
+        response = requests.post(TALLY_URL, data=godown_payload.encode('utf-8'), timeout=15)
+        response.raise_for_status()
+        root = ET.fromstring(sanitize_tally_xml(response.text))
+        godowns = []
+        for g_elem in root.findall('.//GODOWN'):
+            name = (g_elem.find('NAME').text if g_elem.find('NAME') is not None else g_elem.get('NAME', '')).strip()
+            if not name: continue
+            parent = (g_elem.find('PARENT').text if g_elem.find('PARENT') is not None else g_elem.get('PARENT', '')).strip()
+            godowns.append({"name": name, "parent": parent})
+        clear_and_bulk_insert_godowns(godowns)
+    except Exception as e:
+        print(f"Error syncing godowns: {e}")
 
     # 2. Stock Items
     item_payload = """<ENVELOPE>
@@ -288,6 +384,9 @@ def flush_offline_queue():
                 if is_master_confirmed_locally(item["operation_type"].replace("CREATE_", ""), norm_name, payload_dict):
                     resolve_master_externally(item["id"], "Resolved externally by worker pre-send guard")
                     print(f"Queue item {item['id']} skipped and marked SYNCED: Master already exists with compatible definition.")
+                    if item.get("operation_type") == "CREATE_ITEM" and "name" in payload_dict:
+                        from backend.database import update_product_conversion_status
+                        update_product_conversion_status(payload_dict["name"], "ACTIVE")
                     processed += 1
                     continue
             except MasterConflictException as e:
@@ -305,8 +404,22 @@ def flush_offline_queue():
             
             if parsed_resp["is_success"]:
                 if item.get("operation_type") in ("CREATE_LEDGER", "CREATE_ITEM", "CREATE_UOM"):
-                    from backend.database import mark_master_synced
+                    from backend.database import mark_master_synced, update_product_conversion_status
                     mark_master_synced(item["id"])
+                    if item.get("operation_type") == "CREATE_ITEM":
+                        payload_dict = json.loads(item["payload"]) if item.get("payload") else {}
+                        if "name" in payload_dict:
+                            update_product_conversion_status(payload_dict["name"], "ACTIVE")
+                elif item.get("operation_type") == "REPACK_VOUCHER":
+                    update_queue_status(item["id"], "SYNCED")
+                    payload_dict = json.loads(item["payload"]) if item.get("payload") else {}
+                    repack_id = payload_dict.get("repack_id")
+                    if repack_id:
+                        from backend.database import get_db
+                        with get_db() as conn:
+                            cursor = conn.cursor()
+                            cursor.execute("UPDATE repack_operations SET status = 'COMPLETED' WHERE id = ?", (repack_id,))
+                            conn.commit()
                 else:
                     update_queue_status(item["id"], "SYNCED")
                 print(f"Successfully synced queue item {item['id']}")
@@ -314,8 +427,22 @@ def flush_offline_queue():
             else:
                 error_msg = parsed_resp["error_message"] or resp.text[:200]
                 if item.get("operation_type") in ("CREATE_LEDGER", "CREATE_ITEM", "CREATE_UOM"):
-                    from backend.database import mark_master_failed
+                    from backend.database import mark_master_failed, update_product_conversion_status
                     mark_master_failed(item["id"], error_msg)
+                    if item.get("operation_type") == "CREATE_ITEM":
+                        payload_dict = json.loads(item["payload"]) if item.get("payload") else {}
+                        if "name" in payload_dict:
+                            update_product_conversion_status(payload_dict["name"], "FAILED")
+                elif item.get("operation_type") == "REPACK_VOUCHER":
+                    update_queue_status(item["id"], "FAILED", error_msg)
+                    payload_dict = json.loads(item["payload"]) if item.get("payload") else {}
+                    repack_id = payload_dict.get("repack_id")
+                    if repack_id:
+                        from backend.database import get_db
+                        with get_db() as conn:
+                            cursor = conn.cursor()
+                            cursor.execute("UPDATE repack_operations SET status = 'FAILED' WHERE id = ?", (repack_id,))
+                            conn.commit()
                 else:
                     update_queue_status(item["id"], "FAILED", error_msg)
                 print(f"Queue item {item['id']} failed validation: {error_msg}")

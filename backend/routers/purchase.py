@@ -37,8 +37,13 @@ async def get_purchase_metadata():
     except Exception as e:
         print(f"Error loading ledgers: {e}")
         
+    from backend.database import get_active_stores
+    active_stores = get_active_stores()
+    store_names = [s['store_name'] for s in active_stores]
+
     return {
-        "suppliers": sorted(list(set(suppliers)))
+        "suppliers": sorted(list(set(suppliers))),
+        "stores": store_names
     }
 
 @router.post("/create-supplier")

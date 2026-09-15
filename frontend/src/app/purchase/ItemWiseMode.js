@@ -1,12 +1,14 @@
 'use client';
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
 import { SearchableSelect } from '@/components/ui/SearchableSelect';
 import { useUI } from '@/context/UIContext';
-import { UploadCloud, Image as ImageIcon, AlertCircle, CheckCircle2, ChevronDown, ChevronRight, PlusCircle, Trash2 } from "lucide-react";
+import { useSearchParams, useRouter } from 'next/navigation';
+import { UploadCloud, Image as ImageIcon, AlertCircle, CheckCircle2, ChevronDown, ChevronRight, PlusCircle, Trash2, Edit3 } from "lucide-react";
+import { calculateAndReconcileV4 } from './utils/reconciliation';
 
 function MasterAutocomplete({ value, onChange, placeholder, confirmed = [], masterStates = [], onCreate, disabled, rawItemName = "", inputClassName = "", createLabel = "item", isCreating = false }) {
   const [isOpen, setIsOpen] = useState(false);
@@ -27,7 +29,7 @@ function MasterAutocomplete({ value, onChange, placeholder, confirmed = [], mast
   // Deduplicate and rank: confirmed > syncing > pending > failed
   const merged = [];
   const seen = new Set();
-  
+
   const add = (name, state, original_name, error) => {
     const norm = normalize(name);
     if (!seen.has(norm)) {
@@ -150,14 +152,14 @@ function MasterAutocomplete({ value, onChange, placeholder, confirmed = [], mast
         className={`w-full min-h-[48px] px-4 rounded-xl border outline-none transition-colors ${inputClassName || "border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-teal-500/50"}`}
         placeholder={placeholder}
       />
-      
+
       {isOpen && (
         <div className="absolute z-50 w-full mt-2 bg-white dark:bg-gray-800 rounded-xl shadow-lg border border-gray-100 dark:border-gray-700 max-h-60 overflow-y-auto" role="listbox">
           {filtered.map((item, idx) => {
             const isFailed = item.state === 'failed';
             const isFocused = idx === focusedIndex;
             return (
-              <div 
+              <div
                 key={idx}
                 role="option"
                 aria-selected={isFocused}
@@ -184,9 +186,9 @@ function MasterAutocomplete({ value, onChange, placeholder, confirmed = [], mast
               </div>
             );
           })}
-          
+
           {(!exactMatch) && search.trim() !== "" && onCreate && (
-            <div 
+            <div
               role="option"
               aria-selected={focusedIndex === filtered.length}
               className={`px-4 py-3 cursor-pointer text-teal-600 flex items-center gap-2 border-t border-gray-100 dark:border-gray-700 ${isCreating ? 'opacity-50 cursor-not-allowed' : focusedIndex === filtered.length ? 'bg-teal-100 dark:bg-teal-900/50' : 'hover:bg-teal-50 dark:hover:bg-teal-900/30'}`}
@@ -213,7 +215,7 @@ function MasterAutocomplete({ value, onChange, placeholder, confirmed = [], mast
 }
 
 export function ItemWiseMode({ onPostSuccess }) {
-  const { showToast } = useUI();
+  const { showToast, showConfirmDialog } = useUI();
 
   const [meta, setMeta] = useState({ suppliers: [], stock_items: [], uoms: [], stores: ["Mahagun", "Vvip", "Gulshan"] });
   const [itemCache, setItemCache] = useState({});
@@ -224,8 +226,16 @@ export function ItemWiseMode({ onPostSuccess }) {
   const [items, setItems] = useState([]);
   const [editingItemIdx, setEditingItemIdx] = useState(null);
   const [showTaxEdit, setShowTaxEdit] = useState(false);
+  const [adjustment, setAdjustment] = useState({
+    enabled: false,
+    amount: "",
+    store: "",
+    reason: "",
+    notes: ""
+  });
 
   const [isPosting, setIsPosting] = useState(false);
+  const [isRejecting, setIsRejecting] = useState(false);
   const [creatingMaster, setCreatingMaster] = useState(null);
   const [previewUrl, setPreviewUrl] = useState(null);
   const [stagedFiles, setStagedFiles] = useState([]);
@@ -247,6 +257,110 @@ export function ItemWiseMode({ onPostSuccess }) {
   });
   const [forceManual, setForceManual] = useState(false);
 
+  // V4 Additions
+  const [useV4, setUseV4] = useState(true);
+  const [v4RawData, setV4RawData] = useState(null);
+  const [v4Config, setV4Config] = useState({
+    selected_amount_header: null,
+    gst_basis_override: null,
+    gst_recording_method: "included_in_rate"
+  });
+
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const draftIdParam = searchParams?.get('draftId');
+  const [activeDraftId, setActiveDraftId] = useState(null);
+  const [isDraftLoading, setIsDraftLoading] = useState(false);
+
+  const loadDraft = async (id) => {
+    try {
+      setIsDraftLoading(true);
+      const res = await fetch(`/api/purchase-drafts/${id}`);
+      if (!res.ok) throw new Error("Failed to load draft");
+      const data = await res.json();
+      
+      const parsedDraft = data.draft_data;
+      if (parsedDraft.invoice) setInvoice(parsedDraft.invoice);
+      if (parsedDraft.items) setItems(parsedDraft.items);
+      if (parsedDraft.v4RawData) setV4RawData(parsedDraft.v4RawData);
+      if (parsedDraft.v4Config) setV4Config(parsedDraft.v4Config);
+      if (parsedDraft.adjustment) setAdjustment(parsedDraft.adjustment);
+      if (parsedDraft.totals) setTotals(parsedDraft.totals);
+      if (parsedDraft.validationStatus) setValidationStatus(parsedDraft.validationStatus);
+      
+      setPreviewUrl(data.image_path); // Loaded from backend
+      setActiveDraftId(id);
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      setIsDraftLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (draftIdParam) {
+      // eslint-disable-next-line
+      loadDraft(draftIdParam);
+    }
+  }, [draftIdParam]);
+
+
+
+  // Auto-Save background worker
+  useEffect(() => {
+    if (!activeDraftId || isDraftLoading) return;
+    
+    const timer = setTimeout(() => {
+      const draftData = JSON.stringify({
+        invoice,
+        items,
+        v4RawData,
+        v4Config,
+        adjustment,
+        totals,
+        validationStatus
+      });
+      
+      const formData = new FormData();
+      formData.append("draft_data", draftData);
+      
+      fetch(`/api/purchase-drafts/${activeDraftId}`, {
+        method: "PUT",
+        body: formData
+      }).catch(err => console.error("Auto-save failed", err));
+    }, 1500); // 1.5s debounce
+    
+    return () => clearTimeout(timer);
+  }, [invoice, items, v4Config, adjustment, totals, validationStatus, activeDraftId, isDraftLoading]);
+
+  const v4Data = useMemo(() => {
+    if (!v4RawData) return null;
+    return calculateAndReconcileV4(
+      v4RawData.extracted_data,
+      v4Config.gst_recording_method,
+      v4Config.gst_basis_override,
+      v4Config.selected_amount_header
+    );
+  }, [v4RawData, v4Config]);
+
+  useEffect(() => {
+    if (useV4 && v4Data && v4Data.calculated_data) {
+      const mappedLegacyItems = v4Data.calculated_data.items.map(item => ({
+        name: item.name,
+        qty: item.qty,
+        rate: item.rate,
+        amount: item.ex_gst_amount,
+        final_amount: item.final_amount,
+        uom: item.uom,
+        mapped_name: item.mapped_name,
+        mapped_unit: item.mapped_unit,
+        is_mapped: item.is_mapped
+      }));
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setItems(mappedLegacyItems);
+    }
+  }, [v4Data, useV4]);
+
   useEffect(() => {
     fetch("/api/purchase-item/metadata")
       .then(res => res.json())
@@ -259,9 +373,30 @@ export function ItemWiseMode({ onPostSuccess }) {
       .catch(err => console.error(err));
   }, []);
 
-  const handleTaxRecalculation = (newRate, newTaxType) => {
+  const handleTaxRecalculation = (newRate, newTaxType, newGstMethod = null) => {
     const rate = Number(newRate);
-    const subtotal = items.reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
+    const methodToUse = newGstMethod || (v4Config?.gst_recording_method || "included_in_rate");
+    const isGstIncluded = (useV4 && v4Data?.calculated_data?.gst_treatment === 'included_in_rate') || (forceManual && methodToUse === 'included_in_rate');
+
+    let updatedItems = [...items];
+
+    if (isGstIncluded) {
+       updatedItems = updatedItems.map(item => {
+         const fAmt = item.final_amount !== undefined ? Number(item.final_amount) : Number(item.amount) || 0;
+         const fRate = item.final_rate !== undefined ? Number(item.final_rate) : Number(item.rate) || 0;
+         const exGstAmount = fAmt / (1 + (rate / 100));
+         const exGstRate = fRate / (1 + (rate / 100));
+         return { ...item, final_amount: fAmt, final_rate: fRate, amount: parseFloat(exGstAmount.toFixed(2)), rate: parseFloat(exGstRate.toFixed(2)) };
+       });
+    } else if (forceManual && !isGstIncluded) {
+       updatedItems = updatedItems.map(item => {
+         const exAmt = item.amount !== undefined ? Number(item.amount) : Number(item.final_amount) || 0;
+         const exRate = item.rate !== undefined ? Number(item.rate) : Number(item.final_rate) || 0;
+         return { ...item, amount: exAmt, rate: exRate, final_amount: exAmt, final_rate: exRate };
+       });
+    }
+
+    const subtotal = updatedItems.reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
     const totalTax = subtotal * (rate / 100);
     let newCgst = 0, newSgst = 0, newIgst = 0;
     if (newTaxType === 'interstate') {
@@ -275,6 +410,10 @@ export function ItemWiseMode({ onPostSuccess }) {
     const rounding = parseFloat((roundedTotal - preRoundTotal).toFixed(2));
 
     setInvoice(prev => ({ ...prev, gst_rate: newRate, tax_type: newTaxType, cgst: newCgst, sgst: newSgst, igst: newIgst, rounding_off: rounding }));
+    if (newGstMethod) {
+      setV4Config(prev => ({ ...prev, gst_recording_method: newGstMethod }));
+    }
+    setItems(updatedItems);
   };
 
   const getSupplierStatus = (name) => {
@@ -284,22 +423,22 @@ export function ItemWiseMode({ onPostSuccess }) {
       return str.toLowerCase().replace(/\s+/g, ' ').replace(/\s*\(\s*/g, '(').replace(/\s*\)\s*/g, ')').trim();
     };
     const targetNorm = norm(name);
-    
+
     // Check confirmed
     if (meta.suppliers?.some(s => norm(s) === targetNorm)) {
       return { status: "in_tally", text: "✓ In Tally", cls: "text-green-600", borderCls: "border-green-300 focus:ring-green-500/50", bgCls: "bg-green-50 dark:bg-green-900/10" };
     }
-    
+
     // Check masterStates
     if (meta.master_states?.ledgers) {
       const pendingMatch = meta.master_states.ledgers.find(m => norm(m.normalized_name) === targetNorm || norm(m.name) === targetNorm);
       if (pendingMatch) {
-         if (pendingMatch.state === "syncing") return { status: "syncing", text: "↻ Syncing", cls: "text-blue-600", borderCls: "border-blue-300 focus:ring-blue-500/50", bgCls: "bg-blue-50 dark:bg-blue-900/10" };
-         if (pendingMatch.state === "pending") return { status: "in_queue", text: "⏳ In Queue", cls: "text-amber-600", borderCls: "border-amber-300 focus:ring-amber-500/50", bgCls: "bg-amber-50 dark:bg-amber-900/10" };
-         if (pendingMatch.state === "failed") return { status: "failed", text: "⚠ Supplier creation failed", cls: "text-red-600", borderCls: "border-red-300 focus:ring-red-500/50", bgCls: "bg-red-50 dark:bg-red-900/10", error: pendingMatch.error };
+        if (pendingMatch.state === "syncing") return { status: "syncing", text: "↻ Syncing", cls: "text-blue-600", borderCls: "border-blue-300 focus:ring-blue-500/50", bgCls: "bg-blue-50 dark:bg-blue-900/10" };
+        if (pendingMatch.state === "pending") return { status: "in_queue", text: "⏳ In Queue", cls: "text-amber-600", borderCls: "border-amber-300 focus:ring-amber-500/50", bgCls: "bg-amber-50 dark:bg-amber-900/10" };
+        if (pendingMatch.state === "failed") return { status: "failed", text: "⚠ Supplier creation failed", cls: "text-red-600", borderCls: "border-red-300 focus:ring-red-500/50", bgCls: "bg-red-50 dark:bg-red-900/10", error: pendingMatch.error };
       }
     }
-    
+
     // Not found
     return { status: "not_found", text: "⚠ New supplier — not found in Tally or Queue", cls: "text-red-600", borderCls: "border-red-300 focus:ring-red-500/50", bgCls: "bg-red-50 dark:bg-red-900/10" };
   };
@@ -307,79 +446,68 @@ export function ItemWiseMode({ onPostSuccess }) {
   const handleFileChange = (e) => {
     const newFiles = Array.from(e.target.files);
     if (newFiles.length === 0) return;
-    
-    setStagedFiles(prev => [
-      ...prev,
-      ...newFiles.filter(f => f.size > 0).map(f => ({
-        file: f,
-        previewUrl: URL.createObjectURL(f)
-      }))
-    ]);
-    
+
+    const newStaged = newFiles.filter(f => f.size > 0).map(f => ({
+      file: f,
+      previewUrl: URL.createObjectURL(f)
+    }));
+
+    const combined = [...stagedFiles, ...newStaged];
+    setStagedFiles(combined);
+
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
+    
+    // Automatically trigger extraction on upload
+    executeExtract(combined);
   };
 
   const removeStagedFile = (index) => {
     setStagedFiles(prev => prev.filter((_, i) => i !== index));
   };
 
-  const handleExtract = async () => {
+  const handleExtract = () => {
     if (stagedFiles.length === 0) return;
+    executeExtract(stagedFiles);
+  };
+
+  const executeExtract = async (filesToExtract) => {
+    const files = filesToExtract || stagedFiles;
+    if (files.length === 0) return;
 
     // Use the first file for fallback preview/file refs if needed later
-    setFile(stagedFiles[0].file);
-    setPreviewUrl(stagedFiles[0].previewUrl);
+    setFile(files[0].file);
+    setPreviewUrl(files[0].previewUrl);
 
     setIsExtracting(true);
     const fd = new FormData();
-    stagedFiles.forEach(sf => {
+    files.forEach(sf => {
       fd.append("files", sf.file);
     });
 
     try {
-      const res = await fetch("/api/extract-proxy", { method: "POST", body: fd });
+      const res = await fetch("/api/async-extract-proxy", { method: "POST", body: fd });
       if (!res.ok) {
         const errorData = await res.json();
-        throw new Error(errorData.detail || "Extraction failed");
+        throw new Error(errorData.error || errorData.detail || "Extraction failed");
       }
-      const data = await res.json();
-
-      setInvoice({
-        supplier: data.supplier,
-        invoice_number: data.invoice_number,
-        date: data.date,
-        cost_center: "",
-        cgst: data.cgst,
-        sgst: data.sgst,
-        igst: data.igst,
-        rounding_off: data.rounding_off,
-        gst_rate: data.gst_rate !== undefined ? data.gst_rate : 0,
-        tax_type: data.tax_type || "local"
-      });
-      setItems(data.items);
-      setValidationStatus(data.validation_status || "matched");
-      setMappingFailed(data.mapping_attempt_failed || false);
-      setDetectedHeaders(data.detected_headers || []);
-      setTotals({
-        printed: data.printed_grand_total || 0,
-        calculated: data.calculated_grand_total || 0,
-        diff: data.total_difference || 0
-      });
-      setForceManual(false);
+      
+      showToast("Invoice parsing started. Check Review Inbox in a few minutes.", "success");
+      setIsExtracting(false);
+      window.location.href = '/review';
+      
     } catch (error) {
       showToast(error.message, 'error');
-    } finally {
       setIsExtracting(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
-    }
+    } 
   };
 
   const handleCreateItem = async (itemName, uom) => {
     const nameToCreate = (itemName || "").replace(/\s+/g, ' ').trim();
     if (!nameToCreate) return;
-    
+
     const targetUom = (uom || "PCS").trim();
     const normUom = targetUom.toLowerCase();
     const uomState = meta.master_states?.uoms?.find(u => u.normalized_name === normUom);
@@ -404,7 +532,7 @@ export function ItemWiseMode({ onPostSuccess }) {
         .then(r => r.json())
         .then(d => setMeta(prev => ({ ...prev, ...d })))
         .catch(err => console.error(err));
-        
+
       // Mark any line item whose raw name matches the newly created item as mapped
       setItems(prevItems =>
         prevItems.map(item =>
@@ -424,7 +552,21 @@ export function ItemWiseMode({ onPostSuccess }) {
     const newItems = [...items];
     newItems[index].mapped_name = mappedName;
     newItems[index].is_mapped = !!mappedName;
-    if (optionalUom) newItems[index].uom = optionalUom;
+    if (forceManual) {
+      newItems[index].name = mappedName;
+    }
+    
+    let uomToSet = optionalUom;
+    if (!uomToSet && mappedName) {
+      const normalize = s => (s||"").replace(/\s+/g,' ').trim().toLowerCase();
+      const normMapped = normalize(mappedName);
+      const cacheEntry = Object.values(itemCache).find(v => normalize(v?.name) === normMapped);
+      if (cacheEntry && cacheEntry.base_units) {
+        uomToSet = cacheEntry.base_units;
+      }
+    }
+    if (uomToSet) newItems[index].uom = uomToSet.toUpperCase();
+    
     setItems(newItems);
 
     if (mappedName) {
@@ -437,13 +579,63 @@ export function ItemWiseMode({ onPostSuccess }) {
   };
 
   const updateItemVal = (index, field, value) => {
-    const newItems = [...items];
-    newItems[index][field] = value;
+    if (useV4 && v4RawData) {
+      // V4 local recalculation handles everything
+      setV4RawData(prev => {
+        const next = { ...prev };
+        const items = [...next.extracted_data.items];
+        const rawItem = { ...items[index] };
+        if (field === 'qty') rawItem._manual_qty = value;
+        if (field === 'amount') rawItem._manual_line_amount = value;
+        // Rate is derived in V4, but if we need manual rate support it goes here.
+        items[index] = rawItem;
+        next.extracted_data.items = items;
+        return next;
+      });
+      return;
+    }
 
-    if (field === 'qty' || field === 'rate') {
+    const newItems = [...items];
+    const isGstInc = forceManual && v4Config?.gst_recording_method === 'included_in_rate';
+    const gstRate = invoice.gst_rate ? parseFloat(invoice.gst_rate) : 0;
+
+    if (field === 'qty') {
+      newItems[index].qty = value;
+      const qty = parseFloat(value) || 0;
+      if (isGstInc) {
+        const fRate = parseFloat(newItems[index].final_rate) || 0;
+        newItems[index].final_amount = parseFloat((qty * fRate).toFixed(2));
+        newItems[index].amount = parseFloat((newItems[index].final_amount / (1 + (gstRate / 100))).toFixed(2));
+        newItems[index].rate = parseFloat((fRate / (1 + (gstRate / 100))).toFixed(2));
+      } else {
+        const rate = parseFloat(newItems[index].rate) || 0;
+        newItems[index].amount = parseFloat((qty * rate).toFixed(2));
+        newItems[index].final_amount = newItems[index].amount;
+        newItems[index].final_rate = newItems[index].rate;
+      }
+    } else if (field === 'rate') {
+      newItems[index].rate = value;
       const qty = parseFloat(newItems[index].qty) || 0;
-      const rate = parseFloat(newItems[index].rate) || 0;
+      const rate = parseFloat(value) || 0;
       newItems[index].amount = parseFloat((qty * rate).toFixed(2));
+      newItems[index].final_amount = newItems[index].amount;
+      newItems[index].final_rate = newItems[index].rate;
+    } else if (field === 'amount') {
+      newItems[index].amount = value;
+      newItems[index].final_amount = value;
+    } else if (field === 'final_rate') {
+      newItems[index].final_rate = value;
+      const qty = parseFloat(newItems[index].qty) || 0;
+      const fRate = parseFloat(value) || 0;
+      newItems[index].final_amount = parseFloat((qty * fRate).toFixed(2));
+      newItems[index].amount = parseFloat((newItems[index].final_amount / (1 + (gstRate / 100))).toFixed(2));
+      newItems[index].rate = parseFloat((fRate / (1 + (gstRate / 100))).toFixed(2));
+    } else if (field === 'final_amount') {
+      newItems[index].final_amount = value;
+      const fAmt = parseFloat(value) || 0;
+      newItems[index].amount = parseFloat((fAmt / (1 + (gstRate / 100))).toFixed(2));
+    } else {
+      newItems[index][field] = value;
     }
     setItems(newItems);
   };
@@ -461,12 +653,12 @@ export function ItemWiseMode({ onPostSuccess }) {
     const getItemState = (mappedName) => {
       const norm = normalizeStr(mappedName);
       if (!norm) return null;
-      
+
       const isConfirmedOrLocal = Object.keys(itemCache).some(key => normalizeStr(key) === norm) ||
         Object.values(itemCache).some(v => normalizeStr(v?.name) === norm) ||
         meta.stock_items.some(s => normalizeStr(s) === norm);
       if (isConfirmedOrLocal) return { state: 'confirmed' };
-      
+
       const pState = meta.master_states?.stock_items?.find(m => normalizeStr(m.normalized_name) === norm);
       if (pState) return pState;
       return null;
@@ -487,21 +679,49 @@ export function ItemWiseMode({ onPostSuccess }) {
       showToast("Please map all items to existing Tally items before pushing.", 'error');
       return;
     }
-    
+
     if (hasFailedItems) {
       showToast("One or more items have failed to sync to Tally. Please resolve them first.", 'error');
       return;
     }
 
+    if (adjustment.enabled && Number(adjustment.amount) > 0 && !adjustment.store) {
+      showToast("Please select a return cost centre for the adjustment.", 'error');
+      return;
+    }
+
     setIsPosting(true);
     try {
-      let tallyDate = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().split('T')[0].replace(/-/g, '');
-      if (invoice.date) tallyDate = invoice.date.replace(/-/g, '');
+      let tallyDate = invoice.date || new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().split('T')[0];
+      
+      const isIncludedInRate = useV4 && v4Data?.calculated_data?.gst_treatment === "included_in_rate";
+      const payloadItems = items.map(item => ({
+        ...item,
+        amount: (isIncludedInRate && item.final_amount !== undefined) ? item.final_amount : item.amount,
+        rate: (isIncludedInRate && item.final_rate !== undefined) ? item.final_rate : item.rate
+      }));
+
+      const postPayload = { 
+        ...invoice, 
+        tally_date: tallyDate, 
+        items: payloadItems,
+        cgst: isIncludedInRate ? 0 : invoice.cgst,
+        sgst: isIncludedInRate ? 0 : invoice.sgst,
+        igst: isIncludedInRate ? 0 : invoice.igst
+      };
+      if (adjustment.enabled && Number(adjustment.amount) > 0) {
+        postPayload.adjustment = {
+          amount: Number(adjustment.amount),
+          store: adjustment.store,
+          reason: adjustment.reason || "",
+          notes: adjustment.notes || ""
+        };
+      }
 
       const res = await fetch("/api/purchase-item/post", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...invoice, tally_date: tallyDate, items })
+        body: JSON.stringify(postPayload)
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "Post failed");
@@ -515,6 +735,16 @@ export function ItemWiseMode({ onPostSuccess }) {
       } else {
         showToast("Purchase saved to Tally");
       }
+      
+      // If we posted from a draft, delete the draft now
+      if (activeDraftId) {
+        try {
+          await fetch(`/api/purchase-drafts/${activeDraftId}`, { method: 'DELETE' });
+        } catch (e) {
+          console.error("Failed to delete draft after posting", e);
+        }
+      }
+      
       if (onPostSuccess) onPostSuccess();
     } catch (error) {
       showToast(error.message, 'error');
@@ -533,16 +763,16 @@ export function ItemWiseMode({ onPostSuccess }) {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "Failed to create supplier");
-      
+
       // Update local invoice form to have this supplier
       setInvoice(prev => ({ ...prev, supplier: supplierName }));
-      
+
       // Re-fetch metadata
       fetch("/api/purchase-item/metadata")
         .then(r => r.json())
         .then(d => setMeta(prev => ({ ...prev, ...d })))
         .catch(err => console.error(err));
-        
+
     } catch (error) {
       showToast(error.message, 'error');
     } finally {
@@ -556,7 +786,7 @@ export function ItemWiseMode({ onPostSuccess }) {
     stagedFiles.forEach(sf => {
       fd.append("files", sf.file);
     });
-    
+
     const payload = { ...colMapping };
     if (!payload.discount_header) {
       payload.discount_treatment = "ignore";
@@ -567,13 +797,13 @@ export function ItemWiseMode({ onPostSuccess }) {
       const res = await fetch("/api/extract-proxy", { method: "POST", body: fd });
       if (!res.ok) {
         const errorData = await res.json();
-        const errorMessage = Array.isArray(errorData.detail) 
-          ? JSON.stringify(errorData.detail) 
+        const errorMessage = Array.isArray(errorData.detail)
+          ? JSON.stringify(errorData.detail)
           : errorData.detail;
         throw new Error(errorMessage || "Extraction failed");
       }
       const data = await res.json();
-      
+
       setInvoice({
         supplier: data.supplier,
         invoice_number: data.invoice_number,
@@ -602,21 +832,64 @@ export function ItemWiseMode({ onPostSuccess }) {
     }
   };
 
+  const initializeManualDraft = () => {
+    const today = new Date();
+    const yyyy = today.getFullYear();
+    const mm = String(today.getMonth() + 1).padStart(2, '0');
+    const dd = String(today.getDate()).padStart(2, '0');
+    
+    setInvoice({
+      date: `${yyyy}-${mm}-${dd}`,
+      voucher_number: "",
+      supplier_name: "",
+      store: "Mahagun",
+      gst_rate: 0,
+      tax_type: "local",
+      cgst: 0,
+      sgst: 0,
+      igst: 0,
+      rounding_off: 0
+    });
+    setItems([]);
+    setV4RawData(null);
+    setUseV4(true);
+    setV4Config({
+      selected_amount_header: null,
+      gst_basis_override: null,
+      gst_recording_method: "included_in_rate" // Keep existing default
+    });
+    setTotals({ printed: 0, calculated: 0, diff: 0 });
+    setValidationStatus("matched");
+    setForceManual(true);
+  };
+
   if (!invoice) {
     return (
       <div className="space-y-6">
-        <div className="flex flex-col items-center justify-center p-8 text-center bg-gray-50 dark:bg-gray-800/50 rounded-2xl border-2 border-dashed border-gray-200 dark:border-gray-700 relative">
-          <input type="file" multiple accept="image/*,.heic,.heif,image/heic,image/heif" className="hidden" id="file-upload" onChange={handleFileChange} ref={fileInputRef} />
-          <label htmlFor="file-upload" className="cursor-pointer flex flex-col items-center">
-            {isExtracting ? (
-              <div className="w-12 h-12 rounded-full border-4 border-teal-200 border-t-teal-600 animate-spin mb-4" />
-            ) : (
-              <UploadCloud className="h-12 w-12 text-teal-600 mb-4" />
-            )}
-            <span className="text-lg font-bold text-gray-900 dark:text-gray-100">
-              {isExtracting ? "AI is reading invoice..." : (stagedFiles.length > 0 ? "Add more pages" : "Take a photo of the invoice")}
-            </span>
-          </label>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="flex flex-col items-center justify-center p-8 text-center bg-gray-50 dark:bg-gray-800/50 rounded-2xl border-2 border-dashed border-gray-200 dark:border-gray-700 relative hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors">
+            <input type="file" multiple accept="image/*,.heic,.heif,image/heic,image/heif" className="hidden" id="file-upload" onChange={handleFileChange} ref={fileInputRef} />
+            <label htmlFor="file-upload" className="cursor-pointer flex flex-col items-center w-full h-full">
+              {isExtracting ? (
+                <div className="w-12 h-12 rounded-full border-4 border-teal-200 border-t-teal-600 animate-spin mb-4" />
+              ) : (
+                <UploadCloud className="h-12 w-12 text-teal-600 mb-4" />
+              )}
+              <span className="text-lg font-bold text-gray-900 dark:text-gray-100">
+                {isExtracting ? "AI is reading invoice..." : (stagedFiles.length > 0 ? "Add more pages" : "Upload / Take Invoice")}
+              </span>
+            </label>
+          </div>
+          
+          <div 
+            onClick={initializeManualDraft}
+            className={`flex flex-col items-center justify-center p-8 text-center bg-gray-50 dark:bg-gray-800/50 rounded-2xl border-2 border-dashed border-gray-200 dark:border-gray-700 relative transition-colors ${isExtracting || stagedFiles.length > 0 ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800'}`}
+          >
+             <Edit3 className="h-12 w-12 text-teal-600 mb-4" />
+             <span className="text-lg font-bold text-gray-900 dark:text-gray-100">
+               Enter Purchase Manually
+             </span>
+          </div>
         </div>
 
         {stagedFiles.length > 0 && !isExtracting && (
@@ -637,21 +910,166 @@ export function ItemWiseMode({ onPostSuccess }) {
                 </div>
               ))}
             </div>
-            
+
+            <div className="flex items-center justify-between bg-white dark:bg-gray-800 p-3 rounded-lg border border-gray-200 dark:border-gray-700">
+              <span className="text-sm font-medium text-gray-700 dark:text-gray-300">Use V4 Extraction (Beta)</span>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input type="checkbox" className="sr-only peer" checked={useV4} onChange={e => setUseV4(e.target.checked)} />
+                <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-teal-600"></div>
+              </label>
+            </div>
+
             <Button onClick={handleExtract} disabled={isExtracting} className="w-full">
               Extract Invoice ({stagedFiles.length} pages)
             </Button>
           </div>
         )}
+
+
       </div>
     );
   }
 
-  const itemSubtotal = items.reduce((acc, curr) => acc + (curr.amount || 0), 0);
-  const grandTotal = itemSubtotal + (invoice.cgst || 0) + (invoice.sgst || 0) + (invoice.igst || 0) + (invoice.rounding_off || 0);
+  // Totals calculations
+  let itemSubtotal = 0;
+  let computedCgst = invoice?.cgst || 0;
+  let computedSgst = invoice?.sgst || 0;
+  let computedIgst = invoice?.igst || 0;
+  let computedRounding = invoice?.rounding_off || 0;
+  let grandTotal = 0;
+
+  const isGstIncluded = (useV4 && v4Data?.calculated_data?.gst_treatment === 'included_in_rate') || (forceManual && v4Config?.gst_recording_method === 'included_in_rate');
+
+  if (isGstIncluded) {
+    itemSubtotal = items.reduce((acc, curr) => acc + (curr.final_amount !== undefined ? curr.final_amount : (curr.amount || 0)), 0);
+    grandTotal = itemSubtotal + computedRounding;
+  } else {
+    itemSubtotal = items.reduce((acc, curr) => acc + (curr.amount || 0), 0);
+    grandTotal = itemSubtotal + computedCgst + computedSgst + computedIgst + computedRounding;
+  }
+
+  const handleV4ConfigChange = (updates) => {
+    setV4Config(prev => ({ ...prev, ...updates }));
+  };
+
+  const handleReject = () => {
+    if (!activeDraftId) return;
+    
+    showConfirmDialog({
+      title: "Reject Invoice",
+      message: "Are you sure you want to discard this invoice? This action cannot be undone.",
+      danger: true,
+      onConfirm: async () => {
+        setIsRejecting(true);
+        try {
+          const res = await fetch(`/api/purchase-drafts/${activeDraftId}`, { method: 'DELETE' });
+          if (!res.ok) throw new Error("Failed to delete draft");
+          
+          showToast("Invoice discarded successfully.", "success");
+          window.location.href = '/review';
+        } catch (err) {
+          showToast(err.message || "Failed to reject invoice", "error");
+          setIsRejecting(false);
+        }
+      }
+    });
+  };
 
   return (
     <div className="space-y-6">
+
+      {useV4 && v4Data && (
+        <Card className="flex flex-col gap-6 !border-teal-500/30 dark:!border-teal-500/20 bg-gradient-to-br from-teal-50/50 to-white dark:from-teal-900/10 dark:to-gray-900 shadow-sm relative overflow-hidden">
+          <div className="absolute top-0 right-0 p-4 opacity-10">
+            <AlertCircle className="w-24 h-24 text-teal-600" />
+          </div>
+
+          <div className="relative z-10 flex flex-col gap-1 text-teal-900 dark:text-teal-100">
+            <h2 className="text-xl font-bold tracking-tight">Invoice Configuration</h2>
+            <p className="text-sm opacity-80">Confirm the invoice layout so we can calculate GST correctly.</p>
+          </div>
+
+          <div className="relative z-10 flex flex-col gap-6 divide-y divide-teal-100 dark:divide-gray-800">
+
+            {/* Question 1: Amount Column Selection */}
+            <div className="flex flex-col gap-3 pt-6 first:pt-0">
+              <label className="text-sm font-bold text-gray-900 dark:text-gray-100 flex flex-col">
+                <span className="flex items-center gap-1.5"><span className="w-5 h-5 rounded-full bg-teal-100 dark:bg-teal-900/50 text-teal-600 dark:text-teal-400 flex items-center justify-center text-xs">1</span> Amount column</span>
+              </label>
+              <div className="relative group max-w-md">
+                <select
+                  className="w-full appearance-none bg-white dark:bg-gray-800 border-2 border-gray-200 dark:border-gray-700 text-gray-900 dark:text-gray-100 text-sm rounded-xl px-4 py-3 pr-10 outline-none focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 transition-all font-medium cursor-pointer"
+                  value={v4Data.calculated_data?.active_amount_header || ""}
+                  onChange={e => handleV4ConfigChange({ selected_amount_header: e.target.value })}
+                >
+                  {v4Data.calculated_data?.available_amount_headers?.map(header => (
+                    <option key={header} value={header}>{header}</option>
+                  ))}
+                  {(!v4Data.calculated_data?.available_amount_headers || v4Data.calculated_data.available_amount_headers.length === 0) && (
+                    <option value="">No columns found</option>
+                  )}
+                </select>
+                <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400 pointer-events-none group-hover:text-teal-500 transition-colors" />
+              </div>
+            </div>
+
+            {/* Question 2: GST Basis */}
+            <div className="flex flex-col gap-3 pt-6">
+              <label className="text-sm font-bold text-gray-900 dark:text-gray-100 flex flex-col">
+                <span className="flex items-center gap-1.5"><span className="w-5 h-5 rounded-full bg-teal-100 dark:bg-teal-900/50 text-teal-600 dark:text-teal-400 flex items-center justify-center text-xs">2</span> Does this amount include GST?</span>
+              </label>
+              <div className="flex flex-col gap-2 max-w-md">
+                <label className={`flex items-center gap-3 p-3 border-2 rounded-xl cursor-pointer transition-all ${v4Data.calculated_data?.gst_basis === "inclusive" ? 'border-teal-500 bg-teal-50/50 dark:bg-teal-900/20' : 'border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 hover:border-gray-300 dark:hover:border-gray-600'}`}>
+                  <input type="radio" name="basis" value="inclusive" className="text-teal-600 focus:ring-teal-500 w-4 h-4" checked={v4Data.calculated_data?.gst_basis === "inclusive"} onChange={e => handleV4ConfigChange({ gst_basis_override: e.target.value })} />
+                  <span className="text-sm font-medium text-gray-900 dark:text-gray-100">Yes, GST included</span>
+                </label>
+                <label className={`flex items-center gap-3 p-3 border-2 rounded-xl cursor-pointer transition-all ${v4Data.calculated_data?.gst_basis === "exclusive" ? 'border-teal-500 bg-teal-50/50 dark:bg-teal-900/20' : 'border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 hover:border-gray-300 dark:hover:border-gray-600'}`}>
+                  <input type="radio" name="basis" value="exclusive" className="text-teal-600 focus:ring-teal-500 w-4 h-4" checked={v4Data.calculated_data?.gst_basis === "exclusive"} onChange={e => handleV4ConfigChange({ gst_basis_override: e.target.value })} />
+                  <span className="text-sm font-medium text-gray-900 dark:text-gray-100">No, GST excluded</span>
+                </label>
+              </div>
+            </div>
+
+            {/* Question 3: Accounting Treatment */}
+            <div className="flex flex-col gap-3 pt-6">
+              <label className="text-sm font-bold text-gray-900 dark:text-gray-100 flex flex-col">
+                <span className="flex items-center gap-1.5"><span className="w-5 h-5 rounded-full bg-teal-100 dark:bg-teal-900/50 text-teal-600 dark:text-teal-400 flex items-center justify-center text-xs">3</span> Purchase rate treatment</span>
+              </label>
+              <div className="flex flex-col gap-2 max-w-md">
+                <label className={`flex items-center gap-3 p-3 border-2 rounded-xl cursor-pointer transition-all ${v4Data.calculated_data?.gst_treatment === "included_in_rate" ? 'border-teal-500 bg-teal-50/50 dark:bg-teal-900/20' : 'border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 hover:border-gray-300 dark:hover:border-gray-600'}`}>
+                  <input type="radio" name="treatment" value="included_in_rate" className="text-teal-600 focus:ring-teal-500 w-4 h-4" checked={v4Data.calculated_data?.gst_treatment === "included_in_rate"} onChange={e => handleV4ConfigChange({ gst_recording_method: e.target.value })} />
+                  <span className="text-sm font-medium text-gray-900 dark:text-gray-100">Include GST in purchase rate</span>
+                </label>
+                <label className={`flex items-center gap-3 p-3 border-2 rounded-xl cursor-pointer transition-all ${v4Data.calculated_data?.gst_treatment === "separate_ledger" ? 'border-teal-500 bg-teal-50/50 dark:bg-teal-900/20' : 'border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 hover:border-gray-300 dark:hover:border-gray-600'}`}>
+                  <input type="radio" name="treatment" value="separate_ledger" className="text-teal-600 focus:ring-teal-500 w-4 h-4" checked={v4Data.calculated_data?.gst_treatment === "separate_ledger"} onChange={e => handleV4ConfigChange({ gst_recording_method: e.target.value })} />
+                  <span className="text-sm font-medium text-gray-900 dark:text-gray-100">Record GST separately</span>
+                </label>
+              </div>
+            </div>
+
+          </div>
+        </Card>
+      )}
+
+      {useV4 && v4Data?.reconciliation_data && (
+        <Card className={`flex flex-col gap-3 ${v4Data.reconciliation_data.confidence === "REVIEW_REQUIRED" ? 'border-amber-300 bg-amber-50 dark:bg-amber-900/10' : 'border-green-300 bg-green-50 dark:bg-green-900/10'}`}>
+          <div className="flex items-center gap-2">
+            {v4Data.reconciliation_data.confidence === "REVIEW_REQUIRED" ? (
+              <AlertCircle className="w-5 h-5 text-amber-600" />
+            ) : (
+              <CheckCircle2 className="w-5 h-5 text-green-600" />
+            )}
+            <h3 className="font-bold text-lg">
+              {v4Data.reconciliation_data.confidence === "REVIEW_REQUIRED" ? "Review Required" : "High Confidence Match"}
+            </h3>
+          </div>
+          {v4Data.reconciliation_data.messages.length > 0 && (
+            <ul className="text-sm list-disc pl-5 text-gray-700 dark:text-gray-300 space-y-1">
+              {v4Data.reconciliation_data.messages.map((m, i) => <li key={i}>{m}</li>)}
+            </ul>
+          )}
+        </Card>
+      )}
 
       <Card className="flex flex-col gap-4">
         <div className="flex gap-4">
@@ -675,7 +1093,7 @@ export function ItemWiseMode({ onPostSuccess }) {
           return (
             <div className="space-y-1.5">
               <label className="text-sm font-medium text-gray-700 dark:text-gray-300 ml-1">Supplier</label>
-              <MasterAutocomplete 
+              <MasterAutocomplete
                 value={invoice.supplier || ""}
                 onChange={val => setInvoice({ ...invoice, supplier: val })}
                 placeholder="Select or type supplier..."
@@ -688,8 +1106,8 @@ export function ItemWiseMode({ onPostSuccess }) {
               />
               {supplierStatus && (
                 <div className={`text-xs font-bold ml-1 flex flex-col ${supplierStatus.cls}`}>
-                   <span>{supplierStatus.text}</span>
-                   {supplierStatus.error && <span className="font-normal opacity-80 mt-0.5">{supplierStatus.error}</span>}
+                  <span>{supplierStatus.text}</span>
+                  {supplierStatus.error && <span className="font-normal opacity-80 mt-0.5">{supplierStatus.error}</span>}
                 </div>
               )}
             </div>
@@ -697,12 +1115,27 @@ export function ItemWiseMode({ onPostSuccess }) {
         })()}
         <Select
           label="Store"
-          value={invoice.cost_center}
+          value={invoice?.cost_center || ""}
           onChange={e => setInvoice({ ...invoice, cost_center: e.target.value })}
         >
           <option value="" disabled>Select Store...</option>
           {meta.stores.map(s => <option key={s} value={s}>{s}</option>)}
         </Select>
+
+        {forceManual && (
+          <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-800/50 rounded-lg border border-gray-200 dark:border-gray-700 mt-2">
+            <span className="text-sm font-bold text-gray-700 dark:text-gray-300">GST Inclusive Rate</span>
+            <label className="relative inline-flex items-center cursor-pointer">
+              <input 
+                type="checkbox" 
+                className="sr-only peer" 
+                checked={v4Config?.gst_recording_method !== 'exclude_gst'} 
+                onChange={e => handleTaxRecalculation(invoice.gst_rate, invoice.tax_type, e.target.checked ? "included_in_rate" : "exclude_gst")} 
+              />
+              <div className="w-11 h-6 bg-gray-300 peer-focus:outline-none rounded-full peer dark:bg-gray-600 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-teal-600"></div>
+            </label>
+          </div>
+        )}
 
         {previewUrl && (
           <a href={previewUrl} target="_blank" rel="noreferrer" className="flex items-center gap-2 text-teal-600 font-medium text-sm pt-2 border-t border-gray-100 dark:border-gray-800">
@@ -716,9 +1149,9 @@ export function ItemWiseMode({ onPostSuccess }) {
         <Card className="flex flex-col gap-4 border-amber-200 bg-amber-50 dark:bg-amber-900/10">
           <div className="flex items-center gap-2 text-amber-800 dark:text-amber-200">
             <AlertCircle className="w-5 h-5" />
-            <h3 className="font-bold text-lg">Invoice total doesn't match</h3>
+            <h3 className="font-bold text-lg">Invoice total doesn&apos;t match</h3>
           </div>
-          
+
           <div className="grid grid-cols-3 gap-2 text-sm bg-white dark:bg-gray-800 p-3 rounded-lg border border-amber-100 dark:border-gray-700">
             <div><span className="text-gray-500">Printed:</span> <span className="font-bold">₹{totals.printed.toFixed(2)}</span></div>
             <div><span className="text-gray-500">Extracted:</span> <span className="font-bold">₹{totals.calculated.toFixed(2)}</span></div>
@@ -727,48 +1160,48 @@ export function ItemWiseMode({ onPostSuccess }) {
 
           {mappingFailed && (
             <p className="text-sm text-red-600 font-medium bg-red-50 dark:bg-red-900/20 p-2 rounded">
-              The selected columns still don't match the invoice total. Check the selections or continue and edit the items manually.
+              The selected columns still don&apos;t match the invoice total. Check the selections or continue and edit the items manually.
             </p>
           )}
 
           <p className="text-sm font-medium text-amber-900 dark:text-amber-100 pt-2">Please identify these invoice columns:</p>
-          
+
           <div className="grid grid-cols-2 gap-4">
-            <Select label="Quantity" value={colMapping.qty_header} onChange={e => setColMapping({...colMapping, qty_header: e.target.value})}>
+            <Select label="Quantity" value={colMapping.qty_header} onChange={e => setColMapping({ ...colMapping, qty_header: e.target.value })}>
               <option value="" disabled>Select column...</option>
               {detectedHeaders.map(h => <option key={h} value={h}>{h}</option>)}
             </Select>
-            <Select label="UOM" value={colMapping.uom_header} onChange={e => setColMapping({...colMapping, uom_header: e.target.value})}>
+            <Select label="UOM" value={colMapping.uom_header} onChange={e => setColMapping({ ...colMapping, uom_header: e.target.value })}>
               <option value="">Not present</option>
               {detectedHeaders.map(h => <option key={h} value={h}>{h}</option>)}
             </Select>
 
-            <Select label="Rate" value={colMapping.rate_header} onChange={e => setColMapping({...colMapping, rate_header: e.target.value})}>
+            <Select label="Rate" value={colMapping.rate_header} onChange={e => setColMapping({ ...colMapping, rate_header: e.target.value })}>
               <option value="" disabled>Select column...</option>
               {detectedHeaders.map(h => <option key={h} value={h}>{h}</option>)}
             </Select>
-            <Select label="Rate is" value={colMapping.rate_includes_gst ? "true" : "false"} onChange={e => setColMapping({...colMapping, rate_includes_gst: e.target.value === "true"})}>
+            <Select label="Rate is" value={colMapping.rate_includes_gst ? "true" : "false"} onChange={e => setColMapping({ ...colMapping, rate_includes_gst: e.target.value === "true" })}>
               <option value="false">Excluding GST</option>
               <option value="true">Including GST</option>
             </Select>
 
-            <Select label="Discount" value={colMapping.discount_header} onChange={e => setColMapping({...colMapping, discount_header: e.target.value})}>
+            <Select label="Discount" value={colMapping.discount_header} onChange={e => setColMapping({ ...colMapping, discount_header: e.target.value })}>
               <option value="">Not present</option>
               {detectedHeaders.map(h => <option key={h} value={h}>{h}</option>)}
             </Select>
             {colMapping.discount_header && (
-              <Select label="Discount is" value={colMapping.discount_treatment} onChange={e => setColMapping({...colMapping, discount_treatment: e.target.value})}>
+              <Select label="Discount is" value={colMapping.discount_treatment} onChange={e => setColMapping({ ...colMapping, discount_treatment: e.target.value })}>
                 <option value="already_in_rate">Already deducted in Rate</option>
                 <option value="apply_to_rate">Apply Discount to Rate</option>
                 <option value="ignore">Ignore Discount</option>
               </Select>
             )}
 
-            <Select label="Amount" value={colMapping.amount_header} onChange={e => setColMapping({...colMapping, amount_header: e.target.value})}>
+            <Select label="Amount" value={colMapping.amount_header} onChange={e => setColMapping({ ...colMapping, amount_header: e.target.value })}>
               <option value="" disabled>Select column...</option>
               {detectedHeaders.map(h => <option key={h} value={h}>{h}</option>)}
             </Select>
-            <Select label="Amount is" value={colMapping.amount_includes_gst ? "true" : "false"} onChange={e => setColMapping({...colMapping, amount_includes_gst: e.target.value === "true"})}>
+            <Select label="Amount is" value={colMapping.amount_includes_gst ? "true" : "false"} onChange={e => setColMapping({ ...colMapping, amount_includes_gst: e.target.value === "true" })}>
               <option value="false">Excluding GST / Taxable</option>
               <option value="true">Including GST</option>
             </Select>
@@ -790,246 +1223,350 @@ export function ItemWiseMode({ onPostSuccess }) {
           <div className="space-y-3">
             <h3 className="text-sm font-bold text-gray-900 dark:text-white uppercase px-1">{items.length} items</h3>
 
-        <div className="flex flex-col gap-3">
-          {items.map((item, idx) => {
-            const normalizeStr = (str) => (str || "").replace(/\s+/g, ' ').trim().toLowerCase();
-            
-            const itemStateObj = (() => {
-              const norm = normalizeStr(item.mapped_name);
-              if (!norm) return null;
-              const isConfirmedOrLocal = Object.keys(itemCache).some(key => normalizeStr(key) === norm) ||
-                Object.values(itemCache).some(v => normalizeStr(v?.name) === norm) ||
-                meta.stock_items.some(s => normalizeStr(s) === norm);
-              if (isConfirmedOrLocal) return { state: 'confirmed' };
-              const pState = meta.master_states?.stock_items?.find(m => normalizeStr(m.normalized_name) === norm);
-              return pState || null;
-            })();
-            
-            const isKnownItem = !!itemStateObj || item.is_mapped;
-            const isEditing = editingItemIdx === idx;
+            <div className="flex flex-col gap-3">
+              {items.map((item, idx) => {
+                const normalizeStr = (str) => (str || "").replace(/\s+/g, ' ').trim().toLowerCase();
 
-            return (
-              <Card
-                key={idx}
-                onClick={() => !isEditing && setEditingItemIdx(idx)}
-                className={`flex flex-col gap-2 relative ${isEditing ? 'ring-2 ring-teal-500/50' : 'cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/80'}`}
-              >
-                {!isEditing ? (
-                  <>
-                    <div className="flex justify-between items-start pr-6">
-                      <p className="text-base font-bold text-gray-900 dark:text-gray-100 leading-tight pr-4">{item.name}</p>
-                      <p className="text-base font-bold text-gray-900 dark:text-gray-100 whitespace-nowrap">₹ {item.amount.toFixed(2)}</p>
-                    </div>
+                const itemStateObj = (() => {
+                  const norm = normalizeStr(item.mapped_name);
+                  if (!norm) return null;
+                  const isConfirmedOrLocal = Object.keys(itemCache).some(key => normalizeStr(key) === norm) ||
+                    Object.values(itemCache).some(v => normalizeStr(v?.name) === norm) ||
+                    meta.stock_items.some(s => normalizeStr(s) === norm);
+                  if (isConfirmedOrLocal) return { state: 'confirmed' };
+                  const pState = meta.master_states?.stock_items?.find(m => normalizeStr(m.normalized_name) === norm);
+                  return pState || null;
+                })();
 
-                    <div className="flex justify-between items-center mt-1">
-                      <div className="flex items-center gap-1.5">
-                        {itemStateObj ? (
-                          itemStateObj.state === 'failed' ? (
-                            <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-red-600 bg-red-50 dark:bg-red-900/30 px-2 py-1 rounded cursor-pointer" onClick={(e) => { e.stopPropagation(); alert(itemStateObj.error || "Item failed to sync."); }}>
-                              ⚠ Failed
-                            </span>
-                          ) : itemStateObj.state === 'pending' ? (
-                            <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-amber-600 bg-amber-50 dark:bg-amber-900/30 px-2 py-1 rounded">
-                              ⏳ Mapped • In Queue
-                            </span>
-                          ) : itemStateObj.state === 'syncing' ? (
-                            <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-blue-600 bg-blue-50 dark:bg-blue-900/30 px-2 py-1 rounded">
-                              ↻ Mapped • Syncing
-                            </span>
-                          ) : (
-                            <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-green-600 bg-green-50 dark:bg-green-900/30 px-2 py-1 rounded">
-                              ✓ Matched
-                            </span>
-                          )
-                        ) : isKnownItem ? (
-                          <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-green-600 bg-green-50 dark:bg-green-900/30 px-2 py-1 rounded">
-                            ✓ Matched
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-amber-600 bg-amber-50 dark:bg-amber-900/30 px-2 py-1 rounded">
-                            ⚠ Needs Match
-                          </span>
+                const isKnownItem = !!itemStateObj || item.is_mapped;
+                const isEditing = editingItemIdx === idx;
+
+                return (
+                  <Card
+                    key={idx}
+                    onClick={() => !isEditing && setEditingItemIdx(idx)}
+                    className={`flex flex-col gap-2 relative ${isEditing ? 'ring-2 ring-teal-500/50' : 'cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/80'}`}
+                  >
+                    {!isEditing ? (
+                      <>
+                        <div className="flex justify-between items-start">
+                          <p className="text-base font-bold text-gray-900 dark:text-gray-100 leading-tight pr-4">{item.name}</p>
+                          <div className="flex items-center gap-1 -mt-1 -mr-2">
+                            <p className="text-base font-bold text-gray-900 dark:text-gray-100 whitespace-nowrap mr-2">
+                              ₹ {isGstIncluded && item.final_amount !== undefined ? Number(item.final_amount || 0).toFixed(2) : Number(item.amount || 0).toFixed(2)}
+                            </p>
+                            <ChevronDown className="w-5 h-5 text-gray-300" />
+                            <button
+                              type="button"
+                              onClick={(e) => { e.stopPropagation(); removeItem(idx); }}
+                              className="text-gray-400 hover:text-red-600 p-2 rounded-full transition-colors focus:outline-none"
+                              aria-label="Remove Item"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="flex justify-between items-center mt-1">
+                          <div className="flex items-center gap-1.5">
+                            {itemStateObj ? (
+                              itemStateObj.state === 'failed' ? (
+                                <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-red-600 bg-red-50 dark:bg-red-900/30 px-2 py-1 rounded cursor-pointer" onClick={(e) => { e.stopPropagation(); alert(itemStateObj.error || "Item failed to sync."); }}>
+                                  ⚠ Failed
+                                </span>
+                              ) : itemStateObj.state === 'pending' ? (
+                                <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-amber-600 bg-amber-50 dark:bg-amber-900/30 px-2 py-1 rounded">
+                                  ⏳ Mapped • In Queue
+                                </span>
+                              ) : itemStateObj.state === 'syncing' ? (
+                                <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-blue-600 bg-blue-50 dark:bg-blue-900/30 px-2 py-1 rounded">
+                                  ↻ Mapped • Syncing
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-green-600 bg-green-50 dark:bg-green-900/30 px-2 py-1 rounded">
+                                  ✓ Matched
+                                </span>
+                              )
+                            ) : isKnownItem ? (
+                              <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-green-600 bg-green-50 dark:bg-green-900/30 px-2 py-1 rounded">
+                                ✓ Matched
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-amber-600 bg-amber-50 dark:bg-amber-900/30 px-2 py-1 rounded">
+                                ⚠ Needs Match
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-sm font-medium text-gray-500">
+                            {item.qty} {item.uom} × ₹{isGstIncluded && item.final_rate !== undefined ? Number(item.final_rate || 0).toFixed(2) : Number(item.rate || 0).toFixed(2)}
+                          </p>
+                        </div>
+
+                      </>
+                    ) : (
+                      <div className="flex flex-col gap-4">
+                        <div className="flex justify-between items-center">
+                          <h4 className="text-sm font-bold text-gray-900 dark:text-white uppercase">Edit Item</h4>
+                          <div className="flex items-center gap-4">
+                            <button
+                              type="button"
+                              onClick={(e) => { e.stopPropagation(); removeItem(idx); }}
+                              className="text-gray-400 hover:text-red-600 p-2 -my-2 rounded-full transition-colors focus:outline-none"
+                              aria-label="Remove Item"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                            <button type="button" onClick={(e) => { e.stopPropagation(); setEditingItemIdx(null); }} className="text-teal-600 text-sm font-bold p-2 -my-2 -mr-2 focus:outline-none">Done</button>
+                          </div>
+                        </div>
+
+                        {!forceManual && (
+                          <div className="space-y-1.5">
+                            <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Item Name (from invoice)</label>
+                            <input
+                              value={item.name}
+                              onChange={e => updateItemVal(idx, 'name', e.target.value)}
+                              className="w-full p-2 text-sm rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 outline-none focus:border-teal-500"
+                            />
+                          </div>
                         )}
+
+                        <div className="space-y-1.5">
+                          <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">
+                            {forceManual ? "Product" : "Tally Item Mapping"}
+                          </label>
+                          <MasterAutocomplete
+                            placeholder={forceManual ? "Search or create product..." : "Select tally item..."}
+                            rawItemName={item.name || ""}
+                            confirmed={meta.stock_items}
+                            masterStates={meta.master_states?.stock_items}
+                            value={item.mapped_name || ""}
+                            onChange={val => handleItemMapChange(idx, val)}
+                            onCreate={(val) => handleCreateItem(val, items[editingItemIdx]?.uom || "PCS")}
+                            isCreating={creatingMaster?.type === 'ITEM'}
+                          />
+                          {!isKnownItem && !forceManual && <span className="text-xs font-bold text-amber-600 ml-1">Needs Match</span>}
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-3">
+                          <div className="space-y-1.5">
+                            <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Quantity</label>
+                            <input
+                              type="number" step="0.01"
+                              value={item.qty}
+                              onChange={e => updateItemVal(idx, 'qty', e.target.value)}
+                              className="w-full p-2 text-sm rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 outline-none focus:border-teal-500"
+                            />
+                          </div>
+                          <div className="space-y-1.5">
+                            <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">UOM</label>
+                            <input
+                              list="uoms-list"
+                              value={item.uom || ""}
+                              onChange={e => updateItemVal(idx, 'uom', e.target.value.toUpperCase())}
+                              className="w-full p-2 text-sm rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 outline-none focus:border-teal-500 uppercase"
+                            />
+                          </div>
+                          <div className="space-y-1.5">
+                            <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">
+                              {isGstIncluded && forceManual ? "Rate (Incl. GST) (₹)" : isGstIncluded ? "Rate (Excl. GST) (₹)" : "Rate (₹)"}
+                            </label>
+                            <input
+                              type="number" step="0.01"
+                              value={isGstIncluded && forceManual ? item.final_rate : item.rate}
+                              onChange={e => updateItemVal(idx, isGstIncluded && forceManual ? 'final_rate' : 'rate', e.target.value)}
+                              className="w-full p-2 text-sm rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 outline-none focus:border-teal-500"
+                            />
+                          </div>
+                          <div className="space-y-1.5">
+                            <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">
+                              {isGstIncluded && forceManual ? "Amount (Incl. GST) (₹)" : isGstIncluded ? "Amount (Excl. GST) (₹)" : "Amount (₹)"}
+                            </label>
+                            <input
+                              type="number" step="0.01"
+                              value={isGstIncluded && forceManual ? item.final_amount : item.amount}
+                              onChange={e => updateItemVal(idx, isGstIncluded && forceManual ? 'final_amount' : 'amount', parseFloat(e.target.value) || 0)}
+                              className="w-full p-2 text-sm rounded border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50 text-gray-900 dark:text-gray-100 outline-none font-bold"
+                            />
+                          </div>
+                        </div>
+
+
                       </div>
-                      <p className="text-sm font-medium text-gray-500">
-                        {item.qty} {item.uom} × ₹{item.rate}
-                      </p>
-                    </div>
-                    <ChevronDown className="absolute right-3 top-4 w-5 h-5 text-gray-300" />
+                    )}
+                  </Card>
+                );
+              })}
+            </div>
+
+            <datalist id="uoms-list">
+              {meta.uoms.map(u => <option key={u} value={u} />)}
+              <option value="PCS" /><option value="NOS" /><option value="KGS" /><option value="BOX" /><option value="PKT" />
+            </datalist>
+
+            <Button variant="secondary" onClick={() => {
+              setItems([...items, { name: "", mapped_name: "", qty: 1, rate: 0, amount: 0, uom: "PCS" }]);
+              setEditingItemIdx(items.length);
+            }} className="mt-2 text-teal-600">
+              <PlusCircle className="w-4 h-4" /> Add Item
+            </Button>
+          </div>
+
+          <Card className="flex flex-col gap-3">
+            <div className="flex justify-between items-center">
+              <span className="font-bold text-gray-900 dark:text-white">Taxes & Totals</span>
+            </div>
+
+            <div className="space-y-3 pt-2">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">GST Rate (%)</label>
+                  <input type="number" value={invoice.gst_rate} onChange={e => handleTaxRecalculation(e.target.value, invoice.tax_type)} className="w-full p-2 text-sm rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 outline-none" />
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Tax Type</label>
+                  <select value={invoice.tax_type} onChange={e => handleTaxRecalculation(invoice.gst_rate, e.target.value)} className="w-full p-2 text-sm rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 outline-none">
+                    <option value="local">Local</option>
+                    <option value="interstate">Interstate</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                {invoice.tax_type === 'local' ? (
+                  <>
+                    <div className="space-y-1.5"><label className="text-[10px] font-bold text-gray-500 uppercase">CGST</label><input type="number" step="0.01" value={invoice.cgst} onChange={e => setInvoice({ ...invoice, cgst: parseFloat(e.target.value) || 0 })} className="w-full p-2 text-sm rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 outline-none" /></div>
+                    <div className="space-y-1.5"><label className="text-[10px] font-bold text-gray-500 uppercase">SGST</label><input type="number" step="0.01" value={invoice.sgst} onChange={e => setInvoice({ ...invoice, sgst: parseFloat(e.target.value) || 0 })} className="w-full p-2 text-sm rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 outline-none" /></div>
                   </>
                 ) : (
-                  <div className="flex flex-col gap-4">
-                    <div className="flex justify-between items-center">
-                      <h4 className="text-sm font-bold text-gray-900 dark:text-white uppercase">Edit Item</h4>
-                      <button onClick={(e) => { e.stopPropagation(); setEditingItemIdx(null); }} className="text-teal-600 text-sm font-bold">Done</button>
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Item Name (from invoice)</label>
-                      <input
-                        value={item.name}
-                        onChange={e => updateItemVal(idx, 'name', e.target.value)}
-                        className="w-full p-2 text-sm rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 outline-none focus:border-teal-500"
-                      />
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Tally Item Mapping</label>
-                      <MasterAutocomplete
-                        placeholder="Select tally item..."
-                        rawItemName={item.name || ""}
-                        confirmed={meta.stock_items}
-                        masterStates={meta.master_states?.stock_items}
-                        value={item.mapped_name || ""}
-                        onChange={val => handleItemMapChange(idx, val)}
-                        onCreate={(val) => handleCreateItem(val, items[editingItemIdx].uom)}
-                        isCreating={creatingMaster?.type === 'ITEM'}
-                      />
-                      {!isKnownItem && <span className="text-xs font-bold text-amber-600 ml-1">Needs Match</span>}
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-3">
-                      <div className="space-y-1.5">
-                        <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Quantity</label>
-                        <input
-                          type="number" step="0.01"
-                          value={item.qty}
-                          onChange={e => updateItemVal(idx, 'qty', e.target.value)}
-                          className="w-full p-2 text-sm rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 outline-none focus:border-teal-500"
-                        />
-                      </div>
-                      <div className="space-y-1.5">
-                        <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">UOM</label>
-                        <input
-                          list="uoms-list"
-                          value={item.uom || ""}
-                          onChange={e => updateItemVal(idx, 'uom', e.target.value.toUpperCase())}
-                          className="w-full p-2 text-sm rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 outline-none focus:border-teal-500 uppercase"
-                        />
-                      </div>
-                      <div className="space-y-1.5">
-                        <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Rate (₹)</label>
-                        <input
-                          type="number" step="0.01"
-                          value={item.rate}
-                          onChange={e => updateItemVal(idx, 'rate', e.target.value)}
-                          className="w-full p-2 text-sm rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 outline-none focus:border-teal-500"
-                        />
-                      </div>
-                      <div className="space-y-1.5">
-                        <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Amount (₹)</label>
-                        <input
-                          type="number" step="0.01"
-                          value={item.amount}
-                          onChange={e => updateItemVal(idx, 'amount', parseFloat(e.target.value) || 0)}
-                          className="w-full p-2 text-sm rounded border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50 text-gray-900 dark:text-gray-100 outline-none font-bold"
-                        />
-                      </div>
-                    </div>
-
-                    <Button variant="secondary" onClick={(e) => { e.stopPropagation(); removeItem(idx); }} className="text-red-600 border-red-200 mt-2">
-                      <Trash2 className="w-4 h-4 mr-2" /> Remove Item
-                    </Button>
-                  </div>
+                  <div className="space-y-1.5 col-span-2"><label className="text-[10px] font-bold text-gray-500 uppercase">IGST</label><input type="number" step="0.01" value={invoice.igst} onChange={e => setInvoice({ ...invoice, igst: parseFloat(e.target.value) || 0 })} className="w-full p-2 text-sm rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 outline-none" /></div>
                 )}
-              </Card>
-            );
-          })}
-        </div>
-
-        <datalist id="uoms-list">
-          {meta.uoms.map(u => <option key={u} value={u} />)}
-          <option value="PCS" /><option value="NOS" /><option value="KGS" /><option value="BOX" /><option value="PKT" />
-        </datalist>
-
-        <Button variant="secondary" onClick={() => setItems([...items, { name: "New Item", mapped_name: "", qty: 1, rate: 0, amount: 0, uom: "PCS" }])} className="mt-2 text-teal-600">
-          <PlusCircle className="w-4 h-4" /> Add empty item
-        </Button>
-      </div>
-
-      <Card className="flex flex-col gap-3">
-        <div className="flex justify-between items-center cursor-pointer" onClick={() => setShowTaxEdit(!showTaxEdit)}>
-          <span className="font-bold text-gray-900 dark:text-white">Taxes & Totals</span>
-          <Button variant="secondary" className="px-3 py-1 min-h-0 h-8 text-xs">{showTaxEdit ? 'Done' : 'Edit'}</Button>
-        </div>
-
-        <div className="flex justify-between text-sm font-medium text-gray-500 mt-2">
-          <span>Subtotal</span>
-          <span>₹ {itemSubtotal.toFixed(2)}</span>
-        </div>
-
-        {showTaxEdit ? (
-          <div className="space-y-3 pt-3 border-t border-gray-100 dark:border-gray-800">
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1.5">
-                <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">GST Rate (%)</label>
-                <input type="number" value={invoice.gst_rate} onChange={e => handleTaxRecalculation(e.target.value, invoice.tax_type)} className="w-full p-2 text-sm rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 outline-none" />
               </div>
               <div className="space-y-1.5">
-                <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Tax Type</label>
-                <select value={invoice.tax_type} onChange={e => handleTaxRecalculation(invoice.gst_rate, e.target.value)} className="w-full p-2 text-sm rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 outline-none">
-                  <option value="local">Local</option>
-                  <option value="interstate">Interstate</option>
-                </select>
+                <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Rounding</label>
+                <input type="number" step="0.01" value={invoice.rounding_off} onChange={e => setInvoice({ ...invoice, rounding_off: parseFloat(e.target.value) || 0 })} className="w-full p-2 text-sm rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 outline-none" />
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
-              {invoice.tax_type === 'local' ? (
-                <>
-                  <div className="space-y-1.5"><label className="text-[10px] font-bold text-gray-500 uppercase">CGST</label><input type="number" step="0.01" value={invoice.cgst} onChange={e => setInvoice({ ...invoice, cgst: parseFloat(e.target.value) || 0 })} className="w-full p-2 text-sm rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 outline-none" /></div>
-                  <div className="space-y-1.5"><label className="text-[10px] font-bold text-gray-500 uppercase">SGST</label><input type="number" step="0.01" value={invoice.sgst} onChange={e => setInvoice({ ...invoice, sgst: parseFloat(e.target.value) || 0 })} className="w-full p-2 text-sm rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 outline-none" /></div>
-                </>
+            <div className="border-t border-gray-100 dark:border-gray-800 mt-2">
+              {isGstIncluded ? (
+                <div className="flex flex-col gap-1 text-sm font-medium text-gray-500 mt-3">
+                  <div className="flex justify-between">
+                    <span>Subtotal / Taxable Value</span>
+                    <span>₹ {itemSubtotal.toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between text-teal-600 dark:text-teal-400">
+                    <span>GST included in rates</span>
+                    <span>₹ {(computedCgst + computedSgst + computedIgst).toFixed(2)}</span>
+                  </div>
+                  {invoice.rounding_off !== 0 && (
+                    <div className="flex justify-between">
+                      <span>Round Off</span>
+                      <span>{invoice.rounding_off > 0 ? '+' : '-'}₹ {Math.abs(invoice.rounding_off).toFixed(2)}</span>
+                    </div>
+                  )}
+                </div>
               ) : (
-                <div className="space-y-1.5 col-span-2"><label className="text-[10px] font-bold text-gray-500 uppercase">IGST</label><input type="number" step="0.01" value={invoice.igst} onChange={e => setInvoice({ ...invoice, igst: parseFloat(e.target.value) || 0 })} className="w-full p-2 text-sm rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 outline-none" /></div>
+                <div className="flex flex-col gap-1 text-sm font-medium text-gray-500 mt-3">
+                  <div className="flex justify-between">
+                    <span>Subtotal</span>
+                    <span>₹ {itemSubtotal.toFixed(2)}</span>
+                  </div>
+                  {invoice.tax_type === 'local' ? (
+                    <>
+                      <div className="flex justify-between">
+                        <span>CGST {(invoice.gst_rate / 2)}%</span>
+                        <span>₹ {computedCgst.toFixed(2)}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span>SGST {(invoice.gst_rate / 2)}%</span>
+                        <span>₹ {computedSgst.toFixed(2)}</span>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="flex justify-between">
+                      <span>IGST {invoice.gst_rate}%</span>
+                      <span>₹ {computedIgst.toFixed(2)}</span>
+                    </div>
+                  )}
+                  {invoice.rounding_off !== 0 && (
+                    <div className="flex justify-between">
+                      <span>Round Off</span>
+                      <span>{invoice.rounding_off > 0 ? '+' : '-'}₹ {Math.abs(invoice.rounding_off).toFixed(2)}</span>
+                    </div>
+                  )}
+                </div>
               )}
             </div>
-            <div className="space-y-1.5">
-              <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Rounding</label>
-              <input type="number" step="0.01" value={invoice.rounding_off} onChange={e => setInvoice({ ...invoice, rounding_off: parseFloat(e.target.value) || 0 })} className="w-full p-2 text-sm rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 outline-none" />
+
+            <div className="h-px bg-gray-100 dark:bg-gray-800 mt-2" />
+            <div className="flex justify-between text-xl font-black text-gray-900 dark:text-white">
+              <span>Total</span>
+              <span>₹ {grandTotal.toFixed(2)}</span>
             </div>
-          </div>
-        ) : (
-          <div className="flex flex-col gap-1 text-sm font-medium text-gray-500">
-            {invoice.tax_type === 'local' ? (
-              <>
-                <div className="flex justify-between">
-                  <span>CGST {(invoice.gst_rate / 2)}%</span>
-                  <span>₹ {(invoice.cgst || 0).toFixed(2)}</span>
+          </Card>
+
+          <Card className="flex flex-col gap-3">
+            <div className="flex justify-between items-center cursor-pointer" onClick={() => setAdjustment(prev => ({ ...prev, enabled: !prev.enabled }))}>
+              <div className="flex items-center gap-2">
+                <input type="checkbox" checked={adjustment.enabled} onChange={() => { }} className="w-4 h-4 text-teal-600 focus:ring-teal-500 rounded cursor-pointer" />
+                <span className="font-bold text-gray-900 dark:text-white">Supplier Adjustment / Return</span>
+              </div>
+            </div>
+
+            {adjustment.enabled && (
+              <div className="space-y-3 pt-3 border-t border-gray-100 dark:border-gray-800">
+                <p className="text-xs text-gray-500 mb-2">Adjust previous returns against this invoice. This will post a separate Journal Voucher to Tally.</p>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Adjustment Amount (₹)</label>
+                    <input type="number" step="0.01" value={adjustment.amount} onChange={e => setAdjustment({ ...adjustment, amount: e.target.value })} className="w-full p-2 text-sm rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 outline-none focus:border-teal-500" placeholder="0.00" />
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Return Cost Centre <span className="text-red-500">*</span></label>
+                    <select value={adjustment.store} onChange={e => setAdjustment({ ...adjustment, store: e.target.value })} className={`w-full p-2 text-sm rounded border bg-white dark:bg-gray-800 outline-none focus:border-teal-500 ${!adjustment.store && Number(adjustment.amount) > 0 ? 'border-red-500' : 'border-gray-200 dark:border-gray-700'}`}>
+                      <option value="" disabled>Select Store...</option>
+                      {meta.stores.map(s => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                  </div>
                 </div>
-                <div className="flex justify-between">
-                  <span>SGST {(invoice.gst_rate / 2)}%</span>
-                  <span>₹ {(invoice.sgst || 0).toFixed(2)}</span>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Reason (Optional)</label>
+                    <input type="text" value={adjustment.reason} onChange={e => setAdjustment({ ...adjustment, reason: e.target.value })} className="w-full p-2 text-sm rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 outline-none focus:border-teal-500" placeholder="e.g. Damaged goods" />
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Notes (Optional)</label>
+                    <input type="text" value={adjustment.notes} onChange={e => setAdjustment({ ...adjustment, notes: e.target.value })} className="w-full p-2 text-sm rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 outline-none focus:border-teal-500" />
+                  </div>
                 </div>
-              </>
-            ) : (
-              <div className="flex justify-between">
-                <span>IGST {invoice.gst_rate}%</span>
-                <span>₹ {(invoice.igst || 0).toFixed(2)}</span>
+                {Number(adjustment.amount) > 0 && (
+                  <div className="flex justify-between items-center bg-gray-50 dark:bg-gray-800 p-3 rounded-lg mt-2 border border-gray-200 dark:border-gray-700">
+                    <span className="font-bold text-gray-900 dark:text-gray-100 text-sm">Net Supplier Payable:</span>
+                    <span className="font-black text-teal-600 dark:text-teal-400 text-lg">₹ {Math.max(0, grandTotal - Number(adjustment.amount)).toFixed(2)}</span>
+                  </div>
+                )}
               </div>
             )}
-            {invoice.rounding_off !== 0 && (
-              <div className="flex justify-between">
-                <span>Round Off</span>
-                <span>{invoice.rounding_off > 0 ? '+' : '-'}₹ {Math.abs(invoice.rounding_off).toFixed(2)}</span>
-              </div>
-            )}
-          </div>
-        )}
+          </Card>
 
-        <div className="h-px bg-gray-100 dark:bg-gray-800 mt-2" />
-        <div className="flex justify-between text-xl font-black text-gray-900 dark:text-white">
-          <span>Total</span>
-          <span>₹ {grandTotal.toFixed(2)}</span>
-        </div>
-      </Card>
-
-      <Button onClick={handlePost} disabled={isPosting || !invoice.cost_center}>
-        {isPosting ? "Sending..." : "Push to Tally"}
-      </Button>
+          {useV4 && v4Data?.calculated_data?.gst_basis === "unknown" ? (
+            <div className="bg-amber-50 dark:bg-amber-900/10 border border-amber-200 dark:border-amber-800 p-4 rounded-xl text-amber-600 dark:text-amber-400 text-sm font-medium">
+              <AlertCircle className="w-5 h-5 inline-block mr-2" />
+              Please select whether the selected amount includes GST above to continue.
+            </div>
+          ) : (
+            <div className="flex gap-3">
+              <Button onClick={handleReject} variant="danger" className="flex-1" disabled={isPosting || isRejecting}>
+                {isRejecting ? "Rejecting..." : "Reject"}
+              </Button>
+              <Button onClick={handlePost} className="flex-[2]" disabled={isPosting || isRejecting || !invoice.cost_center}>
+                {isPosting ? "Sending..." : "Push to Tally"}
+              </Button>
+            </div>
+          )}
         </>
       )}
-
     </div>
   );
 }

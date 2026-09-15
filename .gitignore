@@ -34,3 +34,17 @@ purchases_db.json
 
 # Tally caches
 tally_*_cache.json
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Local uploaded/test data
+backend/uploads/
+
+# Known Tally raw dump
+/tally_voucher_types.xml
+
+# Generated test/debug output
+/expected_results.json

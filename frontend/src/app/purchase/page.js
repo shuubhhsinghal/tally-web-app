@@ -1,5 +1,5 @@
 'use client';
-import { useState } from "react";
+import React, { useState } from "react";
 import TopBar from '@/components/layout/TopBar';
 import { ItemWiseMode } from './ItemWiseMode';
 import { AccountingMode } from './AccountingMode';
@@ -41,7 +41,9 @@ export default function PurchaseVoucher() {
           {mode === "accounting" ? (
             <AccountingMode onPostSuccess={() => router.push('/dashboard')} />
           ) : (
-            <ItemWiseMode onPostSuccess={() => router.push('/dashboard')} />
+            <React.Suspense fallback={<div className="p-8 text-center text-gray-500">Loading editor...</div>}>
+              <ItemWiseMode onPostSuccess={() => router.push('/review')} />
+            </React.Suspense>
           )}
         </div>
 
