@@ -10,15 +10,17 @@ from backend.routers.purchase_drafts import enqueue_draft_extraction
 router = APIRouter()
 
 # Environment variables
-META_VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN")
-META_ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN")
-META_APP_SECRET = os.getenv("META_APP_SECRET")
-META_API_VERSION = os.getenv("META_API_VERSION", "v26.0")
+# We fetch these dynamically in functions to prevent test import-order issues
+def get_meta_verify_token(): return os.getenv("META_VERIFY_TOKEN")
+def get_meta_access_token(): return os.getenv("META_ACCESS_TOKEN")
+def get_meta_app_secret(): return os.getenv("META_APP_SECRET")
+def get_meta_api_version(): return os.getenv("META_API_VERSION", "v26.0")
 
 
 def verify_signature(payload: bytes, signature: str) -> bool:
     """Verify that the payload came from Meta using the app secret."""
-    if not META_APP_SECRET or not signature:
+    app_secret = get_meta_app_secret()
+    if not app_secret or not signature:
         return False
     
     # Meta signature format: "sha256=<hmac_hash>"
@@ -28,7 +30,7 @@ def verify_signature(payload: bytes, signature: str) -> bool:
     signature_hash = signature.split("=")[1]
     
     expected_hash = hmac.new(
-        key=META_APP_SECRET.encode("utf-8"),
+        key=app_secret.encode("utf-8"),
         msg=payload,
         digestmod=hashlib.sha256
     ).hexdigest()
@@ -36,24 +38,32 @@ def verify_signature(payload: bytes, signature: str) -> bool:
     return hmac.compare_digest(expected_hash, signature_hash)
 
 
+import sqlite3
+
 def check_and_mark_message_processed(message_id: str) -> bool:
     """
     Check if message was already processed (deduplication).
     Returns True if this is a new message (successfully inserted).
     Returns False if it's a duplicate.
     """
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT message_id FROM whatsapp_processed_messages WHERE message_id = ?", (message_id,))
-        if cursor.fetchone():
-            return False
-            
-        cursor.execute(
-            "INSERT INTO whatsapp_processed_messages (message_id, created_at) VALUES (?, ?)", 
-            (message_id, datetime.now().isoformat())
-        )
-        conn.commit()
-    return True
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT message_id FROM whatsapp_processed_messages WHERE message_id = ?", (message_id,))
+            if cursor.fetchone():
+                return False
+                
+            cursor.execute(
+                "INSERT INTO whatsapp_processed_messages (message_id, created_at) VALUES (?, ?)", 
+                (message_id, datetime.now().isoformat())
+            )
+            conn.commit()
+        return True
+    except sqlite3.OperationalError as e:
+        if "no such table" in str(e).lower():
+            print(f"Warning: whatsapp_processed_messages table missing. Skipping deduplication for {message_id}.")
+            return True
+        raise
 
 
 def download_meta_media(media_id: str) -> tuple[bytes, str, str]:
@@ -61,13 +71,15 @@ def download_meta_media(media_id: str) -> tuple[bytes, str, str]:
     Downloads media from Meta Graph API.
     Returns (file_bytes, filename, content_type)
     """
-    if not META_ACCESS_TOKEN:
+    access_token = get_meta_access_token()
+    if not access_token:
         raise ValueError("META_ACCESS_TOKEN is not set")
 
-    headers = {"Authorization": f"Bearer {META_ACCESS_TOKEN}"}
+    headers = {"Authorization": f"Bearer {access_token}"}
     
     # 1. Get media URL
-    media_url_req = requests.get(f"https://graph.facebook.com/{META_API_VERSION}/{media_id}", headers=headers, timeout=10)
+    api_version = get_meta_api_version()
+    media_url_req = requests.get(f"https://graph.facebook.com/{api_version}/{media_id}", headers=headers, timeout=10)
     media_url_req.raise_for_status()
     media_data = media_url_req.json()
     
@@ -135,7 +147,7 @@ async def verify_webhook(request: Request):
     hub_challenge = request.query_params.get("hub.challenge")
     hub_verify_token = request.query_params.get("hub.verify_token")
     
-    if hub_mode == "subscribe" and hub_verify_token == META_VERIFY_TOKEN:
+    if hub_mode == "subscribe" and hub_verify_token == get_meta_verify_token():
         # Must return the challenge directly (not as JSON)
         return Response(content=hub_challenge, media_type="text/plain")
         

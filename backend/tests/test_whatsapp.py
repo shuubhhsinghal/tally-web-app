@@ -104,7 +104,7 @@ def test_receive_webhook_valid_image(mock_check_processed, mock_get, mock_enqueu
     # Wait, Starlette's TestClient DOES run background tasks automatically after returning the response!
     
     mock_check_processed.assert_called_once_with("msg123")
-    mock_get.assert_any_call(f"https://graph.facebook.com/{whatsapp.META_API_VERSION}/media123", headers={"Authorization": "Bearer test_access_token"}, timeout=10)
+    mock_get.assert_any_call(f"https://graph.facebook.com/{whatsapp.get_meta_api_version()}/media123", headers={"Authorization": "Bearer test_access_token"}, timeout=10)
     mock_get.assert_any_call("https://download.url", headers={"Authorization": "Bearer test_access_token"}, timeout=20)
     mock_enqueue.assert_called_once()
     args, _ = mock_enqueue.call_args
