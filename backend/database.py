@@ -100,7 +100,21 @@ def init_db():
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS whatsapp_processed_messages (
                 message_id TEXT PRIMARY KEY,
-                created_at TEXT NOT NULL
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS whatsapp_image_queue (
+                message_id TEXT PRIMARY KEY,
+                sender TEXT NOT NULL,
+                message_timestamp TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                content_type TEXT NOT NULL,
+                file_bytes BLOB NOT NULL,
+                batch_id TEXT,
+                batch_claimed_at DATETIME,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
         
@@ -353,6 +367,16 @@ def init_db():
             
         try:
             cursor.execute("ALTER TABLE reporting_vouchers ADD COLUMN bank_name TEXT")
+        except sqlite3.OperationalError:
+            pass
+
+        try:
+            cursor.execute("ALTER TABLE whatsapp_image_queue ADD COLUMN batch_id TEXT")
+        except sqlite3.OperationalError:
+            pass
+            
+        try:
+            cursor.execute("ALTER TABLE whatsapp_image_queue ADD COLUMN batch_claimed_at DATETIME")
         except sqlite3.OperationalError:
             pass
 

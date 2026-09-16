@@ -51,10 +51,11 @@ def test_receive_webhook_missing_signature():
     )
     assert response.status_code == 403
 
+@patch("backend.routers.whatsapp.time.sleep")
 @patch("backend.routers.whatsapp.enqueue_draft_extraction")
 @patch("backend.routers.whatsapp.requests.get")
 @patch("backend.routers.whatsapp.check_and_mark_message_processed")
-def test_receive_webhook_valid_image(mock_check_processed, mock_get, mock_enqueue):
+def test_receive_webhook_valid_image(mock_check_processed, mock_get, mock_enqueue, mock_sleep):
     mock_check_processed.return_value = True # Treat as new message
     
     # Mock media URL response
@@ -78,6 +79,8 @@ def test_receive_webhook_valid_image(mock_check_processed, mock_get, mock_enqueu
                             "messages": [
                                 {
                                     "id": "msg123",
+                                    "from": "12345",
+                                    "timestamp": "1000",
                                     "image": {"id": "media123"}
                                 }
                             ]
@@ -113,10 +116,11 @@ def test_receive_webhook_valid_image(mock_check_processed, mock_get, mock_enqueu
     assert files_data[0][1] == "whatsapp_media123.jpg"
     assert files_data[0][2] == "image/jpeg"
 
+@patch("backend.routers.whatsapp.time.sleep")
 @patch("backend.routers.whatsapp.enqueue_draft_extraction")
 @patch("backend.routers.whatsapp.requests.get")
 @patch("backend.routers.whatsapp.check_and_mark_message_processed")
-def test_receive_webhook_valid_document(mock_check_processed, mock_get, mock_enqueue):
+def test_receive_webhook_valid_document(mock_check_processed, mock_get, mock_enqueue, mock_sleep):
     mock_check_processed.return_value = True # Treat as new message
     
     # Mock media URL response
@@ -140,6 +144,8 @@ def test_receive_webhook_valid_document(mock_check_processed, mock_get, mock_enq
                             "messages": [
                                 {
                                     "id": "msg124",
+                                    "from": "12345",
+                                    "timestamp": "1000",
                                     "document": {"id": "media124"}
                                 }
                             ]
@@ -166,9 +172,10 @@ def test_receive_webhook_valid_document(mock_check_processed, mock_get, mock_enq
     assert files_data[0][1] == "whatsapp_media124.pdf"
     assert files_data[0][2] == "application/pdf"
 
+@patch("backend.routers.whatsapp.time.sleep")
 @patch("backend.routers.whatsapp.enqueue_draft_extraction")
 @patch("backend.routers.whatsapp.check_and_mark_message_processed")
-def test_receive_webhook_irrelevant_message(mock_check_processed, mock_enqueue):
+def test_receive_webhook_irrelevant_message(mock_check_processed, mock_enqueue, mock_sleep):
     mock_check_processed.return_value = True
     
     payload = {
@@ -180,6 +187,8 @@ def test_receive_webhook_irrelevant_message(mock_check_processed, mock_enqueue):
                             "messages": [
                                 {
                                     "id": "msg125",
+                                    "from": "12345",
+                                    "timestamp": "1000",
                                     "text": {"body": "hello"}
                                 }
                             ]
@@ -201,9 +210,10 @@ def test_receive_webhook_irrelevant_message(mock_check_processed, mock_enqueue):
     assert response.status_code == 200
     mock_enqueue.assert_not_called()
 
+@patch("backend.routers.whatsapp.time.sleep")
 @patch("backend.routers.whatsapp.enqueue_draft_extraction")
 @patch("backend.routers.whatsapp.check_and_mark_message_processed")
-def test_receive_webhook_duplicate_message(mock_check_processed, mock_enqueue):
+def test_receive_webhook_duplicate_message(mock_check_processed, mock_enqueue, mock_sleep):
     mock_check_processed.return_value = False # Duplicate!
     
     payload = {
@@ -215,6 +225,8 @@ def test_receive_webhook_duplicate_message(mock_check_processed, mock_enqueue):
                             "messages": [
                                 {
                                     "id": "msg126",
+                                    "from": "12345",
+                                    "timestamp": "1000",
                                     "image": {"id": "media126"}
                                 }
                             ]
@@ -237,9 +249,10 @@ def test_receive_webhook_duplicate_message(mock_check_processed, mock_enqueue):
     mock_check_processed.assert_called_once_with("msg126")
     mock_enqueue.assert_not_called()
 
+@patch("backend.routers.whatsapp.time.sleep")
 @patch("backend.routers.whatsapp.requests.get")
 @patch("backend.routers.whatsapp.check_and_mark_message_processed")
-def test_receive_webhook_download_failure(mock_check_processed, mock_get):
+def test_receive_webhook_download_failure(mock_check_processed, mock_get, mock_sleep):
     mock_check_processed.return_value = True
     
     # Mock failure
@@ -254,6 +267,8 @@ def test_receive_webhook_download_failure(mock_check_processed, mock_get):
                             "messages": [
                                 {
                                     "id": "msg127",
+                                    "from": "12345",
+                                    "timestamp": "1000",
                                     "image": {"id": "media127"}
                                 }
                             ]

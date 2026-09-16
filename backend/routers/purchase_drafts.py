@@ -3,6 +3,7 @@ import json
 import uuid
 import datetime
 import shutil
+import sqlite3
 from typing import Optional
 from fastapi import APIRouter, File, UploadFile, Form, HTTPException
 from backend.database import get_db
@@ -84,13 +85,15 @@ def process_async_extraction(draft_id: str, files_data: list):
             """, (json.dumps({"error": str(e)}), now, draft_id))
             conn.commit()
 
-def enqueue_draft_extraction(background_tasks: BackgroundTasks, files_data: list) -> str:
+def enqueue_draft_extraction(background_tasks: BackgroundTasks, files_data: list, draft_id: str = None):
     """
-    Shared logic to create a draft, save the file, and queue background extraction.
+    Enqueues the V4 extraction process for an uploaded invoice.
     files_data: list of tuples (file_bytes, filename, content_type)
     Returns: draft_id
     """
-    draft_id = str(uuid.uuid4())
+    if not draft_id:
+        draft_id = str(uuid.uuid4())
+        
     first_file_bytes, first_filename, first_content_type = files_data[0]
     
     ext = os.path.splitext(first_filename)[1]
@@ -148,15 +151,23 @@ def enqueue_draft_extraction(background_tasks: BackgroundTasks, files_data: list
 
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO purchase_drafts 
-            (id, supplier_name, invoice_number, invoice_date, grand_total, item_count, status, draft_data, image_path, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            draft_id, "Unknown", "", "", 0.0, 0,
-            'PROCESSING', json.dumps(initial_data), image_path, now, now
-        ))
-        conn.commit()
+        try:
+            cursor.execute("""
+                INSERT INTO purchase_drafts 
+                (id, supplier_name, invoice_number, invoice_date, grand_total, item_count, status, draft_data, image_path, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                draft_id, "Unknown", "", "", 0.0, 0,
+                'PROCESSING', json.dumps(initial_data), image_path, now, now
+            ))
+            conn.commit()
+        except sqlite3.IntegrityError:
+            # Check if this exact deterministic ID already exists
+            cursor.execute("SELECT id FROM purchase_drafts WHERE id = ?", (draft_id,))
+            if cursor.fetchone():
+                print(f"Draft {draft_id} already exists (idempotent recovery). Skipping re-extraction.")
+                return draft_id
+            raise
 
     background_tasks.add_task(process_async_extraction, draft_id, files_data)
     

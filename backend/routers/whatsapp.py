@@ -2,7 +2,9 @@ import os
 import hmac
 import hashlib
 import requests
-from datetime import datetime
+import time
+import uuid
+from datetime import datetime, timedelta
 from fastapi import APIRouter, Request, BackgroundTasks, HTTPException, Response
 from backend.database import get_db
 from backend.routers.purchase_drafts import enqueue_draft_extraction
@@ -109,10 +111,100 @@ def download_meta_media(media_id: str) -> tuple[bytes, str, str]:
     return media_req.content, filename, mime_type
 
 
+@router.on_event("startup")
+def startup_whatsapp_recovery():
+    """Sweep for any stale whatsapp batches across all senders that failed to cleanup."""
+    five_mins_ago = (datetime.now() - timedelta(minutes=5)).isoformat()
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE whatsapp_image_queue 
+                SET batch_id = NULL, batch_claimed_at = NULL 
+                WHERE batch_id IS NOT NULL AND batch_claimed_at < ?
+            """, (five_mins_ago,))
+            conn.commit()
+    except Exception as e:
+        print(f"WhatsApp startup recovery sweep failed (table might not exist yet): {e}")
+
+
+def flush_whatsapp_queue(background_tasks: BackgroundTasks, sender: str):
+    """
+    Sleeps for the grouping window, then flushes all queued images for the sender 
+    into a single extraction draft.
+    """
+    # 45 second grouping window
+    time.sleep(45)
+    
+    batch_id = str(uuid.uuid4())
+    now_iso = datetime.now().isoformat()
+    five_mins_ago = (datetime.now() - timedelta(minutes=5)).isoformat()
+    
+    # PHASE 1 - CLAIM
+    with get_db() as conn:
+        cursor = conn.cursor()
+        
+        try:
+            # Safely reclaim stale batches ACROSS ALL SENDERS
+            cursor.execute("""
+                UPDATE whatsapp_image_queue 
+                SET batch_id = NULL, batch_claimed_at = NULL 
+                WHERE batch_id IS NOT NULL AND batch_claimed_at < ?
+            """, (five_mins_ago,))
+            
+            # Atomically claim all currently unclaimed rows for this sender
+            cursor.execute("""
+                UPDATE whatsapp_image_queue 
+                SET batch_id = ?, batch_claimed_at = ?
+                WHERE sender = ? AND batch_id IS NULL
+            """, (batch_id, now_iso, sender))
+            
+            cursor.execute("SELECT * FROM whatsapp_image_queue WHERE batch_id = ?", (batch_id,))
+            rows = cursor.fetchall()
+            conn.commit()
+        except sqlite3.OperationalError as e:
+            if "no such table" in str(e).lower():
+                print(f"Warning: whatsapp_image_queue table missing. Cannot flush for {sender}.")
+                return
+            raise
+            
+    if not rows:
+        return  # Another task already flushed them or queue is empty
+        
+    # Sort in memory: primary by timestamp, tie-breaker by message_id
+    sorted_rows = sorted(rows, key=lambda r: (int(r["message_timestamp"]), r["message_id"]))
+    files_data = [(r["file_bytes"], r["filename"], r["content_type"]) for r in sorted_rows]
+    
+    deterministic_draft_id = f"wa_{sorted_rows[0]['message_id']}"
+    
+    # PHASE 2 - PROCESS (outside DB transaction)
+    try:
+        # Call the existing shared pipeline with deterministic draft_id
+        result_id = enqueue_draft_extraction(background_tasks, files_data, draft_id=deterministic_draft_id)
+        # Check if the result was successful (it will return the draft_id)
+        success = True
+    except Exception as e:
+        print(f"Failed to enqueue extraction for batch {batch_id}: {e}")
+        success = False
+        
+    # PHASE 3 - CLEANUP
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if success:
+            cursor.execute("DELETE FROM whatsapp_image_queue WHERE batch_id = ?", (batch_id,))
+        else:
+            # Revert so they can be tried again safely
+            cursor.execute("UPDATE whatsapp_image_queue SET batch_id = NULL, batch_claimed_at = NULL WHERE batch_id = ?", (batch_id,))
+        conn.commit()
+
+
 def handle_whatsapp_message(background_tasks: BackgroundTasks, message: dict):
     """Process a single WhatsApp message event."""
     message_id = message.get("id")
-    if not message_id:
+    sender = message.get("from")
+    timestamp = message.get("timestamp", "0")
+    
+    if not message_id or not sender:
         return
         
     # Deduplication
@@ -132,9 +224,17 @@ def handle_whatsapp_message(background_tasks: BackgroundTasks, message: dict):
     try:
         file_bytes, filename, content_type = download_meta_media(media_id)
         
-        # Call the existing shared pipeline
-        files_data = [(file_bytes, filename, content_type)]
-        enqueue_draft_extraction(background_tasks, files_data)
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO whatsapp_image_queue 
+                (message_id, sender, message_timestamp, filename, content_type, file_bytes)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (message_id, sender, timestamp, filename, content_type, file_bytes))
+            conn.commit()
+            
+        # Spawn the flusher task for this sender
+        background_tasks.add_task(flush_whatsapp_queue, background_tasks, sender)
         
     except Exception as e:
         print(f"Failed to process WhatsApp media {media_id}: {e}")
