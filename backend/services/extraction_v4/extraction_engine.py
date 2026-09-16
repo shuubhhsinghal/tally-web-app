@@ -67,14 +67,16 @@ def call_gemini_extraction_v4(images: list[bytes], is_retry: bool = False) -> di
         base_prompt = f"""
         The current date is {today}.
         You are a precise OCR transcription assistant extracting itemized rows from Indian purchase invoices.
-        You are receiving an image that has been strictly cropped to ONLY contain the item rows.
+        You are receiving one or more image(s) of an invoice, which may span multiple pages. The first page may be cropped to the item table.
+        You MUST inspect ALL supplied images/pages. Page 2 and beyond must be treated as a continuation of Page 1.
 
         CRITICAL BOUNDARIES:
-        - ONLY extract rows inside the main item table.
-        - IGNORE headers, footers, bank details, terms, GST summary, transport, and totals.
+        - ONLY extract rows inside the main item table(s) across ALL pages.
+        - Continue ignoring headers, footers, bank details, terms, GST summary, transport, and totals outside the item tables.
 
         ITEM EXTRACTION OUTPUT FORMAT:
-        Extract every line item from the invoice table into a JSON object with these EXACT keys:
+        Extract every line item across ALL pages into ONE SINGLE JSON array with these EXACT keys.
+        Do NOT replace or overwrite rows from earlier pages when processing later pages. Preserve the original page/table order:
         - "reasoning": What the AI read — useful for debugging.
         - "name": Full item description as printed.
         - "qty": Quantity as printed.

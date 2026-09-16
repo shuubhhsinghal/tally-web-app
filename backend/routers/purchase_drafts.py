@@ -102,15 +102,44 @@ def enqueue_draft_extraction(background_tasks: BackgroundTasks, files_data: list
     if ext.lower() in [".heic", ".heif"]:
         ext = ".jpg"
         
-    filename = f"{draft_id}{ext}"
-    filepath = os.path.join(UPLOAD_DIR, filename)
-    
-    # We only save the first page for the preview image_path
-    with open(filepath, "wb") as buffer:
-        buffer.write(first_file_bytes)
-
     # Update the files_data with normalized bytes for the first file
     files_data[0] = (first_file_bytes, first_filename, first_content_type)
+
+    if len(files_data) > 1 and ext.lower() != ".pdf":
+        import io
+        from PIL import Image
+        
+        filename = f"{draft_id}.pdf"
+        filepath = os.path.join(UPLOAD_DIR, filename)
+        
+        try:
+            images = []
+            for i, (f_bytes, f_name, f_type) in enumerate(files_data):
+                if i > 0:
+                    norm_bytes = normalize_uploaded_invoice(f_bytes, f_name, f_type)
+                    files_data[i] = (norm_bytes, f_name, f_type)
+                else:
+                    norm_bytes = first_file_bytes
+                    
+                img = Image.open(io.BytesIO(norm_bytes))
+                if img.mode != "RGB":
+                    img = img.convert("RGB")
+                images.append(img)
+            
+            images[0].save(filepath, format="PDF", save_all=True, append_images=images[1:])
+        except Exception as e:
+            print(f"Failed to create multi-page PDF, falling back to first page: {e}")
+            filename = f"{draft_id}{ext}"
+            filepath = os.path.join(UPLOAD_DIR, filename)
+            with open(filepath, "wb") as buffer:
+                buffer.write(first_file_bytes)
+    else:
+        filename = f"{draft_id}{ext}"
+        filepath = os.path.join(UPLOAD_DIR, filename)
+        
+        # We only save the first page for the preview image_path
+        with open(filepath, "wb") as buffer:
+            buffer.write(first_file_bytes)
 
     image_path = f"/uploads/drafts/{filename}"
     now = datetime.datetime.now().isoformat()
