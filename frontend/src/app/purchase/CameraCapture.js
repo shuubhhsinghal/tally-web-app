@@ -220,10 +220,10 @@ export function CameraCapture({ onCapture, onClose }) {
 
 
   return (
-    <div className="fixed inset-0 z-[100] bg-black flex flex-col items-center justify-center overscroll-none touch-none">
+    <div className="fixed inset-0 z-[100] bg-black flex flex-col overscroll-none touch-none">
       
       {/* Header */}
-      <div className="absolute top-0 inset-x-0 h-16 flex items-center justify-between px-4 z-50 bg-gradient-to-b from-black/70 to-transparent">
+      <div className="w-full h-16 flex items-center justify-between px-4 shrink-0 bg-black z-50">
         <button onClick={onClose} className="p-2 text-white hover:bg-white/20 rounded-full">
           <X className="w-6 h-6" />
         </button>
@@ -234,7 +234,7 @@ export function CameraCapture({ onCapture, onClose }) {
       </div>
 
       {/* Main Content Area */}
-      <div className="flex-1 w-full flex items-center justify-center relative overflow-hidden" style={{ maxHeight: "calc(100vh - 140px)" }}>
+      <div className="flex-1 w-full flex items-center justify-center relative overflow-hidden">
         
         {mode === "camera" && (
           <video 
@@ -279,8 +279,8 @@ export function CameraCapture({ onCapture, onClose }) {
               <polygon 
                 points={points.map(p => `${p.x * 100}%,${p.y * 100}%`).join(" ")}
                 fill="transparent"
-                stroke="#14b8a6" // teal-500
-                strokeWidth="2"
+                stroke="white"
+                strokeWidth="1.5"
               />
               
               {/* Handles */}
@@ -294,12 +294,13 @@ export function CameraCapture({ onCapture, onClose }) {
                 >
                   {/* Invisible larger hit area for touch */}
                   <circle 
-                    cx={`${p.x * 100}%`} cy={`${p.y * 100}%`} r="32" fill="transparent" 
+                    cx={`${p.x * 100}%`} cy={`${p.y * 100}%`} r="40" fill="transparent" 
                   />
                   {/* Visible handle */}
                   <circle 
-                    cx={`${p.x * 100}%`} cy={`${p.y * 100}%`} r="12" fill="white" 
-                    stroke="#14b8a6" strokeWidth="3" 
+                    cx={`${p.x * 100}%`} cy={`${p.y * 100}%`} r="6" fill="white" 
+                    stroke="rgba(0,0,0,0.6)" strokeWidth="1" 
+                    style={{ filter: "drop-shadow(0px 0px 4px rgba(0,0,0,0.8))" }}
                   />
                 </g>
               ))}
