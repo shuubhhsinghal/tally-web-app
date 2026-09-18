@@ -265,23 +265,24 @@ export function CameraCapture({ onCapture, onClose }) {
             {/* Overlay SVG for drawing the polygon and handles */}
             <svg className="absolute inset-0 w-full h-full pointer-events-none" style={{ overflow: 'visible' }}>
               
-              {/* Shaded area outside the polygon */}
-              <mask id="crop-mask">
-                <rect width="100%" height="100%" fill="white" />
-                <polygon 
-                  points={points.map(p => `${p.x * 100}%,${p.y * 100}%`).join(" ")}
-                  fill="black"
-                />
-              </mask>
-              <rect width="100%" height="100%" fill="rgba(0,0,0,0.5)" mask="url(#crop-mask)" />
+              {/* Nested SVG to fix polygon percentage coordinates for the mask */}
+              <svg viewBox="0 0 100 100" preserveAspectRatio="none" width="100%" height="100%" x="0" y="0">
+                {/* Shaded area outside the polygon */}
+                <mask id="crop-mask">
+                  <rect width="100" height="100" fill="white" />
+                  <polygon 
+                    points={points.map(p => `${p.x * 100},${p.y * 100}`).join(" ")}
+                    fill="black"
+                  />
+                </mask>
+                <rect width="100" height="100" fill="rgba(0,0,0,0.5)" mask="url(#crop-mask)" />
+              </svg>
               
-              {/* Polygon border */}
-              <polygon 
-                points={points.map(p => `${p.x * 100}%,${p.y * 100}%`).join(" ")}
-                fill="transparent"
-                stroke="white"
-                strokeWidth="1.5"
-              />
+              {/* Four connecting lines */}
+              <line x1={`${points[0].x * 100}%`} y1={`${points[0].y * 100}%`} x2={`${points[1].x * 100}%`} y2={`${points[1].y * 100}%`} stroke="white" strokeWidth="2" style={{ filter: "drop-shadow(0px 0px 2px rgba(0,0,0,0.8))" }} />
+              <line x1={`${points[1].x * 100}%`} y1={`${points[1].y * 100}%`} x2={`${points[2].x * 100}%`} y2={`${points[2].y * 100}%`} stroke="white" strokeWidth="2" style={{ filter: "drop-shadow(0px 0px 2px rgba(0,0,0,0.8))" }} />
+              <line x1={`${points[2].x * 100}%`} y1={`${points[2].y * 100}%`} x2={`${points[3].x * 100}%`} y2={`${points[3].y * 100}%`} stroke="white" strokeWidth="2" style={{ filter: "drop-shadow(0px 0px 2px rgba(0,0,0,0.8))" }} />
+              <line x1={`${points[3].x * 100}%`} y1={`${points[3].y * 100}%`} x2={`${points[0].x * 100}%`} y2={`${points[0].y * 100}%`} stroke="white" strokeWidth="2" style={{ filter: "drop-shadow(0px 0px 2px rgba(0,0,0,0.8))" }} />
               
               {/* Handles */}
               {points.map((p, idx) => (
