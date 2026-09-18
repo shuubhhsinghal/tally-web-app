@@ -11,6 +11,7 @@ export function CameraCapture({ onCapture, onClose }) {
   const [photoBlob, setPhotoBlob] = useState(null);
   const [photoUrl, setPhotoUrl] = useState(null);
   const [imgDim, setImgDim] = useState({ w: 0, h: 0 });
+  const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   
   const videoRef = useRef(null);
   const containerRef = useRef(null);
@@ -53,24 +54,57 @@ export function CameraCapture({ onCapture, onClose }) {
   }, []);
 
   const startCamera = async () => {
-    try {
-      const mediaStream = await navigator.mediaDevices.getUserMedia({
-        video: { 
-          facingMode: { ideal: "environment" },
-          width: { ideal: 4096 },
-          height: { ideal: 2160 }
-        },
-        audio: false
-      });
-      console.log("Camera track settings:", mediaStream.getVideoTracks()[0].getSettings());
-      setStream(mediaStream);
-      if (videoRef.current) {
-        videoRef.current.srcObject = mediaStream;
+    let mediaStream = null;
+    let track = null;
+    
+    // Progressive fallbacks for Android compatibility
+    const constraintsList = [
+      // 1. Ideal high-res environment
+      { video: { facingMode: { ideal: "environment" }, width: { ideal: 4096 }, height: { ideal: 2160 } }, audio: false },
+      // 2. Simple environment
+      { video: { facingMode: { ideal: "environment" } }, audio: false },
+      // 3. Any camera
+      { video: true, audio: false }
+    ];
+
+    for (let i = 0; i < constraintsList.length; i++) {
+      try {
+        console.log(`[Camera] Trying constraints fallback level ${i}:`, constraintsList[i]);
+        mediaStream = await navigator.mediaDevices.getUserMedia(constraintsList[i]);
+        track = mediaStream.getVideoTracks()[0];
+        console.log(`[Camera] Success at level ${i}. Track settings:`, track.getSettings());
+        if (track.getCapabilities) {
+           console.log(`[Camera] Track capabilities:`, track.getCapabilities());
+        }
+        break;
+      } catch (err) {
+        console.warn(`[Camera] Failed at level ${i}:`, err);
       }
-    } catch (err) {
-      console.error("Camera error:", err);
+    }
+
+    if (!mediaStream) {
+      console.error("[Camera] All getUserMedia constraints failed");
       showToast("Camera access denied or unavailable. Please choose from photos.", "error");
-      onClose(); // Fallback to choose photos handled by user manually clicking the other option
+      onClose();
+      return;
+    }
+
+    console.log(`[Camera] Stream active: ${mediaStream.active}, Tracks: ${mediaStream.getVideoTracks().length}`);
+    console.log(`[Camera] Track readyState: ${track.readyState}, enabled: ${track.enabled}, muted: ${track.muted}`);
+
+    setStream(mediaStream);
+    
+    if (videoRef.current) {
+      const video = videoRef.current;
+      video.srcObject = mediaStream;
+      console.log(`[Camera] srcObject assigned. video.readyState = ${video.readyState}`);
+      
+      try {
+        await video.play();
+        console.log("[Camera] video.play() promise resolved successfully");
+      } catch (e) {
+        console.error("[Camera] video.play() rejected:", e);
+      }
     }
   };
 
@@ -278,6 +312,20 @@ export function CameraCapture({ onCapture, onClose }) {
             ref={videoRef}
             autoPlay 
             playsInline
+            muted
+            onLoadedMetadata={(e) => console.log(`[Video Event] loadedmetadata. Dimensions: ${e.target.videoWidth}x${e.target.videoHeight}`)}
+            onCanPlay={(e) => console.log(`[Video Event] canplay. Dimensions: ${e.target.videoWidth}x${e.target.videoHeight}`)}
+            onPlaying={(e) => {
+              console.log(`[Video Event] playing. Dimensions: ${e.target.videoWidth}x${e.target.videoHeight}`);
+              if (e.target.videoWidth > 0 && e.target.videoHeight > 0) {
+                setIsVideoPlaying(true);
+              } else {
+                console.warn("[Video Event] playing but dimensions are 0!");
+              }
+            }}
+            onWaiting={() => console.log("[Video Event] waiting")}
+            onStalled={() => console.warn("[Video Event] stalled")}
+            onError={(e) => console.error("[Video Event] error", e.target.error)}
             className="w-full h-full object-cover"
           />
         )}
@@ -354,9 +402,10 @@ export function CameraCapture({ onCapture, onClose }) {
             <div className="w-16"></div>
             <button 
               onClick={handleCapture}
-              className="w-16 h-16 rounded-full border-4 border-white flex items-center justify-center hover:bg-white/20 transition-colors"
+              disabled={!isVideoPlaying}
+              className={`w-16 h-16 rounded-full border-4 flex items-center justify-center transition-colors ${isVideoPlaying ? 'border-white hover:bg-white/20 cursor-pointer' : 'border-gray-500 opacity-50 cursor-not-allowed'}`}
             >
-              <div className="w-12 h-12 bg-white rounded-full"></div>
+              <div className={`w-12 h-12 rounded-full ${isVideoPlaying ? 'bg-white' : 'bg-gray-500'}`}></div>
             </button>
             <div className="w-16"></div>
           </>
