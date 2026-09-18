@@ -7,7 +7,6 @@ import { useUI } from "@/context/UIContext";
 export function CameraCapture({ onCapture, onClose }) {
   const { showToast } = useUI();
   const [mode, setMode] = useState("camera"); // 'camera' or 'crop'
-  const [stream, setStream] = useState(null);
   const [photoBlob, setPhotoBlob] = useState(null);
   const [photoUrl, setPhotoUrl] = useState(null);
   const [imgDim, setImgDim] = useState({ w: 0, h: 0 });
@@ -15,6 +14,9 @@ export function CameraCapture({ onCapture, onClose }) {
   
   const videoRef = useRef(null);
   const containerRef = useRef(null);
+  const streamRef = useRef(null);
+  const isInitializingRef = useRef(false);
+  const sessionRef = useRef(Math.floor(Math.random() * 1000000));
   
   // Points stored as fractions (0.0 to 1.0) of the image width/height
   const [points, setPoints] = useState([
@@ -28,18 +30,24 @@ export function CameraCapture({ onCapture, onClose }) {
 
   // Stop all camera tracks
   const stopCamera = () => {
-    if (stream) {
-      stream.getTracks().forEach(track => track.stop());
-      setStream(null);
+    console.log(`[CAMERA SESSION ${sessionRef.current}] stopCamera called. Stream exists?`, !!streamRef.current);
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => {
+        console.log(`[CAMERA SESSION ${sessionRef.current}] track stop:`, track.label);
+        track.stop();
+      });
+      streamRef.current = null;
     }
   };
 
   useEffect(() => {
+    console.log(`[CAMERA SESSION ${sessionRef.current}] Component Mounted or Mode Changed. mode:`, mode);
     // Start camera when mode is 'camera'
     if (mode === "camera") {
       startCamera();
     }
     return () => {
+      console.log(`[CAMERA SESSION ${sessionRef.current}] Cleanup running for mode:`, mode);
       stopCamera();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -54,63 +62,59 @@ export function CameraCapture({ onCapture, onClose }) {
   }, []);
 
   const startCamera = async () => {
+    if (isInitializingRef.current || streamRef.current) {
+      console.log(`[CAMERA SESSION ${sessionRef.current}] startCamera ignored. isInitializing: ${isInitializingRef.current}, streamRef exists: ${!!streamRef.current}`);
+      return;
+    }
+    isInitializingRef.current = true;
+    
     let mediaStream = null;
     let track = null;
     
-    // Progressive fallbacks for Android compatibility
-    const constraintsList = [
-      // 1. Ideal high-res environment
-      { video: { facingMode: { ideal: "environment" }, width: { ideal: 4096 }, height: { ideal: 2160 } }, audio: false },
-      // 2. Simple environment
-      { video: { facingMode: { ideal: "environment" } }, audio: false },
-      // 3. Any camera
-      { video: true, audio: false }
-    ];
+    // Diagnostic simple constraints to fix Android flicker
+    const constraints = { video: { facingMode: { ideal: "environment" } }, audio: false };
 
-    for (let i = 0; i < constraintsList.length; i++) {
-      try {
-        console.log(`[Camera] Trying constraints fallback level ${i}:`, constraintsList[i]);
-        mediaStream = await navigator.mediaDevices.getUserMedia(constraintsList[i]);
-        track = mediaStream.getVideoTracks()[0];
-        console.log(`[Camera] Success at level ${i}. Track settings:`, track.getSettings());
-        if (track.getCapabilities) {
-           console.log(`[Camera] Track capabilities:`, track.getCapabilities());
-        }
-        break;
-      } catch (err) {
-        console.warn(`[Camera] Failed at level ${i}:`, err);
-      }
+    try {
+      console.log(`[CAMERA SESSION ${sessionRef.current}] getUserMedia START. Constraints:`, constraints);
+      mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+      track = mediaStream.getVideoTracks()[0];
+      console.log(`[CAMERA SESSION ${sessionRef.current}] getUserMedia SUCCESS. Track settings:`, track.getSettings());
+    } catch (err) {
+      console.warn(`[CAMERA SESSION ${sessionRef.current}] getUserMedia REJECTED:`, err);
     }
 
     if (!mediaStream) {
-      console.error("[Camera] All getUserMedia constraints failed");
+      console.error(`[CAMERA SESSION ${sessionRef.current}] Camera failed`);
       showToast("Camera access denied or unavailable. Please choose from photos.", "error");
       onClose();
+      isInitializingRef.current = false;
       return;
     }
 
-    console.log(`[Camera] Stream active: ${mediaStream.active}, Tracks: ${mediaStream.getVideoTracks().length}`);
-    console.log(`[Camera] Track readyState: ${track.readyState}, enabled: ${track.enabled}, muted: ${track.muted}`);
-
-    setStream(mediaStream);
+    streamRef.current = mediaStream;
     
     if (videoRef.current) {
       const video = videoRef.current;
-      video.srcObject = mediaStream;
-      console.log(`[Camera] srcObject assigned. video.readyState = ${video.readyState}`);
+      if (video.srcObject !== mediaStream) {
+        video.srcObject = mediaStream;
+        console.log(`[CAMERA SESSION ${sessionRef.current}] srcObject ASSIGNED.`);
+      }
       
       try {
+        console.log(`[CAMERA SESSION ${sessionRef.current}] video.play START`);
         await video.play();
-        console.log("[Camera] video.play() promise resolved successfully");
+        console.log(`[CAMERA SESSION ${sessionRef.current}] video.play SUCCESS`);
       } catch (e) {
-        console.error("[Camera] video.play() rejected:", e);
+        console.error(`[CAMERA SESSION ${sessionRef.current}] video.play REJECTED:`, e);
       }
     }
+    
+    isInitializingRef.current = false;
   };
 
   const handleCapture = async () => {
-    if (!videoRef.current || !stream) return;
-    const track = stream.getVideoTracks()[0];
+    if (!videoRef.current || !streamRef.current) return;
+    const track = streamRef.current.getVideoTracks()[0];
     
     // Attempt high-res ImageCapture API first (Supported on Chrome Android, etc)
     if ('ImageCapture' in window) {
