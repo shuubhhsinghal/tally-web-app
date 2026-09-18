@@ -487,7 +487,7 @@ export function ItemWiseMode({ onPostSuccess }) {
     return { status: "not_found", text: "⚠ New supplier — not found in Tally or Queue", cls: "text-red-600", borderCls: "border-red-300 focus:ring-red-500/50", bgCls: "bg-red-50 dark:bg-red-900/10" };
   };
 
-  const addFilesToStaged = (newFiles) => {
+  const addFilesToStaged = (newFiles, autoExtract = true) => {
     if (newFiles.length === 0) return;
 
     const newStaged = newFiles.filter(f => f.size > 0).map(f => ({
@@ -502,8 +502,10 @@ export function ItemWiseMode({ onPostSuccess }) {
       fileInputRef.current.value = "";
     }
     
-    // Automatically trigger extraction on upload
-    executeExtract(combined);
+    // Automatically trigger extraction on upload if requested
+    if (autoExtract) {
+      executeExtract(combined);
+    }
   };
 
   const handleFileChange = (e) => {
@@ -979,9 +981,14 @@ export function ItemWiseMode({ onPostSuccess }) {
               </label>
             </div>
 
-            <Button onClick={handleExtract} disabled={isExtracting} className="w-full">
-              Extract Invoice ({stagedFiles.length} pages)
-            </Button>
+            <div className="flex flex-col sm:flex-row gap-4">
+              <Button onClick={() => setShowCamera(true)} variant="secondary" className="flex-1">
+                + Add Another Page
+              </Button>
+              <Button onClick={handleExtract} disabled={isExtracting} className="flex-1">
+                Done & Process Invoice
+              </Button>
+            </div>
           </div>
         )}
 
@@ -1007,7 +1014,7 @@ export function ItemWiseMode({ onPostSuccess }) {
         <CameraCapture 
           onCapture={(file) => {
             setShowCamera(false);
-            addFilesToStaged([file]);
+            addFilesToStaged([file], false);
           }}
           onClose={() => setShowCamera(false)}
         />
