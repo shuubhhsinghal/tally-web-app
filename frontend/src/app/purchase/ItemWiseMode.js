@@ -248,6 +248,9 @@ export function ItemWiseMode({ onPostSuccess }) {
   const [mappingFailed, setMappingFailed] = useState(false);
   const [detectedHeaders, setDetectedHeaders] = useState([]);
   const [totals, setTotals] = useState({ printed: 0, calculated: 0, diff: 0 });
+  const [nativePhotoFile, setNativePhotoFile] = useState(null);
+  const nativeCameraInputRef = useRef(null);
+  const isAndroid = typeof navigator !== 'undefined' && /Android/i.test(navigator.userAgent);
   const [colMapping, setColMapping] = useState({
     qty_header: "",
     rate_header: "",
@@ -982,7 +985,17 @@ export function ItemWiseMode({ onPostSuccess }) {
             </div>
 
             <div className="flex flex-col sm:flex-row gap-4">
-              <Button onClick={() => setShowCamera(true)} variant="secondary" className="flex-1">
+              <Button 
+                onClick={() => {
+                  if (isAndroid && nativeCameraInputRef.current) {
+                    nativeCameraInputRef.current.click();
+                  } else {
+                    setShowCamera(true);
+                  }
+                }} 
+                variant="secondary" 
+                className="flex-1"
+              >
                 + Add Another Page
               </Button>
               <Button onClick={handleExtract} disabled={isExtracting} className="flex-1">
@@ -999,7 +1012,17 @@ export function ItemWiseMode({ onPostSuccess }) {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
           <div className="bg-white dark:bg-gray-900 rounded-2xl w-full max-w-sm p-6 flex flex-col gap-3 shadow-xl">
             <h3 className="text-xl font-bold text-gray-900 dark:text-white mb-2">Upload Invoice</h3>
-            <Button className="h-14 text-lg justify-start px-6 rounded-xl" onClick={() => { setShowUploadOptions(false); setShowCamera(true); }}>
+            <Button 
+              className="h-14 text-lg justify-start px-6 rounded-xl" 
+              onClick={() => { 
+                setShowUploadOptions(false); 
+                if (isAndroid && nativeCameraInputRef.current) {
+                  nativeCameraInputRef.current.click();
+                } else {
+                  setShowCamera(true); 
+                }
+              }}
+            >
               <Camera className="w-6 h-6 mr-3" /> Take Photo
             </Button>
             <Button variant="secondary" className="h-14 text-lg justify-start px-6 rounded-xl border-2" onClick={() => { setShowUploadOptions(false); fileInputRef.current.click(); }}>
@@ -1010,7 +1033,7 @@ export function ItemWiseMode({ onPostSuccess }) {
         </div>
       )}
 
-      {showCamera && (
+      {showCamera && !isAndroid && (
         <CameraCapture 
           onCapture={(file) => {
             setShowCamera(false);
@@ -1019,6 +1042,36 @@ export function ItemWiseMode({ onPostSuccess }) {
           onClose={() => setShowCamera(false)}
         />
       )}
+
+      {nativePhotoFile && isAndroid && (
+        <CameraCapture 
+          initialPhotoFile={nativePhotoFile}
+          onCapture={(file) => {
+            setNativePhotoFile(null);
+            addFilesToStaged([file], false);
+          }}
+          onClose={() => setNativePhotoFile(null)}
+          onRetake={() => {
+            setNativePhotoFile(null);
+            if (nativeCameraInputRef.current) nativeCameraInputRef.current.click();
+          }}
+        />
+      )}
+
+      <input
+        type="file"
+        accept="image/*"
+        capture="environment"
+        ref={nativeCameraInputRef}
+        className="hidden"
+        onChange={(e) => {
+          if (e.target.files && e.target.files.length > 0) {
+            setNativePhotoFile(e.target.files[0]);
+          }
+          // Reset so selecting the same file works
+          e.target.value = null;
+        }}
+      />
 
     </>
     );

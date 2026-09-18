@@ -4,9 +4,9 @@ import { X, Check, RefreshCcw } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { useUI } from "@/context/UIContext";
 
-export function CameraCapture({ onCapture, onClose }) {
+export function CameraCapture({ onCapture, onClose, initialPhotoFile, onRetake }) {
   const { showToast } = useUI();
-  const [mode, setMode] = useState("camera"); // 'camera' or 'crop'
+  const [mode, setMode] = useState(initialPhotoFile ? "crop" : "camera"); // 'camera' or 'crop'
   const [photoBlob, setPhotoBlob] = useState(null);
   const [photoUrl, setPhotoUrl] = useState(null);
   const [imgDim, setImgDim] = useState({ w: 0, h: 0 });
@@ -54,12 +54,30 @@ export function CameraCapture({ onCapture, onClose }) {
   }, [mode]);
 
   useEffect(() => {
+    if (initialPhotoFile) {
+      console.log(`[CAMERA SESSION ${sessionRef.current}] Initializing directly into crop mode with native file:`, initialPhotoFile.name);
+      const url = URL.createObjectURL(initialPhotoFile);
+      const img = new Image();
+      img.onload = () => {
+        console.log(`[CAMERA SESSION ${sessionRef.current}] Native image dimensions: ${img.naturalWidth} x ${img.naturalHeight}`);
+        setPhotoBlob(initialPhotoFile);
+        setPhotoUrl(url);
+        setImgDim({ w: img.naturalWidth, h: img.naturalHeight });
+        setPoints([{ x: 0.1, y: 0.1 }, { x: 0.9, y: 0.1 }, { x: 0.9, y: 0.9 }, { x: 0.1, y: 0.9 }]);
+      };
+      img.onerror = () => {
+        showToast("Failed to load native image for cropping", "error");
+        onClose();
+      };
+      img.src = url;
+    }
+    
     return () => {
       stopCamera();
       if (photoUrl) URL.revokeObjectURL(photoUrl);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [initialPhotoFile]);
 
   const startCamera = async () => {
     if (isInitializingRef.current || streamRef.current) {
@@ -204,7 +222,12 @@ export function CameraCapture({ onCapture, onClose }) {
     if (photoUrl) URL.revokeObjectURL(photoUrl);
     setPhotoBlob(null);
     setPhotoUrl(null);
-    setMode("camera");
+    
+    if (initialPhotoFile && onRetake) {
+      onRetake();
+    } else {
+      setMode("camera");
+    }
   };
 
   const handleUsePhoto = () => {
