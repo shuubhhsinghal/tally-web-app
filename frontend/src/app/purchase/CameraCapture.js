@@ -55,9 +55,14 @@ export function CameraCapture({ onCapture, onClose }) {
   const startCamera = async () => {
     try {
       const mediaStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: "environment" } },
+        video: { 
+          facingMode: { ideal: "environment" },
+          width: { ideal: 4096 },
+          height: { ideal: 2160 }
+        },
         audio: false
       });
+      console.log("Camera track settings:", mediaStream.getVideoTracks()[0].getSettings());
       setStream(mediaStream);
       if (videoRef.current) {
         videoRef.current.srcObject = mediaStream;
@@ -69,9 +74,47 @@ export function CameraCapture({ onCapture, onClose }) {
     }
   };
 
-  const handleCapture = () => {
-    if (!videoRef.current) return;
+  const handleCapture = async () => {
+    if (!videoRef.current || !stream) return;
+    const track = stream.getVideoTracks()[0];
+    
+    // Attempt high-res ImageCapture API first (Supported on Chrome Android, etc)
+    if ('ImageCapture' in window) {
+      try {
+        const imageCapture = new ImageCapture(track);
+        const blob = await imageCapture.takePhoto();
+        console.log("Captured via ImageCapture API. Blob size:", blob.size);
+        
+        const url = URL.createObjectURL(blob);
+        const img = new Image();
+        img.onload = () => {
+          console.log("ImageCapture dimensions:", img.naturalWidth, "x", img.naturalHeight);
+          setPhotoBlob(blob);
+          setPhotoUrl(url);
+          setImgDim({ w: img.naturalWidth, h: img.naturalHeight });
+          stopCamera();
+          setMode("crop");
+          setPoints([{ x: 0.1, y: 0.1 }, { x: 0.9, y: 0.1 }, { x: 0.9, y: 0.9 }, { x: 0.1, y: 0.9 }]);
+        };
+        img.onerror = () => {
+          console.warn("Failed to load ImageCapture blob");
+          fallbackCanvasCapture();
+        };
+        img.src = url;
+        return;
+      } catch (err) {
+        console.warn("ImageCapture failed or not supported, falling back to canvas", err);
+      }
+    }
+    
+    fallbackCanvasCapture();
+  };
+
+  const fallbackCanvasCapture = () => {
     const video = videoRef.current;
+    if (!video) return;
+    
+    console.log("Fallback capture via canvas. Video dimensions:", video.videoWidth, "x", video.videoHeight);
     
     // Create full resolution canvas
     const canvas = document.createElement("canvas");
@@ -79,7 +122,7 @@ export function CameraCapture({ onCapture, onClose }) {
     canvas.height = video.videoHeight;
     const ctx = canvas.getContext("2d");
     
-    // Draw current frame. This inherently resolves orientation for the web.
+    // Draw current frame
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
     
     canvas.toBlob((blob) => {
@@ -87,20 +130,14 @@ export function CameraCapture({ onCapture, onClose }) {
         showToast("Failed to capture image.", "error");
         return;
       }
+      console.log("Captured via Canvas Fallback. Blob size:", blob.size);
       const url = URL.createObjectURL(blob);
       setPhotoBlob(blob);
       setPhotoUrl(url);
       setImgDim({ w: canvas.width, h: canvas.height });
       stopCamera();
       setMode("crop");
-      
-      // Basic fallback detection: 10% inset
-      setPoints([
-        { x: 0.1, y: 0.1 },
-        { x: 0.9, y: 0.1 },
-        { x: 0.9, y: 0.9 },
-        { x: 0.1, y: 0.9 }
-      ]);
+      setPoints([{ x: 0.1, y: 0.1 }, { x: 0.9, y: 0.1 }, { x: 0.9, y: 0.9 }, { x: 0.1, y: 0.9 }]);
     }, "image/jpeg", 0.95);
   };
 
