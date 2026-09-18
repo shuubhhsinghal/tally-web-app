@@ -119,14 +119,33 @@ export function CameraCapture({ onCapture, onClose }) {
     // Attempt high-res ImageCapture API first (Supported on Chrome Android, etc)
     if ('ImageCapture' in window) {
       try {
+        console.log(`[CAMERA SESSION ${sessionRef.current}] ImageCapture API exists. Initializing.`);
         const imageCapture = new ImageCapture(track);
-        const blob = await imageCapture.takePhoto();
-        console.log("Captured via ImageCapture API. Blob size:", blob.size);
+        
+        let photoSettings = {};
+        if (typeof imageCapture.getPhotoCapabilities === 'function') {
+          try {
+            const caps = await imageCapture.getPhotoCapabilities();
+            console.log(`[CAMERA SESSION ${sessionRef.current}] Photo Capabilities:`, caps);
+            if (caps.imageWidth && caps.imageWidth.max) {
+              photoSettings.imageWidth = caps.imageWidth.max;
+            }
+            if (caps.imageHeight && caps.imageHeight.max) {
+              photoSettings.imageHeight = caps.imageHeight.max;
+            }
+          } catch (capErr) {
+            console.warn(`[CAMERA SESSION ${sessionRef.current}] getPhotoCapabilities failed:`, capErr);
+          }
+        }
+
+        console.log(`[CAMERA SESSION ${sessionRef.current}] Calling takePhoto with settings:`, photoSettings);
+        const blob = await imageCapture.takePhoto(photoSettings);
+        console.log(`[CAMERA SESSION ${sessionRef.current}] takePhoto SUCCESS. Blob size:`, blob.size);
         
         const url = URL.createObjectURL(blob);
         const img = new Image();
         img.onload = () => {
-          console.log("ImageCapture dimensions:", img.naturalWidth, "x", img.naturalHeight);
+          console.log(`[CAMERA SESSION ${sessionRef.current}] ImageCapture dimensions: ${img.naturalWidth} x ${img.naturalHeight}`);
           setPhotoBlob(blob);
           setPhotoUrl(url);
           setImgDim({ w: img.naturalWidth, h: img.naturalHeight });
@@ -135,14 +154,16 @@ export function CameraCapture({ onCapture, onClose }) {
           setPoints([{ x: 0.1, y: 0.1 }, { x: 0.9, y: 0.1 }, { x: 0.9, y: 0.9 }, { x: 0.1, y: 0.9 }]);
         };
         img.onerror = () => {
-          console.warn("Failed to load ImageCapture blob");
+          console.warn(`[CAMERA SESSION ${sessionRef.current}] Failed to load ImageCapture blob`);
           fallbackCanvasCapture();
         };
         img.src = url;
         return;
       } catch (err) {
-        console.warn("ImageCapture failed or not supported, falling back to canvas", err);
+        console.warn(`[CAMERA SESSION ${sessionRef.current}] ImageCapture takePhoto failed or not supported, falling back to canvas:`, err);
       }
+    } else {
+      console.log(`[CAMERA SESSION ${sessionRef.current}] ImageCapture not in window. Proceeding to fallback.`);
     }
     
     fallbackCanvasCapture();
@@ -152,7 +173,7 @@ export function CameraCapture({ onCapture, onClose }) {
     const video = videoRef.current;
     if (!video) return;
     
-    console.log("Fallback capture via canvas. Video dimensions:", video.videoWidth, "x", video.videoHeight);
+    console.log(`[CAMERA SESSION ${sessionRef.current}] Fallback capture via canvas. Video dimensions: ${video.videoWidth} x ${video.videoHeight}`);
     
     // Create full resolution canvas
     const canvas = document.createElement("canvas");
@@ -168,7 +189,7 @@ export function CameraCapture({ onCapture, onClose }) {
         showToast("Failed to capture image.", "error");
         return;
       }
-      console.log("Captured via Canvas Fallback. Blob size:", blob.size);
+      console.log(`[CAMERA SESSION ${sessionRef.current}] Captured via Canvas Fallback. Blob size:`, blob.size);
       const url = URL.createObjectURL(blob);
       setPhotoBlob(blob);
       setPhotoUrl(url);
