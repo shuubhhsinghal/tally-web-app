@@ -1,4 +1,3 @@
-from backend.services.pdf_normalizer import normalize_to_pdf
 import os
 import re
 import cv2
@@ -16,7 +15,6 @@ from backend.services.extraction_v3.image_preprocessor import flatten_document
 from backend.services.extraction_v3.table_detector import crop_item_table
 from backend.services.extraction_v4.metadata_extractor import call_metadata_extraction_v4
 from backend.services.reconciliation import safe_float
-from backend.services.image_quality import assess_and_enhance_image
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Pydantic schema — pure transcription for V4
@@ -56,8 +54,7 @@ def call_gemini_extraction_v4(images: list[bytes], is_retry: bool = False) -> di
     uploaded_files = []
     tmp_paths = []
     for img in images:
-        suffix = ".pdf" if img.startswith(b"%PDF") else ".jpg"
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
             tmp.write(img)
             tmp_paths.append(tmp.name)
 
@@ -148,27 +145,17 @@ def call_gemini_extraction_v4(images: list[bytes], is_retry: bool = False) -> di
         raise e
 
 
-def _run_core_extraction(images: list[bytes], metadata_baseline: dict = None) -> tuple[dict, dict]:
-    enhanced_images = []
-    
-    # 0. Image Preprocessing & Quality Gate
-    for i, img_bytes in enumerate(images):
-        out_bytes, status, metrics = assess_and_enhance_image(img_bytes)
-        
-        if status == "UNUSABLE":
-            raise ValueError("Image is too blurry or unclear to extract reliably. Please upload a clearer invoice image.")
-            
-        enhanced_images.append(out_bytes)
-        
+def process_invoice_v4(images: list[bytes]) -> dict:
+    """
+    Main V4 pipeline function.
+    Returns: extracted_data
+    """
     # V4 utilizes V3's safe image processing
-    flattened_images = [flatten_document(img) for img in enhanced_images]
+    flattened_images = [flatten_document(img) for img in images]
 
     # 1. Metadata Extraction
-    import copy
-    if metadata_baseline is None:
-        metadata = call_metadata_extraction_v4(flattened_images)
-    else:
-        metadata = copy.deepcopy(metadata_baseline)
+    print("--- [EXTRACTION V4] Step 1: Metadata Extraction ---", flush=True)
+    metadata = call_metadata_extraction_v4(flattened_images)
 
     gst_rate_pct = float(metadata.get("gst_rate") or 0)
 
@@ -176,6 +163,7 @@ def _run_core_extraction(images: list[bytes], metadata_baseline: dict = None) ->
     cropped_images = [crop_item_table(flattened_images[0])] + flattened_images[1:]
 
     # 3. Item Extraction
+    print("--- [EXTRACTION V4] Step 2: Item Extraction ---", flush=True)
     item_data = call_gemini_extraction_v4(cropped_images, is_retry=False)
     raw_items = item_data.get("items", [])
     detected_headers = item_data.get("detected_headers", [])
@@ -183,6 +171,7 @@ def _run_core_extraction(images: list[bytes], metadata_baseline: dict = None) ->
     # Check for row count mismatch and retry once
     physical_count = metadata.get("physical_row_count")
     if physical_count is not None and int(physical_count) != len(raw_items):
+        print(f"--- [EXTRACTION V4] Row count mismatch: Extracted {len(raw_items)}, Expected {physical_count}. Retrying... ---", flush=True)
         item_data_retry = call_gemini_extraction_v4(cropped_images, is_retry=True)
         raw_items = item_data_retry.get("items", [])
         detected_headers = item_data_retry.get("detected_headers", [])
@@ -209,73 +198,4 @@ def _run_core_extraction(images: list[bytes], metadata_baseline: dict = None) ->
         "items": raw_items
     }
 
-    return extracted_data, metadata
-
-
-def _validate_extraction(extracted_data: dict) -> tuple[bool, dict]:
-    from backend.services.extraction_v4.reconciliation_v4 import calculate_and_reconcile_v4
-    gst_rate = extracted_data.get("gst_rate_metadata", 0.0)
-    
-    res = calculate_and_reconcile_v4(
-        extracted_data, 
-        gst_recording_method="separate_ledger", 
-        user_gst_rate=gst_rate
-    )
-    recon = res.get("reconciliation_data", {})
-    
-    row_match = recon.get("row_count_match")
-    gt_match = recon.get("grand_total_match")
-    sub_match = recon.get("subtotal_match")
-    gst_match = recon.get("gst_match")
-    conf = recon.get("confidence")
-
-    if conf == "UNKNOWN_BASIS":
-        items = extracted_data.get("items", [])
-        phys_count = extracted_data.get("physical_row_count")
-        if phys_count is not None and int(phys_count) != len(items):
-            return False, {"messages": [f"Row count mismatch (Extracted: {len(items)}, Printed: {phys_count})"]}
-        return True, recon
-
-    if row_match is False: return False, recon
-    if gt_match is False: return False, recon
-    if sub_match is False: return False, recon
-    if gst_match is False: return False, recon
-    if conf == "REVIEW_REQUIRED": return False, recon
-        
-    return True, recon
-
-
-def process_invoice_v4(images: list[bytes]) -> dict:
-    
-    print("--- [EXTRACTION V4] Starting Primary JPEG Extraction ---", flush=True)
-    jpeg_data, metadata_baseline = _run_core_extraction(images)
-    
-    is_valid, recon = _validate_extraction(jpeg_data)
-    
-    if is_valid:
-        print("--- [EXTRACTION V4] Validation PASS: JPEG selected ---", flush=True)
-        jpeg_data["extraction_source"] = "jpeg"
-        return jpeg_data
-        
-    print(f"--- [EXTRACTION V4] Validation FAIL (JPEG): {recon.get('messages', [])} ---", flush=True)
-    
-    # Fallback only if the original image is raster
-    if images and not images[0].startswith(b"%PDF"):
-        print("--- [EXTRACTION V4] Starting Fallback PDF Extraction ---", flush=True)
-        try:
-            pdf_bytes, _, _ = normalize_to_pdf(images)
-            pdf_data, _ = _run_core_extraction([pdf_bytes], metadata_baseline=metadata_baseline)
-            
-            pdf_valid, pdf_recon = _validate_extraction(pdf_data)
-            if pdf_valid:
-                print("--- [EXTRACTION V4] Validation PASS: PDF Fallback selected ---", flush=True)
-                pdf_data["extraction_source"] = "pdf_fallback"
-                return pdf_data
-                
-            print(f"--- [EXTRACTION V4] Validation FAIL (PDF): {pdf_recon.get('messages', [])} ---", flush=True)
-        except Exception as e:
-            print(f"--- [EXTRACTION V4] PDF Fallback Failed: {e} ---", flush=True)
-
-    print("--- [EXTRACTION V4] Both paths failed validation. Defaulting to JPEG. ---", flush=True)
-    jpeg_data["extraction_source"] = "jpeg"
-    return jpeg_data
+    return extracted_data

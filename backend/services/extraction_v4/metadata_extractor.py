@@ -17,8 +17,7 @@ def call_metadata_extraction_v4(images: list[bytes], is_retry: bool = False) -> 
     uploaded_files = []
     tmp_paths = []
     for img in images:
-        suffix = ".pdf" if img.startswith(b"%PDF") else ".jpg"
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
             tmp.write(img)
             tmp_paths.append(tmp.name)
             
@@ -53,7 +52,6 @@ def call_metadata_extraction_v4(images: list[bytes], is_retry: bool = False) -> 
              If the label is just "Subtotal" or "Total" and it's ambiguous, return "unknown". NEVER guess.
         7. printed_grand_total: Look for the final "Total", "Invoice Amount", "Net Amount", or
            "Grand Total" — the final amount the buyer must pay including all taxes.
-           (CRITICAL: For PDFs, this is often at the very absolute bottom edge of the document below all items. Do not skip checking the very bottom edge.)
            Return null if not clearly present.
         8. physical_row_count: Count the exact number of physical item rows printed in the main table. Ignore totals rows, subtotal rows, empty rows, or multi-line item description continuations.
         9. explicit_round_off: Extract explicit round-off amount if printed. Else null.
