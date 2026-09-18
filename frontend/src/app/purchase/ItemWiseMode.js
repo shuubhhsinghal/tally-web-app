@@ -7,8 +7,9 @@ import { Select } from '@/components/ui/Select';
 import { SearchableSelect } from '@/components/ui/SearchableSelect';
 import { useUI } from '@/context/UIContext';
 import { useSearchParams, useRouter } from 'next/navigation';
-import { UploadCloud, Image as ImageIcon, AlertCircle, CheckCircle2, ChevronDown, ChevronRight, PlusCircle, Trash2, Edit3 } from "lucide-react";
+import { UploadCloud, Image as ImageIcon, AlertCircle, CheckCircle2, ChevronDown, ChevronRight, PlusCircle, Trash2, Edit3, Camera } from "lucide-react";
 import { calculateAndReconcileV4 } from './utils/reconciliation';
+import { CameraCapture } from './CameraCapture';
 
 function MasterAutocomplete({ value, onChange, placeholder, confirmed = [], masterStates = [], onCreate, disabled, rawItemName = "", inputClassName = "", createLabel = "item", isCreating = false }) {
   const [isOpen, setIsOpen] = useState(false);
@@ -240,6 +241,8 @@ export function ItemWiseMode({ onPostSuccess }) {
   const [previewUrl, setPreviewUrl] = useState(null);
   const [stagedFiles, setStagedFiles] = useState([]);
   const fileInputRef = useRef(null);
+  const [showUploadOptions, setShowUploadOptions] = useState(false);
+  const [showCamera, setShowCamera] = useState(false);
 
   const [validationStatus, setValidationStatus] = useState("matched"); // "matched", "needs_mapping", "unverified"
   const [mappingFailed, setMappingFailed] = useState(false);
@@ -288,7 +291,7 @@ export function ItemWiseMode({ onPostSuccess }) {
       if (parsedDraft.totals) setTotals(parsedDraft.totals);
       if (parsedDraft.validationStatus) setValidationStatus(parsedDraft.validationStatus);
       
-      setPreviewUrl(data.image_path); // Loaded from backend
+      setPreviewUrl(data.image_path ? `${data.image_path}?v=${new Date(data.updated_at || Date.now()).getTime()}` : null); // Loaded from backend
       setActiveDraftId(id);
     } catch (err) {
       showToast(err.message, 'error');
@@ -484,8 +487,7 @@ export function ItemWiseMode({ onPostSuccess }) {
     return { status: "not_found", text: "⚠ New supplier — not found in Tally or Queue", cls: "text-red-600", borderCls: "border-red-300 focus:ring-red-500/50", bgCls: "bg-red-50 dark:bg-red-900/10" };
   };
 
-  const handleFileChange = (e) => {
-    const newFiles = Array.from(e.target.files);
+  const addFilesToStaged = (newFiles) => {
     if (newFiles.length === 0) return;
 
     const newStaged = newFiles.filter(f => f.size > 0).map(f => ({
@@ -502,6 +504,10 @@ export function ItemWiseMode({ onPostSuccess }) {
     
     // Automatically trigger extraction on upload
     executeExtract(combined);
+  };
+
+  const handleFileChange = (e) => {
+    addFilesToStaged(Array.from(e.target.files));
   };
 
   const removeStagedFile = (index) => {
@@ -621,14 +627,26 @@ export function ItemWiseMode({ onPostSuccess }) {
 
   const updateItemVal = (index, field, value) => {
     if (useV4 && v4RawData) {
-      // V4 local recalculation handles everything
       setV4RawData(prev => {
+        if (!prev || !prev.extracted_data || !prev.extracted_data.items) return prev;
         const next = { ...prev };
         const items = [...next.extracted_data.items];
         const rawItem = { ...items[index] };
-        if (field === 'qty') rawItem._manual_qty = value;
-        if (field === 'amount') rawItem._manual_line_amount = value;
-        // Rate is derived in V4, but if we need manual rate support it goes here.
+        
+        if (field === 'name') rawItem.description = value;
+        if (field === 'qty') {
+            rawItem.quantity = value;
+            rawItem._manual_qty = value;
+        }
+        if (field === 'uom') rawItem.unit = value;
+        if (field === 'amount' || field === 'final_amount') {
+            rawItem._manual_line_amount = value;
+        }
+        if (field === 'rate' || field === 'final_rate') {
+            const qty = parseFloat(rawItem._manual_qty !== undefined ? rawItem._manual_qty : rawItem.quantity) || 1;
+            rawItem._manual_line_amount = parseFloat(value) * qty;
+        }
+        
         items[index] = rawItem;
         next.extracted_data.items = items;
         return next;
@@ -906,11 +924,12 @@ export function ItemWiseMode({ onPostSuccess }) {
 
   if (!invoice) {
     return (
+      <>
       <div className="space-y-6">
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div className="flex flex-col items-center justify-center p-8 text-center bg-gray-50 dark:bg-gray-800/50 rounded-2xl border-2 border-dashed border-gray-200 dark:border-gray-700 relative hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors">
             <input type="file" multiple accept="image/*,.heic,.heif,image/heic,image/heif" className="hidden" id="file-upload" onChange={handleFileChange} ref={fileInputRef} />
-            <label htmlFor="file-upload" className="cursor-pointer flex flex-col items-center w-full h-full">
+            <div onClick={() => !isExtracting && setShowUploadOptions(true)} className={`cursor-pointer flex flex-col items-center w-full h-full ${isExtracting ? 'opacity-50 cursor-not-allowed' : ''}`}>
               {isExtracting ? (
                 <div className="w-12 h-12 rounded-full border-4 border-teal-200 border-t-teal-600 animate-spin mb-4" />
               ) : (
@@ -919,7 +938,7 @@ export function ItemWiseMode({ onPostSuccess }) {
               <span className="text-lg font-bold text-gray-900 dark:text-gray-100">
                 {isExtracting ? "AI is reading invoice..." : (stagedFiles.length > 0 ? "Add more pages" : "Upload / Take Invoice")}
               </span>
-            </label>
+            </div>
           </div>
           
           <div 
@@ -968,6 +987,33 @@ export function ItemWiseMode({ onPostSuccess }) {
 
 
       </div>
+
+      {showUploadOptions && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div className="bg-white dark:bg-gray-900 rounded-2xl w-full max-w-sm p-6 flex flex-col gap-3 shadow-xl">
+            <h3 className="text-xl font-bold text-gray-900 dark:text-white mb-2">Upload Invoice</h3>
+            <Button className="h-14 text-lg justify-start px-6 rounded-xl" onClick={() => { setShowUploadOptions(false); setShowCamera(true); }}>
+              <Camera className="w-6 h-6 mr-3" /> Take Photo
+            </Button>
+            <Button variant="secondary" className="h-14 text-lg justify-start px-6 rounded-xl border-2" onClick={() => { setShowUploadOptions(false); fileInputRef.current.click(); }}>
+              <ImageIcon className="w-6 h-6 mr-3 text-gray-500" /> Choose from Photos
+            </Button>
+            <Button variant="ghost" className="mt-2 text-gray-500" onClick={() => setShowUploadOptions(false)}>Cancel</Button>
+          </div>
+        </div>
+      )}
+
+      {showCamera && (
+        <CameraCapture 
+          onCapture={(file) => {
+            setShowCamera(false);
+            addFilesToStaged([file]);
+          }}
+          onClose={() => setShowCamera(false)}
+        />
+      )}
+
+    </>
     );
   }
 
