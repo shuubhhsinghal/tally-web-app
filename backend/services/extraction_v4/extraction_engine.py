@@ -78,7 +78,10 @@ def call_gemini_extraction_v4(images: list[bytes], is_retry: bool = False) -> di
         Extract every line item across ALL pages into ONE SINGLE JSON array with these EXACT keys.
         Do NOT replace or overwrite rows from earlier pages when processing later pages. Preserve the original page/table order:
         - "reasoning": What the AI read — useful for debugging.
-        - "name": Full item description as printed.
+        - "name": The item/product DESCRIPTION column text ONLY, as printed. If the table has a
+          separate "Item Code"/"SKU"/"Article Code"/"HSN Code" column, you MUST exclude that
+          value from "name" entirely -- do not prefix or merge it with the description, even if
+          the two columns are printed close together.
         - "qty": Quantity as printed.
         - "uom": Unit of measure as printed (KG, PCS, etc.)
         - "amount_candidates": A list of objects containing "header" and "value" for EVERY monetary column printed for this row (e.g. Taxable Amount, Total Amount, Net Value). EXCLUDE unit rate/MRP.

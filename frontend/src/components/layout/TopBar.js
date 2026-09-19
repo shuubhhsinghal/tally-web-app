@@ -42,7 +42,8 @@ export default function TopBar({ title, showBack = false, onBack }) {
       const res = await fetch('/api/sync/sync-queue', { method: 'POST' });
       if (res.ok) {
         const data = await res.json();
-        showToast(data.message || 'Manual sync triggered', 'success');
+        const hasIssue = data.status !== 'success' || (data.failed_months && data.failed_months.length > 0);
+        showToast(data.message || 'Manual sync triggered', hasIssue ? 'error' : 'success');
       } else {
         showToast('Failed to trigger manual sync', 'error');
       }

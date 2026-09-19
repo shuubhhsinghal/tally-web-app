@@ -4,7 +4,7 @@ import requests
 import json
 import os
 from xml.sax.saxutils import escape
-from backend.database import get_all_ledgers, queue_operation, update_queue_status
+from backend.database import get_all_ledgers, queue_operation, update_queue_status, set_delivery_uncertain, resolve_cost_center_for_ledger
 from backend.services.tally_response import parse_tally_response
 
 router = APIRouter()
@@ -46,16 +46,11 @@ async def post_sales(payload: SalesRequest):
     safe_ledger = escape(str(payload.ledger))
     safe_nar = escape(str(payload.narration))
     
-    # Auto-derive cost center
-    cost_center = None
-    ledger_lower = payload.ledger.lower()
-    if "mahagun" in ledger_lower:
-        cost_center = "Mahagun"
-    elif "vvip" in ledger_lower:
-        cost_center = "Vvip"
-    elif "gulshan" in ledger_lower:
-        cost_center = "Gulshan"
-        
+    # Auto-derive cost center by matching the ledger name against the real stores
+    # table, so the allocation uses the exact Tally cost-centre casing and the
+    # resolved value can be persisted below for the Queue page's store filter.
+    cost_center = resolve_cost_center_for_ledger(payload.ledger)
+
     allocation = ""
     if cost_center:
         allocation = f"""
@@ -93,20 +88,38 @@ async def post_sales(payload: SalesRequest):
 </ENVELOPE>"""
 
     # Queue-First Architecture: Always save transaction to DB before attempting to send
-    queue_id = queue_operation("POST_VOUCHER", xml_data, payload.model_dump(), f"Sales: {payload.amount} from {payload.ledger}")
+    queue_payload = payload.model_dump()
+    if cost_center:
+        queue_payload['cost_center'] = cost_center
+    queue_id = queue_operation("POST_VOUCHER", xml_data, queue_payload, f"Sales: {payload.amount} from {payload.ledger}")
 
     try:
+        set_delivery_uncertain(queue_id, True)
         response = requests.post(TALLY_URL, data=xml_data.encode('utf-8'), timeout=10)
         parsed = parse_tally_response(response.text, "POST_VOUCHER")
-        
+
         if not parsed["is_success"]:
+            set_delivery_uncertain(queue_id, False)
             update_queue_status(queue_id, "FAILED", parsed['error_message'])
             raise HTTPException(status_code=400, detail=f"Tally rejected the entry: {parsed['error_message']}")
-            
+
+        set_delivery_uncertain(queue_id, False)
         update_queue_status(queue_id, "SYNCED")
         return {"status": "success", "message": "Sales entry posted successfully"}
-    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
-        # Already marked as PENDING in the DB, leave it for the background worker
+    except requests.exceptions.ConnectTimeout:
+        # The connection itself never established (Tally's address is unreachable)
+        # -- as safe as ConnectionError, nothing was ever sent.
+        set_delivery_uncertain(queue_id, False)
+        return {"status": "queued", "message": "Saved to offline queue."}
+    except requests.exceptions.Timeout:
+        # Ambiguous: connection was established and the request was sent, but no
+        # response came back in time -- Tally may have processed it before the
+        # response was lost. Leave delivery_uncertain set (already persisted
+        # above) so a manual retry is blocked until someone verifies in Tally.
+        return {"status": "queued", "message": "Saved to offline queue."}
+    except requests.exceptions.ConnectionError:
+        # Request never reached Tally at all -- safe to clear and leave PENDING.
+        set_delivery_uncertain(queue_id, False)
         return {"status": "queued", "message": "Saved to offline queue."}
     except HTTPException:
         raise

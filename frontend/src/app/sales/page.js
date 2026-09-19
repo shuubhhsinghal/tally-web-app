@@ -8,16 +8,7 @@ import { Card } from '@/components/ui/Card';
 import { TextArea } from '@/components/ui/TextArea';
 import { useUI } from '@/context/UIContext';
 import { useRouter } from 'next/navigation';
-
-const SALES_LEDGERS = [
-  "Cash Mahagun",
-  "Cash Vvip",
-  "Cash Gulshan",
-  "Paytm Mahagun",
-  "Paytm Vvip",
-  "Paytm Gulshan",
-  "Gpay Vvip"
-];
+import { SALES_LEDGERS } from '@/utils/salesLedgers';
 
 export default function SalesVoucher() {
   const router = useRouter();

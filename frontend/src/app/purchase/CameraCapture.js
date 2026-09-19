@@ -27,6 +27,50 @@ export function CameraCapture({ onCapture, onClose, initialPhotoFile, onRetake }
   ]);
 
   const [activePointIdx, setActivePointIdx] = useState(null);
+  const hasUserAdjustedRef = useRef(false);
+  const [hasUserAdjusted, setHasUserAdjusted] = useState(false);
+  const [isDetectingCorners, setIsDetectingCorners] = useState(false);
+
+  // Ask Gemini for a starting guess at the document's corners as soon as a
+  // photo is ready to crop -- purely a convenience: if it fails, times out,
+  // or the user has already started dragging a handle, the default box
+  // (or whatever the user has adjusted) is left alone. While this is in
+  // flight, "Use Photo" is briefly disabled so a rushed tap can't submit the
+  // generic default box before the real edges have a chance to load.
+  useEffect(() => {
+    if (mode !== "crop" || !photoBlob) return;
+    hasUserAdjustedRef.current = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setHasUserAdjusted(false);
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setIsDetectingCorners(true);
+    let cancelled = false;
+
+    // Safety timeout: never block the user for more than a couple seconds,
+    // even if detection is slow or fails silently.
+    const timeoutId = setTimeout(() => {
+      if (!cancelled) setIsDetectingCorners(false);
+    }, 2500);
+
+    (async () => {
+      try {
+        const fd = new FormData();
+        fd.append("file", photoBlob, "photo.jpg");
+        const res = await fetch("/api/purchase-item/detect-corners", { method: "POST", body: fd });
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (!cancelled && data.corners && !hasUserAdjustedRef.current) {
+          setPoints(data.corners);
+        }
+      } catch (e) {
+        // Silent -- detection is a nice-to-have, never blocks the crop screen
+      } finally {
+        if (!cancelled) setIsDetectingCorners(false);
+      }
+    })();
+
+    return () => { cancelled = true; clearTimeout(timeoutId); };
+  }, [photoBlob, mode]);
 
   // Stop all camera tracks
   const stopCamera = () => {
@@ -231,55 +275,12 @@ export function CameraCapture({ onCapture, onClose, initialPhotoFile, onRetake }
   };
 
   const handleUsePhoto = () => {
-    // Calculate bounding box of the 4 points in original image coordinates
-    let minX = 1, minY = 1, maxX = 0, maxY = 0;
-    points.forEach(p => {
-      if (p.x < minX) minX = p.x;
-      if (p.x > maxX) maxX = p.x;
-      if (p.y < minY) minY = p.y;
-      if (p.y > maxY) maxY = p.y;
-    });
-
-    // Clamp to [0, 1]
-    minX = Math.max(0, minX);
-    minY = Math.max(0, minY);
-    maxX = Math.min(1, maxX);
-    maxY = Math.min(1, maxY);
-
-    // Pixel coordinates mapped to original resolution
-    const sx = Math.floor(minX * imgDim.w);
-    const sy = Math.floor(minY * imgDim.h);
-    const sWidth = Math.floor((maxX - minX) * imgDim.w);
-    const sHeight = Math.floor((maxY - minY) * imgDim.h);
-
-    if (sWidth <= 0 || sHeight <= 0) {
-      showToast("Invalid crop area", "error");
-      return;
-    }
-
-    // Load original image to crop
-    const img = new Image();
-    img.onload = () => {
-      const canvas = document.createElement("canvas");
-      canvas.width = sWidth;
-      canvas.height = sHeight;
-      const ctx = canvas.getContext("2d");
-      
-      ctx.drawImage(img, sx, sy, sWidth, sHeight, 0, 0, sWidth, sHeight);
-      
-      canvas.toBlob((blob) => {
-        if (!blob) {
-          showToast("Failed to crop image.", "error");
-          return;
-        }
-        const file = new File([blob], `invoice-capture-${Date.now()}.jpg`, { type: "image/jpeg" });
-        onCapture(file); // Parent handles closing
-      }, "image/jpeg", 0.95);
-    };
-    img.onerror = () => {
-      showToast("Failed to process captured image", "error");
-    };
-    img.src = photoUrl;
+    // No client-side cropping anymore -- the marked corners go to the backend
+    // as-is, which runs a real perspective warp using the original photo.
+    const finalFile = photoBlob instanceof File
+      ? photoBlob
+      : new File([photoBlob], `invoice-capture-${Date.now()}.jpg`, { type: "image/jpeg" });
+    onCapture(finalFile, points); // Parent handles closing
   };
 
   // --- SVG Touch / Mouse Handlers ---
@@ -293,6 +294,8 @@ export function CameraCapture({ onCapture, onClose, initialPhotoFile, onRetake }
 
   const handlePointerDown = (idx, e) => {
     e.preventDefault();
+    hasUserAdjustedRef.current = true;
+    setHasUserAdjusted(true);
     setActivePointIdx(idx);
   };
 
@@ -463,9 +466,22 @@ export function CameraCapture({ onCapture, onClose, initialPhotoFile, onRetake }
               <RefreshCcw className="w-5 h-5 mr-2" />
               Retake
             </Button>
-            <Button className="bg-teal-500 hover:bg-teal-600 text-white h-12 px-6 rounded-full" onClick={handleUsePhoto}>
-              <Check className="w-5 h-5 mr-2" />
-              Use Photo
+            <Button
+              className="bg-teal-500 hover:bg-teal-600 text-white h-12 px-6 rounded-full"
+              onClick={handleUsePhoto}
+              disabled={isDetectingCorners && !hasUserAdjusted}
+            >
+              {isDetectingCorners && !hasUserAdjusted ? (
+                <>
+                  <span className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin mr-2" />
+                  Finding edges...
+                </>
+              ) : (
+                <>
+                  <Check className="w-5 h-5 mr-2" />
+                  Use Photo
+                </>
+              )}
             </Button>
           </>
         )}

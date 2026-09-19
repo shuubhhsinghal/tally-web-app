@@ -1,12 +1,17 @@
 import os
+import asyncio
 import pytest
-from unittest.mock import patch, MagicMock
+from datetime import datetime
+from unittest.mock import patch, MagicMock, AsyncMock
 
 # Set testing environment so database.py uses test_tally_sync.db
 os.environ["TESTING"] = "true"
 
 from backend.database import init_db, get_db
-from backend.services.tally_reporting_sync import fetch_and_store_cost_centres, fetch_and_store_vouchers
+from backend.services.tally_reporting_sync import (
+    fetch_and_store_cost_centres, fetch_and_store_vouchers,
+    _get_default_sync_end_date, _get_current_fy_end, async_sync_vouchers,
+)
 
 # Dummy XMLs
 COST_CENTRE_XML = """<ENVELOPE>
@@ -150,3 +155,47 @@ def test_sync_vouchers(mock_post):
         assert c.fetchone()['cnt'] == 2
         c.execute("SELECT COUNT(*) as cnt FROM reporting_inventory_entries")
         assert c.fetchone()['cnt'] == 1
+
+
+def test_default_sync_end_date_caps_to_today_mid_fiscal_year():
+    # "Today" is mid-fiscal-year (well before March 31) -> default end date
+    # must be today, NOT the fiscal year end.
+    with patch('backend.services.tally_reporting_sync.datetime') as mock_dt:
+        mock_dt.now.return_value = datetime(2026, 9, 19)
+        result = _get_default_sync_end_date()
+        assert result == "20260919"
+
+
+def test_default_sync_end_date_never_exceeds_fiscal_year_end():
+    result = _get_default_sync_end_date()
+    assert result <= _get_current_fy_end()
+
+
+def test_async_sync_vouchers_default_end_date_is_today():
+    # Called with no args, async_sync_vouchers must pass TODAY as end_date
+    # to fetch_and_store_vouchers, not the (possibly future) fiscal year end.
+    with patch('backend.services.tally_reporting_sync.fetch_and_store_vouchers') as mock_fetch, \
+         patch('backend.services.tally_reporting_sync.async_sync_monthly_stock', new_callable=AsyncMock) as mock_stock:
+        mock_fetch.return_value = 0
+        mock_stock.return_value = []
+
+        asyncio.run(async_sync_vouchers())
+
+        called_start, called_end, _tally_url = mock_fetch.call_args[0]
+        assert called_end == datetime.now().strftime("%Y%m%d")
+
+
+def test_async_sync_vouchers_explicit_end_date_not_capped():
+    # An explicitly-provided end_date (even one in the future) must pass
+    # through unchanged -- capping only applies to the default/no-args case.
+    with patch('backend.services.tally_reporting_sync.fetch_and_store_vouchers') as mock_fetch, \
+         patch('backend.services.tally_reporting_sync.async_sync_monthly_stock', new_callable=AsyncMock) as mock_stock:
+        mock_fetch.return_value = 0
+        mock_stock.return_value = []
+
+        future_end = "20270331"
+        asyncio.run(async_sync_vouchers(start_date="20260401", end_date=future_end))
+
+        called_start, called_end, _tally_url = mock_fetch.call_args[0]
+        assert called_start == "20260401"
+        assert called_end == future_end

@@ -14,8 +14,34 @@ UPLOAD_DIR = os.path.join(os.getcwd(), "backend", "uploads", "drafts")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 from fastapi import BackgroundTasks
+from starlette.concurrency import run_in_threadpool
 from backend.services.image_normalizer import normalize_uploaded_invoice
+from backend.services.image_enhancer import enhance_document_image, apply_manual_perspective_crop
 import traceback
+
+
+def _is_raster_image(filename, content_type):
+    """True for an actual photo/image file this pipeline can correct -- false
+    for PDFs, which OpenCV can't decode and shouldn't be sent through here."""
+    ext = os.path.splitext(filename or "")[1].lower()
+    return ext != ".pdf" and content_type != "application/pdf"
+
+DEBUG_CROP_DIR = os.path.join(UPLOAD_DIR, "_debug_crops")
+
+def _debug_log_crop(draft_id, page_idx, points, warped_bytes):
+    """Temporary investigation aid: whenever a manual/auto-detected crop is
+    applied, keep the exact points and the resulting image on disk, so a bad
+    crop (e.g. an orientation flip) can be diagnosed from real data instead
+    of reconstructed after the fact. Best-effort only -- never blocks upload."""
+    try:
+        os.makedirs(DEBUG_CROP_DIR, exist_ok=True)
+        base = f"{draft_id}_page{page_idx}"
+        with open(os.path.join(DEBUG_CROP_DIR, f"{base}_points.json"), "w") as f:
+            json.dump(points, f)
+        with open(os.path.join(DEBUG_CROP_DIR, f"{base}_warped.jpg"), "wb") as f:
+            f.write(warped_bytes)
+    except Exception as e:
+        print(f"[DEBUG CROP LOG] Failed to persist debug crop data: {e}", flush=True)
 
 def process_async_extraction(draft_id: str, files_data: list):
     from backend.services.extraction_v4.extraction_engine import process_invoice_v4
@@ -85,17 +111,25 @@ def process_async_extraction(draft_id: str, files_data: list):
             """, (json.dumps({"error": str(e)}), now, draft_id))
             conn.commit()
 
-def enqueue_draft_extraction(background_tasks: BackgroundTasks, files_data: list, draft_id: str = None):
+def enqueue_draft_extraction(background_tasks: BackgroundTasks, files_data: list, draft_id: str = None, crop_points_list: list = None):
     """
     Enqueues the V4 extraction process for an uploaded invoice.
     files_data: list of tuples (file_bytes, filename, content_type)
+    crop_points_list: optional list aligned by index with files_data, each entry
+    either a 4-point array (manually marked corners) or None.
     Returns: draft_id
     """
     if not draft_id:
         draft_id = str(uuid.uuid4())
-        
+
+    if not crop_points_list:
+        crop_points_list = [None] * len(files_data)
+
+    def _get_crop_points(i):
+        return crop_points_list[i] if i < len(crop_points_list) else None
+
     first_file_bytes, first_filename, first_content_type = files_data[0]
-    
+
     ext = os.path.splitext(first_filename)[1]
     if not ext:
         ext = ".pdf" if first_content_type == "application/pdf" else ".jpg"
@@ -104,22 +138,38 @@ def enqueue_draft_extraction(background_tasks: BackgroundTasks, files_data: list
     first_file_bytes = normalize_uploaded_invoice(first_file_bytes, first_filename, first_content_type)
     if ext.lower() in [".heic", ".heif"]:
         ext = ".jpg"
-        
+
+    if _is_raster_image(first_filename, first_content_type):
+        # If the user manually marked the document's corners, straighten to
+        # that exact quadrilateral first -- this is what actually becomes
+        # both the on-screen preview and the input Gemini extracts from.
+        first_crop_points = _get_crop_points(0)
+        if first_crop_points:
+            first_file_bytes = apply_manual_perspective_crop(first_file_bytes, first_crop_points)
+            _debug_log_crop(draft_id, 0, first_crop_points, first_file_bytes)
+        first_file_bytes = enhance_document_image(first_file_bytes)
+
     # Update the files_data with normalized bytes for the first file
     files_data[0] = (first_file_bytes, first_filename, first_content_type)
 
     if len(files_data) > 1 and ext.lower() != ".pdf":
         import io
         from PIL import Image
-        
+
         filename = f"{draft_id}.pdf"
         filepath = os.path.join(UPLOAD_DIR, filename)
-        
+
         try:
             images = []
             for i, (f_bytes, f_name, f_type) in enumerate(files_data):
                 if i > 0:
                     norm_bytes = normalize_uploaded_invoice(f_bytes, f_name, f_type)
+                    if _is_raster_image(f_name, f_type):
+                        crop_points = _get_crop_points(i)
+                        if crop_points:
+                            norm_bytes = apply_manual_perspective_crop(norm_bytes, crop_points)
+                            _debug_log_crop(draft_id, i, crop_points, norm_bytes)
+                        norm_bytes = enhance_document_image(norm_bytes)
                     files_data[i] = (norm_bytes, f_name, f_type)
                 else:
                     norm_bytes = first_file_bytes
@@ -176,20 +226,29 @@ def enqueue_draft_extraction(background_tasks: BackgroundTasks, files_data: list
 @router.post("/async-extract")
 async def create_purchase_draft_async(
     background_tasks: BackgroundTasks,
-    files: list[UploadFile] = File(...)
+    files: list[UploadFile] = File(...),
+    crop_points: str = Form(default="null")
 ):
     if not files:
         raise HTTPException(status_code=400, detail="No files uploaded")
-        
+
+    try:
+        crop_points_list = json.loads(crop_points)
+    except (json.JSONDecodeError, TypeError):
+        crop_points_list = None
+
+    if crop_points_list is not None and len(crop_points_list) != len(files):
+        raise HTTPException(status_code=400, detail="crop_points length does not match number of files")
+
     first_file_bytes = await files[0].read()
     files_data = [(first_file_bytes, files[0].filename, files[0].content_type)]
-    
+
     for i in range(1, len(files)):
         fb = await files[i].read()
         files_data.append((fb, files[i].filename, files[i].content_type))
 
-    draft_id = enqueue_draft_extraction(background_tasks, files_data)
-    
+    draft_id = await run_in_threadpool(enqueue_draft_extraction, background_tasks, files_data, None, crop_points_list)
+
     return {"id": draft_id, "message": "Draft creation and extraction started"}
 
 

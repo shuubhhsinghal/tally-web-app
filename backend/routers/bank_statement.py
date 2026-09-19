@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from backend.database import (
     get_db, get_all_ledgers, queue_operation, queue_operations_bulk, update_queue_status,
     get_all_bank_mappings, get_mappings_by_bank,
-    create_bank_mapping, update_bank_mapping, delete_bank_mapping
+    create_bank_mapping, update_bank_mapping, delete_bank_mapping, set_delivery_uncertain
 )
 from backend.services.tally_response import parse_tally_response
 
@@ -573,18 +573,37 @@ def post_to_tally(payload: TransactionPayload):
     xml_data = "\n".join(xml_lines).encode('utf-8')
     
     try:
+        for qid in queue_ids:
+            set_delivery_uncertain(qid, True)
         response = requests.post(TALLY_URL, data=xml_data, timeout=5)
         if "<LINEERROR>" in response.text:
             for qid in queue_ids:
+                set_delivery_uncertain(qid, False)
                 update_queue_status(qid, "FAILED", "Tally rejected the vouchers. See response for details.")
             raise HTTPException(status_code=400, detail="Tally rejected the vouchers.")
-            
+
         for qid in queue_ids:
+            set_delivery_uncertain(qid, False)
             update_queue_status(qid, "SYNCED")
         return {"status": "success", "message": "Successfully posted to Tally"}
-        
-    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
-        # Network down. They are already PENDING in the db!
+
+    except requests.exceptions.ConnectTimeout:
+        # The connection itself never established (Tally's address is unreachable)
+        # -- as safe as ConnectionError, nothing was ever sent.
+        for qid in queue_ids:
+            set_delivery_uncertain(qid, False)
+        return {"status": "queued", "message": f"{len(queue_ids)} individual vouchers saved to offline queue."}
+    except requests.exceptions.Timeout:
+        # Ambiguous: connection was established and the request was sent, but no
+        # response came back in time -- Tally may have processed this batch before
+        # the response was lost. Leave delivery_uncertain set on every row in this
+        # batch (already persisted above) so a manual retry is blocked until
+        # someone verifies in Tally directly.
+        return {"status": "queued", "message": f"{len(queue_ids)} individual vouchers saved to offline queue."}
+    except requests.exceptions.ConnectionError:
+        # Request never reached Tally at all -- safe to clear and leave PENDING.
+        for qid in queue_ids:
+            set_delivery_uncertain(qid, False)
         return {"status": "queued", "message": f"{len(queue_ids)} individual vouchers saved to offline queue."}
     except HTTPException:
         raise

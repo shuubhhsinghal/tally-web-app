@@ -1,7 +1,8 @@
 import os
 import json
 import requests
-from fastapi import APIRouter, HTTPException
+from typing import Optional
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from backend.database import get_db
 from backend.config import TALLY_URL
@@ -12,6 +13,7 @@ router = APIRouter()
 def get_dashboard_stats():
     queue_count = 0
     cache_count = 0
+    failed_count = 0
     
     # 1. Check SQLite Queue
     try:
@@ -21,11 +23,17 @@ def get_dashboard_stats():
             row = cursor.fetchone()
             if row:
                 queue_count = row['count']
-                
+
             cursor.execute("SELECT COUNT(*) as count FROM stock_items")
             row = cursor.fetchone()
             if row:
                 cache_count = row['count']
+
+            # True total, regardless of the 10-item activity feed cap or is_hidden state.
+            cursor.execute("SELECT COUNT(*) as count FROM offline_queue WHERE status = 'FAILED'")
+            row = cursor.fetchone()
+            if row:
+                failed_count = row['count']
     except Exception as e:
         print(f"Error fetching stats: {e}")
 
@@ -41,20 +49,137 @@ def get_dashboard_stats():
     return {
         "queue_count": queue_count,
         "cache_count": cache_count,
+        "failed_count": failed_count,
         "tally_online": tally_online
     }
 
 @router.get("/activity")
-def get_recent_activity():
+def get_recent_activity(
+    status: Optional[str] = Query(None, description="Filter by status, e.g. FAILED"),
+    include_hidden: bool = Query(False, description="Include items hidden by 'Clear Finished'"),
+    limit: int = Query(10, ge=1, le=500)
+):
     try:
         with get_db() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT id, operation_type, status, description, created_at FROM offline_queue WHERE COALESCE(is_hidden, 0) = 0 ORDER BY id DESC LIMIT 10")
+            conditions = []
+            params = []
+            if not include_hidden:
+                conditions.append("is_hidden = 0")
+            if status:
+                conditions.append("status = ?")
+                params.append(status)
+            where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+            params.append(limit)
+            cursor.execute(
+                f"SELECT id, operation_type, status, description, created_at, is_hidden "
+                f"FROM offline_queue {where} ORDER BY id DESC LIMIT ?",
+                params
+            )
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
     except Exception as e:
         print(f"Error fetching activity: {e}")
         return []
+
+QUEUE_PAGE_CAP = 200
+QUEUE_STATUSES = ("PENDING", "FAILED", "SYNCED")
+
+# A transaction "belongs" to a store if its payload carries a matching cost_center
+# (purchase/payment/bank_statement) or from_store/to_store (stock transfer -- shows
+# under BOTH stores it touches), or if it's a repack voucher whose repack_operations
+# row records that store. Sales, fund transfers, and master creates never carry a
+# store field at all, so they never match this and fall into "Unallocated" instead.
+STORE_MATCH_SQL = """(
+    json_extract(offline_queue.payload, '$.cost_center') = ?
+    OR json_extract(offline_queue.payload, '$.from_store') = ?
+    OR json_extract(offline_queue.payload, '$.to_store') = ?
+    OR (offline_queue.operation_type = 'REPACK_VOUCHER' AND EXISTS (
+        SELECT 1 FROM repack_operations ro
+        WHERE ro.id = json_extract(offline_queue.payload, '$.repack_id') AND ro.store_name = ?
+    ))
+)"""
+
+UNALLOCATED_MATCH_SQL = """(
+    json_extract(offline_queue.payload, '$.cost_center') IS NULL
+    AND json_extract(offline_queue.payload, '$.from_store') IS NULL
+    AND json_extract(offline_queue.payload, '$.to_store') IS NULL
+    AND NOT (offline_queue.operation_type = 'REPACK_VOUCHER' AND EXISTS (
+        SELECT 1 FROM repack_operations ro
+        WHERE ro.id = json_extract(offline_queue.payload, '$.repack_id') AND ro.store_name IS NOT NULL
+    ))
+)"""
+
+# Almost every real voucher shares operation_type='POST_VOUCHER' (sales, purchase,
+# payment, transfer, stock transfer, bank statement all use it), so transaction TYPE
+# can only be told apart by the description prefix each router writes at queue time.
+# These prefixes are verified mutually exclusive -- none is a string-prefix of another.
+# Master-creation rows (Create Ledger/Item/UOM) are intentionally not offered here;
+# they still appear under "All Types" but aren't a selectable transaction type.
+TYPE_FILTERS = {
+    "SALES": ("offline_queue.description LIKE ?", ["Sales:%"]),
+    "PURCHASE": ("offline_queue.description LIKE ?", ["Purchase Invoice:%"]),
+    "PURCHASE_ITEM": (
+        "(offline_queue.description LIKE ? OR offline_queue.description LIKE ?)",
+        ["Purchase Item Invoice:%", "Purchase Return (Adjustment):%"],
+    ),
+    "PAYMENT": ("offline_queue.description LIKE ?", ["Payment:%"]),
+    "TRANSFER": ("offline_queue.description LIKE ?", ["Transfer:%"]),
+    "STOCK_TRANSFER": ("offline_queue.description LIKE ?", ["Stock Transfer:%"]),
+    "BANK_STATEMENT": ("offline_queue.description LIKE ?", ["Bank Stmt:%"]),
+    "REPACK": ("offline_queue.operation_type = ?", ["REPACK_VOUCHER"]),
+}
+
+@router.get("/queue")
+def get_queue_page(
+    status: str = Query(..., description="One of PENDING, FAILED, SYNCED"),
+    store: Optional[str] = Query(None, description="A store name, or 'Unallocated'; omit for all stores"),
+    type: Optional[str] = Query(None, description=f"One of {', '.join(TYPE_FILTERS.keys())}; omit for all types"),
+    page: int = Query(1, ge=1),
+    limit: int = Query(10, ge=1, le=50),
+):
+    if status not in QUEUE_STATUSES:
+        raise HTTPException(status_code=400, detail=f"status must be one of {', '.join(QUEUE_STATUSES)}")
+    if type is not None and type not in TYPE_FILTERS:
+        raise HTTPException(status_code=400, detail=f"type must be one of {', '.join(TYPE_FILTERS.keys())}")
+
+    where = "offline_queue.status = ?"
+    params = [status]
+    if store == "Unallocated":
+        where += f" AND {UNALLOCATED_MATCH_SQL}"
+    elif store:
+        where += f" AND {STORE_MATCH_SQL}"
+        params += [store, store, store, store]
+    if type:
+        type_sql, type_params = TYPE_FILTERS[type]
+        where += f" AND {type_sql}"
+        params += type_params
+
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"SELECT COUNT(*) as count FROM offline_queue WHERE {where}", params)
+            actual_total = cursor.fetchone()['count']
+            total = min(actual_total, QUEUE_PAGE_CAP)
+
+            offset = (page - 1) * limit
+            items = []
+            if offset < QUEUE_PAGE_CAP:
+                # Full ledger view -- unlike /activity, is_hidden is deliberately ignored here.
+                fetch_limit = min(limit, QUEUE_PAGE_CAP - offset)
+                cursor.execute(
+                    f"SELECT offline_queue.id, offline_queue.operation_type, offline_queue.status, "
+                    f"offline_queue.description, offline_queue.created_at, offline_queue.is_hidden "
+                    f"FROM offline_queue WHERE {where} ORDER BY offline_queue.id DESC LIMIT ? OFFSET ?",
+                    params + [fetch_limit, offset]
+                )
+                items = [dict(row) for row in cursor.fetchall()]
+            return {"items": items, "total": total, "page": page, "limit": limit}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error fetching queue page: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 class QueueUpdatePayload(BaseModel):
     payload: str
@@ -102,15 +227,42 @@ def delete_activity(item_id: int):
         from backend.database import delete_master_queue
         with get_db() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT operation_type FROM offline_queue WHERE id = ?", (item_id,))
+            cursor.execute("SELECT operation_type, status, payload FROM offline_queue WHERE id = ?", (item_id,))
             row = cursor.fetchone()
-            if row and row['operation_type'] in ('CREATE_LEDGER', 'CREATE_ITEM', 'CREATE_UOM'):
+            if not row:
+                raise HTTPException(status_code=404, detail="Item not found")
+
+            # Masters keep the stricter original rule: a PENDING master reservation
+            # is never deletable, since it may be blocking/unblocking other queued
+            # items that depend on it.
+            if row['operation_type'] in ('CREATE_LEDGER', 'CREATE_ITEM', 'CREATE_UOM'):
+                if row['status'] == 'PENDING':
+                    raise HTTPException(status_code=400, detail="Cannot delete a master record that is still pending sync to Tally.")
                 delete_master_queue(item_id)
                 return {"message": "Deleted master queue and reservation successfully"}
-            
-            cursor.execute("DELETE FROM offline_queue WHERE id = ?", (item_id,))
+
+            if row['status'] not in ('PENDING', 'FAILED'):
+                raise HTTPException(status_code=400, detail="Only pending or failed transactions can be deleted.")
+
+            # A transaction whose delivery to Tally is unconfirmed might already
+            # exist there -- deleting it would destroy the only local record of
+            # that ambiguity, so it must be verified in Tally first (same guard
+            # as retry/edit).
+            payload_dict = json.loads(row['payload']) if row['payload'] else {}
+            if payload_dict.get('delivery_uncertain') is True:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Delivery to Tally is unconfirmed for this transaction. Verify manually in Tally before deleting it -- deleting now could permanently lose the only record of a voucher that may already exist in Tally."
+                )
+
+            cursor.execute("DELETE FROM offline_queue WHERE id = ? AND status = ?", (item_id, row['status']))
+            deleted = cursor.rowcount
             conn.commit()
+            if deleted == 0:
+                raise HTTPException(status_code=409, detail="This item's status just changed -- please refresh and try again.")
             return {"message": "Deleted successfully"}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -131,18 +283,30 @@ def retry_activity(item_id: int):
         from backend.database import retry_master
         with get_db() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT operation_type FROM offline_queue WHERE id = ?", (item_id,))
+            cursor.execute("SELECT operation_type, payload FROM offline_queue WHERE id = ?", (item_id,))
             row = cursor.fetchone()
-            if row and row['operation_type'] in ('CREATE_LEDGER', 'CREATE_ITEM', 'CREATE_UOM'):
+            if not row:
+                raise HTTPException(status_code=404, detail="Item not found")
+
+            if row['operation_type'] in ('CREATE_LEDGER', 'CREATE_ITEM', 'CREATE_UOM'):
                 retry_master(item_id)
                 return {"message": "Retrying master..."}
-                
+
+            payload_dict = json.loads(row['payload']) if row['payload'] else {}
+            if payload_dict.get('delivery_uncertain') is True:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Delivery to Tally is unconfirmed for this transaction. Verify manually in Tally whether it was already recorded before retrying -- retrying now risks creating a duplicate voucher."
+                )
+
             cursor.execute(
-                "UPDATE offline_queue SET status = 'PENDING', error_message = NULL, updated_at = datetime('now', 'localtime') WHERE id = ?",
+                "UPDATE offline_queue SET status = 'PENDING', error_message = NULL, is_hidden = 0, updated_at = datetime('now', 'localtime') WHERE id = ?",
                 (item_id,)
             )
             conn.commit()
             return {"message": "Retrying..."}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -154,17 +318,34 @@ class RebuildPayload(BaseModel):
 def rebuild_activity_xml(item_id: int, data: RebuildPayload):
     """
     Accepts an updated JSON payload dict, regenerates Tally XML from scratch,
-    and updates both columns in the queue. Only works for POST_VOUCHER items
-    that have a 'items' key (purchase item invoices).
+    and updates both columns in the queue. Dispatches by payload shape: an
+    'items' key means a purchase item invoice, a 'ledger'+'amount' shape means
+    a sales entry.
     """
-    import datetime
-    from xml.sax.saxutils import escape as _escape
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT payload FROM offline_queue WHERE id = ?", (item_id,))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Item not found")
+        stored_payload = json.loads(row['payload']) if row['payload'] else {}
+        if stored_payload.get('delivery_uncertain') is True:
+            raise HTTPException(
+                status_code=409,
+                detail="Delivery to Tally is unconfirmed for this transaction. Verify manually in Tally whether it was already recorded before editing -- editing and resending now risks creating a duplicate voucher."
+            )
 
     p = data.payload
+    if "items" in p:
+        return _rebuild_purchase_item_voucher(item_id, p)
+    elif "ledger" in p and "amount" in p:
+        return _rebuild_sales_voucher(item_id, p)
+    else:
+        raise HTTPException(status_code=400, detail="Only purchase item vouchers and sales entries can be rebuilt.")
 
-    # Validate it has the fields we need
-    if "items" not in p:
-        raise HTTPException(status_code=400, detail="Only purchase item vouchers with 'items' can be rebuilt.")
+def _rebuild_purchase_item_voucher(item_id: int, p: dict):
+    import datetime
+    from xml.sax.saxutils import escape as _escape
 
     try:
         supplier = _escape(str(p.get("supplier", "")))
@@ -333,6 +514,77 @@ def rebuild_activity_xml(item_id: int, data: RebuildPayload):
 </ENVELOPE>"""
 
         new_payload_str = json.dumps(p)
+
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE offline_queue SET payload = ?, xml_data = ?, status = 'PENDING', error_message = NULL, updated_at = datetime('now', 'localtime') WHERE id = ? AND status = 'PENDING'",
+                (new_payload_str, xml, item_id)
+            )
+            conn.commit()
+            if cursor.rowcount == 0:
+                raise HTTPException(status_code=409, detail="Item is not in PENDING state or not found. Cannot edit synced transactions.")
+
+        return {"message": "Rebuilt and saved successfully"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+def _rebuild_sales_voucher(item_id: int, p: dict):
+    from xml.sax.saxutils import escape as _escape
+    from backend.database import resolve_cost_center_for_ledger
+
+    try:
+        ledger = _escape(str(p.get("ledger", "")))
+        amount = float(p.get("amount", 0))
+        tally_date = str(p.get("tally_date", ""))
+        narration = _escape(str(p.get("narration", "")))
+
+        cost_center = resolve_cost_center_for_ledger(p.get("ledger", ""))
+        allocation = ""
+        if cost_center:
+            allocation = f"""
+              <CATEGORYALLOCATIONS.LIST>
+                <CATEGORY>Primary Cost Category</CATEGORY>
+                <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+                <COSTCENTREALLOCATIONS.LIST>
+                  <NAME>{_escape(cost_center)}</NAME>
+                  <AMOUNT>{amount}</AMOUNT>
+                </COSTCENTREALLOCATIONS.LIST>
+              </CATEGORYALLOCATIONS.LIST>"""
+
+        xml = f"""<ENVELOPE>
+  <HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+  <BODY><IMPORTDATA>
+    <REQUESTDESC><REPORTNAME>Vouchers</REPORTNAME></REQUESTDESC>
+    <REQUESTDATA><TALLYMESSAGE>
+      <VOUCHER VCHTYPE="Sales" ACTION="Create">
+        <DATE>{tally_date}</DATE>
+        <NARRATION>{narration}</NARRATION>
+        <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
+        <ALLLEDGERENTRIES.LIST>
+          <LEDGERNAME>{ledger}</LEDGERNAME>
+          <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+          <AMOUNT>-{amount}</AMOUNT>
+        </ALLLEDGERENTRIES.LIST>
+        <ALLLEDGERENTRIES.LIST>
+          <LEDGERNAME>Sales</LEDGERNAME>
+          <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+          <AMOUNT>{amount}</AMOUNT>{allocation}
+        </ALLLEDGERENTRIES.LIST>
+      </VOUCHER>
+    </TALLYMESSAGE></REQUESTDATA>
+  </IMPORTDATA></BODY>
+</ENVELOPE>"""
+
+        new_payload = dict(p)
+        if cost_center:
+            new_payload['cost_center'] = cost_center
+        else:
+            new_payload.pop('cost_center', None)
+        new_payload_str = json.dumps(new_payload)
 
         with get_db() as conn:
             cursor = conn.cursor()

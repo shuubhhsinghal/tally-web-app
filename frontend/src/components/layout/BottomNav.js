@@ -16,6 +16,7 @@ export default function BottomNav() {
   const isBank = pathname.startsWith('/bank-statement');
   const isReview = pathname.startsWith('/review');
   const isReports = pathname.startsWith('/reporting');
+  const isQueue = pathname.startsWith('/queue');
 
   const handleNewEntry = () => {
     showActionSheet({
@@ -67,6 +68,11 @@ export default function BottomNav() {
           <Link href="/review" className="flex flex-col items-center justify-center w-16 h-full gap-1">
             <Inbox className={`w-6 h-6 ${isReview ? 'text-teal-600 dark:text-teal-400' : 'text-gray-400 dark:text-gray-500'}`} />
             <span className={`text-[10px] font-medium ${isReview ? 'text-teal-600 dark:text-teal-400' : 'text-gray-400 dark:text-gray-500'}`}>Review</span>
+          </Link>
+
+          <Link href="/queue" className="flex flex-col items-center justify-center w-16 h-full gap-1">
+            <ListChecks className={`w-6 h-6 ${isQueue ? 'text-teal-600 dark:text-teal-400' : 'text-gray-400 dark:text-gray-500'}`} />
+            <span className={`text-[10px] font-medium ${isQueue ? 'text-teal-600 dark:text-teal-400' : 'text-gray-400 dark:text-gray-500'}`}>Queue</span>
           </Link>
 
         </div>

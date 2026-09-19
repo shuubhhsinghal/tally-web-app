@@ -22,6 +22,14 @@ def _get_current_fy_end() -> str:
     else:
         return f"{now.year}0331"
 
+def _get_default_sync_end_date() -> str:
+    """Default end date for an automatic/no-args voucher sync: the earlier of
+    today and the fiscal year end, so we never request months that haven't
+    happened yet (which always fail Tally's stock-summary fetch)."""
+    today_str = datetime.now().strftime("%Y%m%d")
+    fy_end_str = _get_current_fy_end()
+    return min(today_str, fy_end_str)
+
 def fetch_and_store_cost_centres(tally_url=TALLY_URL):
     payload = """<ENVELOPE>
   <HEADER>
@@ -291,7 +299,7 @@ async def async_sync_vouchers(start_date: str = None, end_date: str = None, tall
     if not start_date:
         start_date = _get_current_fy_start()
     if not end_date:
-        end_date = _get_current_fy_end()
+        end_date = _get_default_sync_end_date()
         
     vouchers_count = await asyncio.to_thread(fetch_and_store_vouchers, start_date, end_date, tally_url)
     

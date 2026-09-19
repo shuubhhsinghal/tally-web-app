@@ -15,13 +15,12 @@ import requests
 from json_repair import repair_json
 from google import genai
 from google.genai import types
-import difflib
 import sqlite3
 
 from backend.database import (
     get_all_ledgers, get_all_stock_items, get_all_uoms, get_all_aliases,
     save_alias as db_save_alias, queue_operation, record_purchase_rate, get_purchase_rates,
-    get_db, update_queue_status
+    get_db, update_queue_status, set_delivery_uncertain
 )
 from backend.services.tally_response import parse_tally_response
 from backend.utils.math_reconciler import reconcile_full_invoice
@@ -30,13 +29,7 @@ router = APIRouter()
 
 from backend.config import TALLY_URL
 from backend.services.image_normalizer import normalize_uploaded_invoice
-
-def normalize_item_name(name: str) -> str:
-    name = (name or "").strip().casefold()
-    name = re.sub(r'\s+', ' ', name)
-    name = re.sub(r'\s*\(\s*', '(', name)
-    name = re.sub(r'\s*\)\s*', ')', name)
-    return name
+from backend.services.item_mapping import normalize_item_name, map_items_to_tally, map_supplier_to_tally
 
 # Models
 class NewSupplierRequest(BaseModel):
@@ -156,10 +149,6 @@ async def extract_invoice(
         supplier_name = data.get("supplier_name", "")
 
         print(f"--- [PURCHASE-ITEM EXTRACT] Vision extraction complete. Got {len(raw_items)} items. ---", flush=True)
-
-        # Step 0.9: Debug — exact raw output from Gemini
-        print("\n=== DEBUG: RAW GEMINI ITEMS ===", flush=True)
-        print(json.dumps(raw_items, indent=2, default=str), flush=True)
 
         # Step 1.5: Algebraic Math Reconciliation
         gst_rate = float(data.get("gst_rate") or 0.0)
@@ -311,10 +300,6 @@ async def extract_invoice(
                     else:
                         validation_status = "needs_mapping"
 
-        # Debug — exact output after math reconciliation
-        print("\n=== DEBUG: RECONCILED ITEMS ===", flush=True)
-        print(json.dumps(reconciled_items, indent=2, default=str), flush=True)
-
         # Merge the sanitized math results back into the original item rows,
         # preserving the extracted name and mapping fields.
         for idx, item in enumerate(raw_items):
@@ -331,138 +316,13 @@ async def extract_invoice(
         print(f"--- [PURCHASE-ITEM EXTRACT] Math reconciliation complete. "
               f"{len(reconciled_items)} items reconciled (gst_rate={gst_rate}). ---", flush=True)
 
-        # Step 2: Text Mapping
-        stock_items = get_all_stock_items()
-        aliases = get_all_aliases()
-        stock_cache = {normalize_item_name(i['name']): i for i in stock_items}
+        # Step 2: Text Mapping (shared with the V4 engine — backend/services/item_mapping.py)
+        print(f"--- [PURCHASE-ITEM EXTRACT] Mapping {len(raw_items)} items... ---", flush=True)
+        mapped_items = map_items_to_tally(raw_items)
 
-        from backend.database import get_db
-        pending_item_names = []
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT normalized_name, original_name FROM pending_masters WHERE entity_type = 'ITEM' AND status IN ('PENDING', 'SYNCED_WAITING_CONFIRMATION')")
-            for row in cursor.fetchall():
-                norm = row["normalized_name"]
-                orig = row["original_name"]
-                pending_item_names.append(orig)
-                if norm not in stock_cache:
-                    stock_cache[norm] = {"name": orig}
-
-        mapped_items = []
-
-        # First try exact match / alias cache
-        unmapped_raw_items = []
-        for item in raw_items:
-            original_name = item.get('name', 'Unknown')
-            norm_name = normalize_item_name(original_name)
-
-            match_found = False
-            mapped_name = None
-            mapped_unit = item.get('uom', 'PCS').upper()
-
-            # Check alias
-            if norm_name in aliases:
-                mapped_name = aliases[norm_name]
-                match_found = True
-            else:
-                # Check stock cache
-                for stock_key, stock_data in stock_cache.items():
-                    if stock_key == norm_name or stock_data.get('name', '').lower().strip() == original_name.lower().strip():
-                        mapped_name = stock_data.get('name')
-                        mapped_unit = stock_data.get('unit', mapped_unit)
-                        match_found = True
-                        break
-
-            item['mapped_name'] = mapped_name if match_found else ""
-            item['mapped_unit'] = mapped_unit
-            item['is_mapped'] = match_found
-
-            if match_found:
-                mapped_items.append(item)
-            else:
-                unmapped_raw_items.append(item)
-                mapped_items.append(item)
-
-        # If there are unmapped items, try Gemini text mapper
-        tally_item_names = [i['name'] for i in stock_items]
-        seen_tally_names = set(normalize_item_name(n) for n in tally_item_names)
-        for name in pending_item_names:
-            norm = normalize_item_name(name)
-            if norm not in seen_tally_names:
-                tally_item_names.append(name)
-                seen_tally_names.add(norm)
-                
-        if unmapped_raw_items:
-            print(f"--- [PURCHASE-ITEM EXTRACT] Calling Text Mapping for {len(unmapped_raw_items)} items... ---", flush=True)
-            master_list_str = "\n".join(f"- {name}" for name in tally_item_names)
-
-            map_prompt = f"""
-            You are a data-mapping assistant. 
-            I have extracted the following raw items from an invoice: {json.dumps(unmapped_raw_items)}
-            
-            Here is my Tally Master Stock List:
-            {master_list_str}
-            
-            For each raw item, find the exact matching string from the Tally Master Stock List. You must account for typos, case differences, and spacing (e.g. '400g' vs '400gm').
-            If a confident match is found, add a key called 'mapped_name' to the item object containing the exact Tally string. 
-            If no match is found, leave 'mapped_name' empty.
-            
-            Return the entire updated invoice JSON using this schema:
-            {{
-              "items": [
-                {{"name": "...", "qty": 0.0, "uom": "pcs", "rate": 0.0, "amount": 0.0, "mapped_name": "...", "mapped_unit": "..."}}
-              ]
-            }}
-            """
-
-            try:
-                map_response = client.models.generate_content(
-                    model='gemini-3.5-flash-lite',
-                    contents=[map_prompt],
-                    config=types.GenerateContentConfig(response_mime_type="application/json"),
-                )
-                map_text = map_response.text.strip()
-                map_text = re.sub(r'^```json\s*', '', map_text)
-                map_text = re.sub(r'\s*```$', '', map_text)
-                map_data = repair_json(map_text, return_objects=True)
-
-                if isinstance(map_data, dict) and "items" in map_data:
-                    # Merge back mapped names
-                    for mapped_row in map_data["items"]:
-                        for out_row in mapped_items:
-                            if out_row['name'] == mapped_row['name'] and mapped_row.get('mapped_name'):
-                                # Ensure the mapped name actually exists in Tally before trusting the AI
-                                if mapped_row['mapped_name'] in tally_item_names:
-                                    out_row['mapped_name'] = mapped_row['mapped_name']
-                                    out_row['is_mapped'] = True
-
-                                    # fetch correct unit
-                                    norm_mapped = normalize_item_name(out_row['mapped_name'])
-                                    if norm_mapped in stock_cache:
-                                        out_row['mapped_unit'] = stock_cache[norm_mapped].get('unit', out_row['mapped_unit'])
-            except Exception as e:
-                print(f"--- [PURCHASE-ITEM EXTRACT] Text Mapping failed: {e} ---", flush=True)
-
-        # Try to map supplier
+        # Map supplier
         supplier_name = data.get("supplier_name", "")
-        ledgers = get_all_ledgers()
-        cached_suppliers_list = []
-        for l in ledgers:
-            parent = (l.get('parent') or '').lower()
-            if "creditor" in parent or "loan" in parent:
-                cached_suppliers_list.append(l['name'].title())
-
-        mapped_supplier = ""
-        if supplier_name and cached_suppliers_list:
-            matches = difflib.get_close_matches(
-                supplier_name,
-                cached_suppliers_list,
-                n=1,
-                cutoff=0.8
-            )
-            if matches:
-                print(f"--- [RESOLVE] Auto-corrected Supplier from '{supplier_name}' to '{matches[0]}' ---", flush=True)
-                mapped_supplier = matches[0]
+        mapped_supplier = map_supplier_to_tally(supplier_name)
 
         taxes_dict = data.get("taxes") or {}
         cgst = float(taxes_dict.get("cgst", data.get("cgst", 0.0)))
@@ -477,7 +337,7 @@ async def extract_invoice(
             "printed_grand_total": printed_grand_total,
             "calculated_grand_total": calculated_grand_total,
             "total_difference": total_difference,
-            "supplier": mapped_supplier or (supplier_name or "Unknown Supplier").title(),
+            "supplier": mapped_supplier,
             "invoice_number": str(data.get("invoice_number", "")),
             "date": str(data.get("date", datetime.datetime.now().strftime("%Y-%m-%d"))),
             "cgst": cgst,
@@ -489,53 +349,11 @@ async def extract_invoice(
             "items": mapped_items
         }
 
-        # Debug — exact final payload sent to frontend
-        print("\n=== DEBUG: FINAL PAYLOAD SENT TO FRONTEND ===", flush=True)
-        print(json.dumps(final_response_payload, indent=2, default=str), flush=True)
-
         print(f"--- [PURCHASE-ITEM EXTRACT] Finished successfully. ---", flush=True)
         return final_response_payload
 
     except Exception as e:
         print("\n!!! EXCEPTION IN PURCHASE-ITEM EXTRACTION !!!", flush=True)
-        traceback.print_exc()
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n", flush=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.post("/extract-v4")
-async def extract_invoice_v4(
-    files: List[UploadFile] = File(...),
-    gst_recording_method: str = Form("separate_ledger")
-):
-    print(f"--- [PURCHASE-ITEM EXTRACT V4] Received {len(files)} files. Recording Method: {gst_recording_method} ---", flush=True)
-    try:
-        file_bytes_list = []
-        for file in files:
-            f_bytes = await file.read()
-            f_bytes = normalize_uploaded_invoice(f_bytes, file.filename, file.content_type)
-            file_bytes_list.append(f_bytes)
-            
-        print(f"--- [PURCHASE-ITEM EXTRACT V4] Read {len(file_bytes_list)} files. Calling V4 Engine... ---", flush=True)
-
-        from backend.services.extraction_v4.extraction_engine import process_invoice_v4
-        extracted_data = await run_in_threadpool(process_invoice_v4, file_bytes_list)
-        
-        # Apply text mapping safely directly to extracted items
-        from backend.services.extraction_v4.text_mapper import map_items_to_tally, map_supplier_to_tally
-        
-        mapped_items = map_items_to_tally(extracted_data.get("items", []))
-        extracted_data["items"] = mapped_items
-        
-        # Mapped supplier
-        mapped_supplier = map_supplier_to_tally(extracted_data.get("supplier", ""))
-        extracted_data["supplier_mapped"] = mapped_supplier
-        
-        return {
-            "extracted_data": extracted_data
-        }
-
-    except Exception as e:
-        print("\n!!! EXCEPTION IN PURCHASE-ITEM EXTRACTION V4 !!!", flush=True)
         traceback.print_exc()
         print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n", flush=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -701,6 +519,16 @@ async def save_alias_endpoint(payload: SaveAliasRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.post("/detect-corners")
+async def detect_corners_endpoint(file: UploadFile = File(...)):
+    """Best-effort starting point for the manual crop UI -- never a hard
+    dependency, so this always returns 200 even when detection fails."""
+    from backend.services.corner_detection import detect_document_corners
+    file_bytes = await file.read()
+    file_bytes = normalize_uploaded_invoice(file_bytes, file.filename, file.content_type)
+    corners = await run_in_threadpool(detect_document_corners, file_bytes)
+    return {"corners": corners}
+
 @router.post("/post")
 async def post_purchase_item(payload: PurchaseItemPostRequest):
     print(f"--- [PURCHASE-ITEM POST] Received payload ---", flush=True)
@@ -839,7 +667,12 @@ async def post_purchase_item(payload: PurchaseItemPostRequest):
 
     guid = f"PII-{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
 
-    master_xml = """
+    # Only force-correct the GST/rounding classification of a ledger this
+    # voucher actually references -- altering ones it doesn't touch just
+    # risks overwriting a user's own Tally-side customization for no reason.
+    master_xml = ""
+    if payload.cgst > 0:
+        master_xml += """
                 <TALLYMESSAGE xmlns:UDF="TallyUDF">
                     <LEDGER ACTION="Alter" NAME="Input CGST">
                         <NAME.LIST><NAME>Input CGST</NAME></NAME.LIST>
@@ -847,7 +680,9 @@ async def post_purchase_item(payload: PurchaseItemPostRequest):
                         <TAXTYPE>GST</TAXTYPE>
                         <GSTDUTYHEAD>Central Tax</GSTDUTYHEAD>
                     </LEDGER>
-                </TALLYMESSAGE>
+                </TALLYMESSAGE>"""
+    if payload.sgst > 0:
+        master_xml += """
                 <TALLYMESSAGE xmlns:UDF="TallyUDF">
                     <LEDGER ACTION="Alter" NAME="Input SGST">
                         <NAME.LIST><NAME>Input SGST</NAME></NAME.LIST>
@@ -855,7 +690,9 @@ async def post_purchase_item(payload: PurchaseItemPostRequest):
                         <TAXTYPE>GST</TAXTYPE>
                         <GSTDUTYHEAD>State Tax</GSTDUTYHEAD>
                     </LEDGER>
-                </TALLYMESSAGE>
+                </TALLYMESSAGE>"""
+    if payload.igst > 0:
+        master_xml += """
                 <TALLYMESSAGE xmlns:UDF="TallyUDF">
                     <LEDGER ACTION="Alter" NAME="Input IGST">
                         <NAME.LIST><NAME>Input IGST</NAME></NAME.LIST>
@@ -863,7 +700,9 @@ async def post_purchase_item(payload: PurchaseItemPostRequest):
                         <TAXTYPE>GST</TAXTYPE>
                         <GSTDUTYHEAD>Integrated Tax</GSTDUTYHEAD>
                     </LEDGER>
-                </TALLYMESSAGE>
+                </TALLYMESSAGE>"""
+    if abs(payload.rounding_off) >= 0.01:
+        master_xml += """
                 <TALLYMESSAGE xmlns:UDF="TallyUDF">
                     <LEDGER ACTION="Alter" NAME="Rounding Off">
                         <NAME.LIST><NAME>Rounding Off</NAME></NAME.LIST>
@@ -1027,32 +866,55 @@ async def post_purchase_item(payload: PurchaseItemPostRequest):
             return {"status": "queued", "reason": "pending_master_dependency", "message": "Invoice saved to offline queue because a required master is still pending sync to Tally."}
             
         # Post Purchase Voucher
+        set_delivery_uncertain(queue_id, True)
         response = requests.post(TALLY_URL, data=xml.encode('utf-8'), timeout=15)
         parsed = parse_tally_response(response.text, "POST_VOUCHER")
-        
+
         if not parsed["is_success"]:
+            set_delivery_uncertain(queue_id, False)
             update_queue_status(queue_id, "FAILED", parsed['error_message'])
             raise HTTPException(status_code=400, detail=f"Tally rejected the purchase entry: {parsed['error_message']}")
-            
+
+        set_delivery_uncertain(queue_id, False)
         update_queue_status(queue_id, "SYNCED")
-        
+
         # Post Adjustment Voucher if present
         if adjustment_queue_id:
             try:
+                set_delivery_uncertain(adjustment_queue_id, True)
                 adj_response = requests.post(TALLY_URL, data=journal_xml.encode('utf-8'), timeout=15)
                 adj_parsed = parse_tally_response(adj_response.text, "POST_VOUCHER")
                 if not adj_parsed["is_success"]:
+                    set_delivery_uncertain(adjustment_queue_id, False)
                     update_queue_status(adjustment_queue_id, "FAILED", adj_parsed['error_message'])
                     # We do not fail the request entirely since the purchase posted successfully.
                     # The UI will just tell them the adjustment failed and is in queue.
                 else:
+                    set_delivery_uncertain(adjustment_queue_id, False)
                     update_queue_status(adjustment_queue_id, "SYNCED")
-            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
-                pass # Leave adjustment in queue
-        
+            except requests.exceptions.ConnectTimeout:
+                # Connection never established -- as safe as ConnectionError.
+                set_delivery_uncertain(adjustment_queue_id, False)
+            except requests.exceptions.Timeout:
+                pass # Ambiguous read timeout -- leave delivery_uncertain set, blocking manual retry.
+            except requests.exceptions.ConnectionError:
+                set_delivery_uncertain(adjustment_queue_id, False)
+
         return {"status": "success", "message": "Successfully posted to Tally."}
-    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
-        # Already marked as PENDING in the DB, leave it for the background worker
+    except requests.exceptions.ConnectTimeout:
+        # The connection itself never established (Tally's address is unreachable)
+        # -- as safe as ConnectionError, nothing was ever sent.
+        set_delivery_uncertain(queue_id, False)
+        return {"status": "queued", "message": "Tally is offline. Invoice saved to queue and will push automatically."}
+    except requests.exceptions.Timeout:
+        # Ambiguous: connection was established and the request was sent, but no
+        # response came back in time -- Tally may have processed it before the
+        # response was lost. Leave delivery_uncertain set (already persisted
+        # above) so a manual retry is blocked until someone verifies in Tally.
+        return {"status": "queued", "message": "Tally is offline. Invoice saved to queue and will push automatically."}
+    except requests.exceptions.ConnectionError:
+        # Request never reached Tally at all -- safe to clear and leave PENDING.
+        set_delivery_uncertain(queue_id, False)
         return {"status": "queued", "message": "Tally is offline. Invoice saved to queue and will push automatically."}
     except HTTPException:
         raise

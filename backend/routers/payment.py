@@ -5,7 +5,7 @@ import requests
 import os
 import json
 from xml.sax.saxutils import escape
-from backend.database import get_all_ledgers, queue_master_operation, queue_operation, get_db, check_master_exists_locally, normalize_master_name, MasterConflictException, update_queue_status
+from backend.database import get_all_ledgers, queue_master_operation, queue_operation, get_db, check_master_exists_locally, normalize_master_name, MasterConflictException, update_queue_status, set_delivery_uncertain
 from backend.services.tally_response import parse_tally_response
 
 router = APIRouter()
@@ -197,17 +197,32 @@ async def post_payment(payload: PaymentRequest):
     queue_id = queue_operation("POST_VOUCHER", xml_data, payload.model_dump(), f"Payment: {payload.amount} to {payload.debit_ledger}")
 
     try:
+        set_delivery_uncertain(queue_id, True)
         response = requests.post(TALLY_URL, data=xml_data.encode('utf-8'), timeout=10)
         parsed = parse_tally_response(response.text, "POST_VOUCHER")
-        
+
         if not parsed["is_success"]:
+            set_delivery_uncertain(queue_id, False)
             update_queue_status(queue_id, "FAILED", parsed['error_message'])
             raise HTTPException(status_code=400, detail=f"Tally rejected the entry: {parsed['error_message']}")
-            
+
+        set_delivery_uncertain(queue_id, False)
         update_queue_status(queue_id, "SYNCED")
         return {"status": "success", "message": "Payment entry posted successfully"}
-    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
-        # Already marked as PENDING in the DB, leave it for the background worker
+    except requests.exceptions.ConnectTimeout:
+        # The connection itself never established (Tally's address is unreachable)
+        # -- as safe as ConnectionError, nothing was ever sent.
+        set_delivery_uncertain(queue_id, False)
+        return {"status": "queued", "message": "Saved to offline queue."}
+    except requests.exceptions.Timeout:
+        # Ambiguous: connection was established and the request was sent, but no
+        # response came back in time -- Tally may have processed it before the
+        # response was lost. Leave delivery_uncertain set (already persisted
+        # above) so a manual retry is blocked until someone verifies in Tally.
+        return {"status": "queued", "message": "Saved to offline queue."}
+    except requests.exceptions.ConnectionError:
+        # Request never reached Tally at all -- safe to clear and leave PENDING.
+        set_delivery_uncertain(queue_id, False)
         return {"status": "queued", "message": "Saved to offline queue."}
     except HTTPException:
         raise

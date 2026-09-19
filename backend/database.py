@@ -334,7 +334,9 @@ def init_db():
             cursor.execute("ALTER TABLE offline_queue ADD COLUMN is_hidden BOOLEAN DEFAULT 0")
         except sqlite3.OperationalError:
             pass # Column exists
-            
+
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_offline_queue_status_hidden ON offline_queue (status, is_hidden)")
+
         try:
             cursor.execute("ALTER TABLE ledgers ADD COLUMN opening_balance REAL DEFAULT 0.0")
         except sqlite3.OperationalError:
@@ -524,10 +526,25 @@ def update_queue_status(queue_id: int, status: str, error_message: str = None):
         cursor = conn.cursor()
         now = datetime.now().isoformat()
         cursor.execute("""
-            UPDATE offline_queue 
+            UPDATE offline_queue
             SET status = ?, error_message = ?, updated_at = ?
             WHERE id = ?
         """, (status, error_message, now, queue_id))
+        conn.commit()
+
+def set_delivery_uncertain(queue_id: int, uncertain: bool):
+    """Set or clear the delivery_uncertain flag inside the JSON payload column,
+    without touching status/error_message."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT payload FROM offline_queue WHERE id = ?", (queue_id,))
+        row = cursor.fetchone()
+        payload_dict = json.loads(row["payload"]) if row and row["payload"] else {}
+        if uncertain:
+            payload_dict["delivery_uncertain"] = True
+        else:
+            payload_dict.pop("delivery_uncertain", None)
+        cursor.execute("UPDATE offline_queue SET payload = ? WHERE id = ?", (json.dumps(payload_dict), queue_id))
         conn.commit()
 
 # --- Pending Masters Helpers ---
@@ -815,7 +832,7 @@ def retry_master(queue_id: int):
         cursor.execute("BEGIN IMMEDIATE")
         try:
             now = datetime.now().isoformat()
-            cursor.execute("UPDATE offline_queue SET status = 'PENDING', error_message = NULL, updated_at = ? WHERE id = ?", (now, queue_id))
+            cursor.execute("UPDATE offline_queue SET status = 'PENDING', error_message = NULL, is_hidden = 0, updated_at = ? WHERE id = ?", (now, queue_id))
             cursor.execute("UPDATE pending_masters SET status = 'PENDING', error_message = NULL, updated_at = ? WHERE queue_id = ?", (now, queue_id))
             conn.commit()
         except:
@@ -899,6 +916,32 @@ def save_alias(original_name: str, mapped_name: str):
         """, (original_name, mapped_name))
         conn.commit()
 
+def get_all_item_aliases_full():
+    """Every saved alias with its row id, for the Masters > Aliases management view."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, original_name, mapped_name FROM item_aliases ORDER BY original_name")
+        return [dict(row) for row in cursor.fetchall()]
+
+def update_item_alias(alias_id: int, mapped_name: str) -> bool:
+    """Repoint an existing alias to a different Tally item name. Returns False
+    if no alias with that id exists."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE item_aliases SET mapped_name = ? WHERE id = ?", (mapped_name, alias_id))
+        conn.commit()
+        return cursor.rowcount > 0
+
+def delete_item_alias(alias_id: int) -> bool:
+    """Remove an alias entirely -- that raw item name will go through normal
+    exact/fuzzy matching fresh next time instead of resolving automatically.
+    Returns False if no alias with that id exists."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM item_aliases WHERE id = ?", (alias_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+
 def record_purchase_rate(item_name: str, rate: float, supplier: str, purchase_date: str):
     with get_db() as conn:
         cursor = conn.cursor()
@@ -955,6 +998,15 @@ def get_active_stores():
         cursor = db.cursor()
         cursor.execute("SELECT store_name, cost_center_name, godown_name FROM stores WHERE active = 1")
         return [dict(r) for r in cursor.fetchall()]
+
+def resolve_cost_center_for_ledger(ledger_name: str) -> Optional[str]:
+    """Match a ledger name against the active stores table to find which store
+    it belongs to, returning that store's exact Tally-side cost-centre casing."""
+    ledger_lower = (ledger_name or "").lower()
+    for store in get_active_stores():
+        if store['store_name'].lower() in ledger_lower:
+            return store['cost_center_name']
+    return None
 
 def get_store_mapping(store_name):
     with get_db() as db:

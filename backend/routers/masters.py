@@ -1,9 +1,13 @@
 import json
 import re
-from fastapi import APIRouter
-from backend.database import get_db
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+from backend.database import get_db, get_all_item_aliases_full, update_item_alias, delete_item_alias
 
 router = APIRouter(prefix="/api/masters", tags=["masters"])
+
+class UpdateAliasRequest(BaseModel):
+    mapped_name: str
 
 def normalize_name(name: str) -> str:
     if not name:
@@ -139,3 +143,22 @@ def get_masters():
         "items": items,
         "counts": counts
     }
+
+@router.get("/aliases")
+def list_item_aliases():
+    return {"aliases": get_all_item_aliases_full()}
+
+@router.put("/aliases/{alias_id}")
+def update_item_alias_endpoint(alias_id: int, payload: UpdateAliasRequest):
+    mapped_name = payload.mapped_name.strip()
+    if not mapped_name:
+        raise HTTPException(status_code=400, detail="mapped_name cannot be empty")
+    if not update_item_alias(alias_id, mapped_name):
+        raise HTTPException(status_code=404, detail="Alias not found")
+    return {"status": "success"}
+
+@router.delete("/aliases/{alias_id}")
+def delete_item_alias_endpoint(alias_id: int):
+    if not delete_item_alias(alias_id):
+        raise HTTPException(status_code=404, detail="Alias not found")
+    return {"status": "success"}

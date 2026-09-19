@@ -243,6 +243,9 @@ export function ItemWiseMode({ onPostSuccess }) {
   const fileInputRef = useRef(null);
   const [showUploadOptions, setShowUploadOptions] = useState(false);
   const [showCamera, setShowCamera] = useState(false);
+  // Gallery-picked files still needing a corner-marking pass, drained one at a time.
+  const [filesToCrop, setFilesToCrop] = useState([]);
+  const croppedBatchRef = useRef([]);
 
   const [validationStatus, setValidationStatus] = useState("matched"); // "matched", "needs_mapping", "unverified"
   const [mappingFailed, setMappingFailed] = useState(false);
@@ -264,7 +267,6 @@ export function ItemWiseMode({ onPostSuccess }) {
   const [forceManual, setForceManual] = useState(false);
 
   // V4 Additions
-  const [useV4, setUseV4] = useState(true);
   const [v4RawData, setV4RawData] = useState(null);
   const [v4Config, setV4Config] = useState({
     selected_amount_header: null,
@@ -351,7 +353,7 @@ export function ItemWiseMode({ onPostSuccess }) {
   }, [v4RawData, v4Config, invoice?.gst_rate]);
 
   useEffect(() => {
-    if (useV4 && v4Data && v4Data.calculated_data) {
+    if (v4Data && v4Data.calculated_data) {
       const mappedLegacyItems = v4Data.calculated_data.items.map(item => ({
         name: item.name,
         qty: item.qty,
@@ -366,7 +368,7 @@ export function ItemWiseMode({ onPostSuccess }) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setItems(mappedLegacyItems);
     }
-  }, [v4Data, useV4]);
+  }, [v4Data]);
 
   useEffect(() => {
     fetch("/api/purchase-item/metadata")
@@ -383,13 +385,11 @@ export function ItemWiseMode({ onPostSuccess }) {
   const handleTaxRecalculation = (newRate, newTaxType, newGstMethod = null) => {
     const rate = Number(newRate);
     const methodToUse = newGstMethod || (v4Config?.gst_recording_method || "included_in_rate");
-    const gstBasis = (useV4 ? v4Config?.gst_basis_override : "exclusive") || "exclusive";
+    const gstBasis = v4Config?.gst_basis_override || "exclusive";
 
     let updatedItems = [...items];
 
     updatedItems = updatedItems.map(item => {
-      const isGstIncluded = methodToUse === 'included_in_rate';
-      
       let exAmt = Number(item.amount !== undefined ? item.amount : (item.final_amount || 0));
       let exRate = Number(item.rate !== undefined ? item.rate : (item.final_rate || 0));
       const fAmt = Number(item.final_amount !== undefined ? item.final_amount : (item.amount || 0));
@@ -400,36 +400,23 @@ export function ItemWiseMode({ onPostSuccess }) {
       let newFAmt = fAmt;
       let newFRate = fRate;
 
-      if (!useV4) {
-        // Legacy manual mode behavior
-        if (isGstIncluded) {
-          newExAmt = fAmt / (1 + (rate / 100));
-          newExRate = fRate / (1 + (rate / 100));
-        } else {
-          newExAmt = exAmt;
-          newExRate = exRate;
-          newFAmt = exAmt;
-          newFRate = exRate;
-        }
-      } else {
-        // V4 mode prediction (will be overwritten by v4Data anyway, but needed for immediate subtotal/tax calc)
-        if (methodToUse === "separate_ledger" && gstBasis === "exclusive") {
-            newFAmt = exAmt + (exAmt * rate / 100);
-            newFRate = exRate + (exRate * rate / 100);
-        } else if (methodToUse === "separate_ledger" && gstBasis === "inclusive") {
-            newExAmt = fAmt / (1 + rate / 100);
-            newExRate = fRate / (1 + rate / 100);
-            newFAmt = fAmt;
-            newFRate = fRate;
-        } else if (methodToUse === "included_in_rate" && gstBasis === "exclusive") {
-            newFAmt = exAmt + (exAmt * rate / 100);
-            newFRate = exRate + (exRate * rate / 100);
-        } else if (methodToUse === "included_in_rate" && gstBasis === "inclusive") {
-            newExAmt = fAmt / (1 + rate / 100);
-            newExRate = fRate / (1 + rate / 100);
-            newFAmt = fAmt;
-            newFRate = fRate;
-        }
+      // V4 mode prediction (will be overwritten by v4Data anyway, but needed for immediate subtotal/tax calc)
+      if (methodToUse === "separate_ledger" && gstBasis === "exclusive") {
+          newFAmt = exAmt + (exAmt * rate / 100);
+          newFRate = exRate + (exRate * rate / 100);
+      } else if (methodToUse === "separate_ledger" && gstBasis === "inclusive") {
+          newExAmt = fAmt / (1 + rate / 100);
+          newExRate = fRate / (1 + rate / 100);
+          newFAmt = fAmt;
+          newFRate = fRate;
+      } else if (methodToUse === "included_in_rate" && gstBasis === "exclusive") {
+          newFAmt = exAmt + (exAmt * rate / 100);
+          newFRate = exRate + (exRate * rate / 100);
+      } else if (methodToUse === "included_in_rate" && gstBasis === "inclusive") {
+          newExAmt = fAmt / (1 + rate / 100);
+          newExRate = fRate / (1 + rate / 100);
+          newFAmt = fAmt;
+          newFRate = fRate;
       }
       
       return { 
@@ -457,9 +444,6 @@ export function ItemWiseMode({ onPostSuccess }) {
     setInvoice(prev => ({ ...prev, gst_rate: newRate, tax_type: newTaxType, cgst: newCgst, sgst: newSgst, igst: newIgst, rounding_off: rounding }));
     if (newGstMethod) {
       setV4Config(prev => ({ ...prev, gst_recording_method: newGstMethod }));
-    }
-    if (!useV4) {
-      setItems(updatedItems);
     }
   };
 
@@ -490,12 +474,13 @@ export function ItemWiseMode({ onPostSuccess }) {
     return { status: "not_found", text: "⚠ New supplier — not found in Tally or Queue", cls: "text-red-600", borderCls: "border-red-300 focus:ring-red-500/50", bgCls: "bg-red-50 dark:bg-red-900/10" };
   };
 
-  const addFilesToStaged = (newFiles, autoExtract = true) => {
+  const addFilesToStaged = (newFiles, autoExtract = true, cropPoints = null) => {
     if (newFiles.length === 0) return;
 
     const newStaged = newFiles.filter(f => f.size > 0).map(f => ({
       file: f,
-      previewUrl: URL.createObjectURL(f)
+      previewUrl: URL.createObjectURL(f),
+      cropPoints
     }));
 
     const combined = [...stagedFiles, ...newStaged];
@@ -504,15 +489,61 @@ export function ItemWiseMode({ onPostSuccess }) {
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
-    
+
     // Automatically trigger extraction on upload if requested
     if (autoExtract) {
       executeExtract(combined);
     }
   };
 
+  const isHeicFile = (file) => {
+    const name = (file.name || '').toLowerCase();
+    const type = (file.type || '').toLowerCase();
+    return name.endsWith('.heic') || name.endsWith('.heif') || type.includes('heic') || type.includes('heif');
+  };
+
   const handleFileChange = (e) => {
-    addFilesToStaged(Array.from(e.target.files));
+    const picked = Array.from(e.target.files);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+    if (picked.length === 0) return;
+
+    // Browsers can't decode HEIC into an <img> for the crop screen -- stage
+    // those uncropped, exactly like before this feature, rather than
+    // dropping the page when the crop UI fails to load it.
+    const heicFiles = picked.filter(isHeicFile);
+    const croppableFiles = picked.filter(f => !isHeicFile(f));
+
+    const heicStaged = heicFiles.map(f => ({ file: f, previewUrl: URL.createObjectURL(f), cropPoints: null }));
+    croppedBatchRef.current = heicStaged;
+
+    if (croppableFiles.length > 0) {
+      setFilesToCrop(croppableFiles);
+    } else {
+      const combined = [...stagedFiles, ...heicStaged];
+      setStagedFiles(combined);
+      executeExtract(combined);
+    }
+  };
+
+  const handleCropQueueCapture = (file, points) => {
+    const staged = { file, previewUrl: URL.createObjectURL(file), cropPoints: points };
+    croppedBatchRef.current = [...croppedBatchRef.current, staged];
+
+    const remaining = filesToCrop.slice(1);
+    setFilesToCrop(remaining);
+
+    if (remaining.length === 0) {
+      const combined = [...stagedFiles, ...croppedBatchRef.current];
+      setStagedFiles(combined);
+      executeExtract(combined);
+      croppedBatchRef.current = [];
+    }
+  };
+
+  const handleCropQueueClose = () => {
+    // Backed out mid-queue -- discard everything collected so far for this batch.
+    croppedBatchRef.current = [];
+    setFilesToCrop([]);
   };
 
   const removeStagedFile = (index) => {
@@ -537,6 +568,7 @@ export function ItemWiseMode({ onPostSuccess }) {
     files.forEach(sf => {
       fd.append("files", sf.file);
     });
+    fd.append("crop_points", JSON.stringify(files.map(sf => sf.cropPoints || null)));
 
     try {
       const res = await fetch("/api/async-extract-proxy", { method: "POST", body: fd });
@@ -631,7 +663,7 @@ export function ItemWiseMode({ onPostSuccess }) {
   };
 
   const updateItemVal = (index, field, value) => {
-    if (useV4 && v4RawData) {
+    if (v4RawData) {
       setV4RawData(prev => {
         if (!prev || !prev.extracted_data || !prev.extracted_data.items) return prev;
         const next = { ...prev };
@@ -758,7 +790,7 @@ export function ItemWiseMode({ onPostSuccess }) {
     try {
       let tallyDate = invoice.date || new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().split('T')[0];
       
-      const isIncludedInRate = useV4 && v4Data?.calculated_data?.gst_treatment === "included_in_rate";
+      const isIncludedInRate = v4Data?.calculated_data?.gst_treatment === "included_in_rate";
       const payloadItems = items.map(item => ({
         ...item,
         amount: (isIncludedInRate && item.final_amount !== undefined) ? item.final_amount : item.amount,
@@ -820,7 +852,7 @@ export function ItemWiseMode({ onPostSuccess }) {
   const handleCreateSupplier = async (supplierName) => {
     setCreatingMaster({ type: 'LEDGER', name: supplierName });
     try {
-      const res = await fetch("/api/purchase/create-supplier", {
+      const res = await fetch("/api/purchase-item/create-supplier", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: supplierName })
@@ -916,7 +948,6 @@ export function ItemWiseMode({ onPostSuccess }) {
     });
     setItems([]);
     setV4RawData(null);
-    setUseV4(true);
     setV4Config({
       selected_amount_header: null,
       gst_basis_override: null,
@@ -1026,22 +1057,30 @@ export function ItemWiseMode({ onPostSuccess }) {
         </div>
       )}
 
+      {filesToCrop.length > 0 && (
+        <CameraCapture
+          initialPhotoFile={filesToCrop[0]}
+          onCapture={handleCropQueueCapture}
+          onClose={handleCropQueueClose}
+        />
+      )}
+
       {showCamera && !isAndroid && (
-        <CameraCapture 
-          onCapture={(file) => {
+        <CameraCapture
+          onCapture={(file, points) => {
             setShowCamera(false);
-            addFilesToStaged([file], false);
+            addFilesToStaged([file], false, points);
           }}
           onClose={() => setShowCamera(false)}
         />
       )}
 
       {nativePhotoFile && isAndroid && (
-        <CameraCapture 
+        <CameraCapture
           initialPhotoFile={nativePhotoFile}
-          onCapture={(file) => {
+          onCapture={(file, points) => {
             setNativePhotoFile(null);
-            addFilesToStaged([file], false);
+            addFilesToStaged([file], false, points);
           }}
           onClose={() => setNativePhotoFile(null)}
           onRetake={() => {
@@ -1078,7 +1117,7 @@ export function ItemWiseMode({ onPostSuccess }) {
   let computedRounding = invoice?.rounding_off || 0;
   let grandTotal = 0;
 
-  const isGstIncluded = (useV4 && v4Data?.calculated_data?.gst_treatment === 'included_in_rate') || (forceManual && v4Config?.gst_recording_method === 'included_in_rate');
+  const isGstIncluded = (v4Data?.calculated_data?.gst_treatment === 'included_in_rate') || (forceManual && v4Config?.gst_recording_method === 'included_in_rate');
 
   if (isGstIncluded) {
     itemSubtotal = items.reduce((acc, curr) => acc + (curr.final_amount !== undefined ? curr.final_amount : (curr.amount || 0)), 0);
@@ -1118,7 +1157,7 @@ export function ItemWiseMode({ onPostSuccess }) {
   return (
     <div className="space-y-6">
 
-      {useV4 && v4Data && (
+      {v4Data && (
         <Card className="flex flex-col gap-6 !border-teal-500/30 dark:!border-teal-500/20 bg-gradient-to-br from-teal-50/50 to-white dark:from-teal-900/10 dark:to-gray-900 shadow-sm relative overflow-hidden">
           <div className="absolute top-0 right-0 p-4 opacity-10">
             <AlertCircle className="w-24 h-24 text-teal-600" />
@@ -1191,7 +1230,7 @@ export function ItemWiseMode({ onPostSuccess }) {
         </Card>
       )}
 
-      {useV4 && v4Data?.reconciliation_data && (
+      {v4Data?.reconciliation_data && (
         <Card className={`flex flex-col gap-3 ${v4Data.reconciliation_data.confidence === "REVIEW_REQUIRED" ? 'border-amber-300 bg-amber-50 dark:bg-amber-900/10' : 'border-green-300 bg-green-50 dark:bg-green-900/10'}`}>
           <div className="flex items-center gap-2">
             {v4Data.reconciliation_data.confidence === "REVIEW_REQUIRED" ? (
@@ -1690,7 +1729,7 @@ export function ItemWiseMode({ onPostSuccess }) {
             )}
           </Card>
 
-          {useV4 && v4Data?.calculated_data?.gst_basis === "unknown" ? (
+          {v4Data?.calculated_data?.gst_basis === "unknown" ? (
             <div className="bg-amber-50 dark:bg-amber-900/10 border border-amber-200 dark:border-amber-800 p-4 rounded-xl text-amber-600 dark:text-amber-400 text-sm font-medium">
               <AlertCircle className="w-5 h-5 inline-block mr-2" />
               Please select whether the selected amount includes GST above to continue.

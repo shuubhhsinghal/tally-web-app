@@ -10,11 +10,12 @@ from datetime import datetime, timedelta
 from backend.services.tally_response import sanitize_tally_xml, parse_tally_response
 
 from backend.database import (
-    get_pending_queue, update_queue_status,
+    get_pending_queue, update_queue_status, set_delivery_uncertain,
     clear_and_bulk_insert_ledgers, clear_and_bulk_insert_stock_items, clear_and_bulk_insert_uoms, clear_and_bulk_insert_godowns
 )
 
 from backend.config import TALLY_URL
+from backend.services.tally_reporting_sync import async_sync_cost_centres, async_sync_vouchers
 
 
 
@@ -397,12 +398,23 @@ def flush_offline_queue():
             except Exception as e:
                 print(f"Pre-send guard error on item {item['id']}: {e}")
 
+        # Items that create a real Tally voucher have no other de-duplication safety
+        # net (unlike masters, which are protected by the pending_masters conflict-
+        # checking machinery). Flag delivery as uncertain BEFORE attempting the POST,
+        # so that even a crash mid-request (not just a caught Timeout) leaves the row
+        # correctly flagged instead of silently eligible for a duplicate resend.
+        is_dedup_risky = item.get("operation_type") in ("POST_VOUCHER", "REPACK_VOUCHER")
+        if is_dedup_risky:
+            set_delivery_uncertain(item["id"], True)
+
         try:
             resp = requests.post(TALLY_URL, data=item["xml_data"], headers={'Content-Type': 'text/xml'}, timeout=10)
-            
+
             parsed_resp = parse_tally_response(resp.text, item.get("operation_type", ""))
-            
+
             if parsed_resp["is_success"]:
+                if is_dedup_risky:
+                    set_delivery_uncertain(item["id"], False)
                 if item.get("operation_type") in ("CREATE_LEDGER", "CREATE_ITEM", "CREATE_UOM"):
                     from backend.database import mark_master_synced, update_product_conversion_status
                     mark_master_synced(item["id"])
@@ -425,6 +437,8 @@ def flush_offline_queue():
                 print(f"Successfully synced queue item {item['id']}")
                 processed += 1
             else:
+                if is_dedup_risky:
+                    set_delivery_uncertain(item["id"], False)
                 error_msg = parsed_resp["error_message"] or resp.text[:200]
                 if item.get("operation_type") in ("CREATE_LEDGER", "CREATE_ITEM", "CREATE_UOM"):
                     from backend.database import mark_master_failed, update_product_conversion_status
@@ -447,7 +461,30 @@ def flush_offline_queue():
                     update_queue_status(item["id"], "FAILED", error_msg)
                 print(f"Queue item {item['id']} failed validation: {error_msg}")
                 failed += 1
+        except requests.exceptions.ConnectTimeout:
+            # The connection itself never established (Tally's address is
+            # unreachable) -- as safe as ConnectionError, nothing was ever sent.
+            if is_dedup_risky:
+                set_delivery_uncertain(item["id"], False)
+            print("Tally went offline during queue processing. Stopping flush.")
+            break
+        except requests.exceptions.Timeout:
+            # Genuinely ambiguous: connection was established and the request was
+            # sent, but no response came back in time -- Tally may have received
+            # it before the response was lost. Leave delivery_uncertain set
+            # (already persisted above) rather than clearing it, so a manual
+            # retry is blocked until someone verifies in Tally directly.
+            if is_dedup_risky:
+                error_msg = "Delivery status is unknown from an earlier Tally submission. Verify this voucher in Tally before attempting any manual retry."
+            else:
+                error_msg = "Request to Tally timed out."
+            update_queue_status(item["id"], "FAILED", error_msg)
+            print(f"Queue item {item['id']} timed out waiting for Tally; marked FAILED: {error_msg}")
+            failed += 1
         except requests.exceptions.ConnectionError:
+            # Request never reached Tally at all -- safe to leave PENDING for a clean retry.
+            if is_dedup_risky:
+                set_delivery_uncertain(item["id"], False)
             print("Tally went offline during queue processing. Stopping flush.")
             break
         except Exception as e:
@@ -461,7 +498,8 @@ def flush_offline_queue():
 async def sync_worker_loop():
     print("Starting Tally Sync Background Worker...")
     last_master_sync = 0
-    
+    last_reporting_sync = 0
+
     while True:
         try:
             # 1. Micro-Ping
@@ -483,7 +521,28 @@ async def sync_worker_loop():
                     await asyncio.to_thread(fetch_and_cache_masters)
                     last_master_sync = time.time()
                     print("Master sync complete.")
-                    
+
+                # 4. Reporting Sync (every 30 minutes)
+                # NOTE: this shares the same SQLite file as the offline queue / master sync
+                # above (see backend/database.py get_db(), no WAL mode). A long BEGIN
+                # IMMEDIATE transaction here (full-year voucher sync, unbatched inserts)
+                # could in theory collide/block on writes from flush_offline_queue() in
+                # the same loop iteration or a concurrently scheduled one. Known risk,
+                # intentionally not hardened (no WAL/batching) per current scope.
+                if time.time() - last_reporting_sync > 1800:
+                    print("Performing 30-minute reporting sync from Tally...")
+                    try:
+                        await async_sync_cost_centres()
+                        result = await async_sync_vouchers()
+                        failed_months = result.get("failed_months") or []
+                        if failed_months:
+                            print(f"Reporting sync completed with stock-sync failures for months: {failed_months}")
+                        else:
+                            print("Reporting sync complete.")
+                        last_reporting_sync = time.time()
+                    except Exception as e:
+                        print(f"Reporting sync failed, will retry next loop iteration: {e}")
+
         except Exception as e:
             print(f"Error in sync worker loop: {e}")
             
