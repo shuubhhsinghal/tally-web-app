@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import TopBar from '@/components/layout/TopBar';
 import { Button } from '@/components/ui/Button';
@@ -33,7 +33,7 @@ const TYPE_OPTIONS = [
   { id: 'REPACK', label: 'Repack' },
 ];
 
-export default function QueuePage() {
+function QueueContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
@@ -187,5 +187,17 @@ export default function QueuePage() {
         )}
       </div>
     </div>
+  );
+}
+
+export default function QueuePage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen bg-gray-50 dark:bg-gray-900 pb-20">
+        <div className="text-center py-12 text-sm font-medium text-gray-400">Loading queue...</div>
+      </div>
+    }>
+      <QueueContent />
+    </Suspense>
   );
 }
