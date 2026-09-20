@@ -19,14 +19,19 @@ export default function Dashboard() {
 
   const fetchStats = async () => {
     try {
-      const res = await fetch('/api/dashboard/stats');
+      // Independent endpoints -- fetch in parallel instead of waiting for
+      // stats to fully resolve before even starting the activity request.
+      const [res, actRes] = await Promise.all([
+        fetch('/api/dashboard/stats'),
+        fetch('/api/dashboard/activity'),
+      ]);
+
       if (res.ok) {
         const data = await res.json();
         setStats(data);
         localStorage.setItem('dash_stats', JSON.stringify(data));
       }
 
-      const actRes = await fetch('/api/dashboard/activity');
       if (actRes.ok) {
         const data = await actRes.json();
         setActivities(data);
