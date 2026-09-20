@@ -102,6 +102,9 @@ export default function BankStatementInteractive() {
       }
       const data = await res.json();
       setTransactions(data.transactions);
+      if (data.skipped_count > 0) {
+        showToast(`${data.skipped_count} row(s) could not be read and were skipped.`, 'error');
+      }
       fetchAllRules();
     } catch (error) {
       showToast(error.message, 'error');
@@ -164,6 +167,66 @@ export default function BankStatementInteractive() {
       const requiresCC = ledgerData && typeof ledgerData === 'object' ? ledgerData.cost_centre : !!ledgerData;
       tx.missing_cost_center = requiresCC && !value;
       setTransactions(newTxns);
+    }
+  };
+
+  const [lastRemoved, setLastRemoved] = useState(null); // { tx, index }
+  const undoTimerRef = useRef(null);
+
+  const removeTransaction = (index) => {
+    const tx = transactions[index];
+    setTransactions(transactions.filter((_, i) => i !== index));
+    setLastRemoved({ tx, index });
+    if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+    undoTimerRef.current = setTimeout(() => setLastRemoved(null), 5000);
+  };
+
+  const undoRemoveTransaction = () => {
+    if (!lastRemoved) return;
+    const newTxns = [...transactions];
+    newTxns.splice(lastRemoved.index, 0, lastRemoved.tx);
+    setTransactions(newTxns);
+    setLastRemoved(null);
+    if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+  };
+
+  const dismissTransferMatch = (index) => {
+    const newTxns = [...transactions];
+    newTxns[index] = { ...newTxns[index], transfer_match: null };
+    setTransactions(newTxns);
+  };
+
+  const [mergingIndex, setMergingIndex] = useState(null);
+
+  const mergeAsTransfer = async (index) => {
+    const tx = transactions[index];
+    const match = tx.transfer_match;
+    if (!match || match.source !== 'pending') return;
+
+    setMergingIndex(index);
+    try {
+      const res = await fetch('/api/bank-statement/merge-transfer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          queue_id: match.queue_id,
+          bank_ledger_name: bankLedger,
+          date: tx.date,
+          withdraw: tx.withdraw,
+          deposit: tx.deposit,
+          raw_narration: tx.raw_narration,
+        }),
+      });
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.detail || "Could not merge this transfer.");
+      }
+      setTransactions(transactions.filter((_, i) => i !== index));
+      showToast("Merged into a single transfer entry between your accounts");
+    } catch (error) {
+      showToast(error.message, 'error');
+    } finally {
+      setMergingIndex(null);
     }
   };
 
@@ -329,14 +392,52 @@ export default function BankStatementInteractive() {
                 <Card key={idx} className={`flex flex-col gap-2 p-3 ${needsAction ? 'border-amber-300 ring-1 ring-amber-300' : 'border-gray-200 dark:border-gray-700'}`}>
                   <div className="flex justify-between items-start">
                     <p className="text-xs font-semibold text-gray-500">{formatDate(tx.date)}</p>
-                    {tx.withdraw > 0 ? (
-                      <p className="text-sm font-black text-red-600">- ₹ {tx.withdraw.toFixed(2)}</p>
-                    ) : (
-                      <p className="text-sm font-black text-green-600">+ ₹ {tx.deposit.toFixed(2)}</p>
-                    )}
+                    <div className="flex items-center gap-2">
+                      {tx.withdraw > 0 ? (
+                        <p className="text-sm font-black text-red-600">- ₹ {tx.withdraw.toFixed(2)}</p>
+                      ) : (
+                        <p className="text-sm font-black text-green-600">+ ₹ {tx.deposit.toFixed(2)}</p>
+                      )}
+                      <button
+                        onClick={() => removeTransaction(idx)}
+                        title="Remove this transaction"
+                        className="text-gray-300 hover:text-red-500 dark:text-gray-600 dark:hover:text-red-400 transition-colors shrink-0"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   </div>
                   
                   <p className="text-sm font-medium text-gray-900 dark:text-white break-all leading-tight">{tx.raw_narration}</p>
+
+                  {tx.transfer_match && (
+                    <div className="flex flex-col gap-1.5 p-2 rounded-md bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800">
+                      <p className="text-xs text-blue-800 dark:text-blue-300 leading-snug">
+                        {tx.transfer_match.source === 'pending' ? (
+                          <>🔁 Possibly the same transfer as a pending entry from <b>{tx.transfer_match.bank_ledger_name}</b> on {formatDate(tx.transfer_match.date)} for ₹{tx.transfer_match.amount.toFixed(2)}{tx.transfer_match.reference_match ? " — looks like a confirmed NEFT match" : ""}</>
+                        ) : (
+                          <>Already recorded from <b>{tx.transfer_match.bank_ledger_name}</b> on {formatDate(tx.transfer_match.date)}. Use the trash icon above if this is a duplicate.</>
+                        )}
+                      </p>
+                      <div className="flex gap-2">
+                        {tx.transfer_match.source === 'pending' && (
+                          <button
+                            onClick={() => mergeAsTransfer(idx)}
+                            disabled={mergingIndex === idx}
+                            className="px-2 py-1 text-[10px] font-bold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-md shrink-0 transition-colors"
+                          >
+                            {mergingIndex === idx ? "Merging..." : "Merge as Transfer"}
+                          </button>
+                        )}
+                        <button
+                          onClick={() => dismissTransferMatch(idx)}
+                          className="px-2 py-1 text-[10px] font-bold text-blue-700 dark:text-blue-300 hover:underline rounded-md shrink-0 transition-colors"
+                        >
+                          Not a match
+                        </button>
+                      </div>
+                    </div>
+                  )}
 
                   <div className="mt-1 pt-2 border-t border-gray-100 dark:border-gray-800">
                     <div className="flex items-center gap-2">
@@ -389,7 +490,18 @@ export default function BankStatementInteractive() {
           <datalist id="ledger-options">
             {Object.keys(ledgerCache).map(l => <option key={l} value={l} />)}
           </datalist>
-          
+
+          {lastRemoved && (
+            <div className="fixed bottom-[150px] left-0 right-0 mx-auto max-w-md px-4 z-20 flex justify-center">
+              <div className="flex items-center gap-3 bg-gray-900 dark:bg-gray-700 text-white text-xs font-medium px-4 py-2.5 rounded-full shadow-lg">
+                <span>Transaction removed</span>
+                <button onClick={undoRemoveTransaction} className="font-bold text-teal-400 hover:text-teal-300">
+                  Undo
+                </button>
+              </div>
+            </div>
+          )}
+
           <div className="fixed bottom-[80px] left-0 right-0 mx-auto max-w-md p-4 bg-white dark:bg-gray-900 border-t border-gray-200 dark:border-gray-800 z-10 flex gap-3 shadow-[0_-10px_15px_-3px_rgba(0,0,0,0.1)]">
             <Button variant="secondary" onClick={() => setTransactions([])} disabled={isPosting} className="flex-1">
               Cancel

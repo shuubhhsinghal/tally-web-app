@@ -241,26 +241,16 @@ def delete_activity(item_id: int):
                 delete_master_queue(item_id)
                 return {"message": "Deleted master queue and reservation successfully"}
 
-            if row['status'] not in ('PENDING', 'FAILED'):
-                raise HTTPException(status_code=400, detail="Only pending or failed transactions can be deleted.")
-
-            # A transaction whose delivery to Tally is unconfirmed might already
-            # exist there -- deleting it would destroy the only local record of
-            # that ambiguity, so it must be verified in Tally first (same guard
-            # as retry/edit).
-            payload_dict = json.loads(row['payload']) if row['payload'] else {}
-            if payload_dict.get('delivery_uncertain') is True:
-                raise HTTPException(
-                    status_code=409,
-                    detail="Delivery to Tally is unconfirmed for this transaction. Verify manually in Tally before deleting it -- deleting now could permanently lose the only record of a voucher that may already exist in Tally."
-                )
-
-            cursor.execute("DELETE FROM offline_queue WHERE id = ? AND status = ?", (item_id, row['status']))
-            deleted = cursor.rowcount
-            conn.commit()
-            if deleted == 0:
-                raise HTTPException(status_code=409, detail="This item's status just changed -- please refresh and try again.")
-            return {"message": "Deleted successfully"}
+        # Ordinary (non-master) rows: shared guards (status, delivery_uncertain,
+        # compare-and-delete race guard, purchase-rate cleanup) live in
+        # database.py's cancel_pending_queue_item so bank-statement transfer
+        # merging (backend/routers/bank_statement.py) can reuse the same logic.
+        from backend.database import cancel_pending_queue_item
+        success, error_message = cancel_pending_queue_item(item_id)
+        if not success:
+            status_code = 409 if error_message and ("unconfirmed" in error_message or "just changed" in error_message) else 400
+            raise HTTPException(status_code=status_code, detail=error_message)
+        return {"message": "Deleted successfully"}
     except HTTPException:
         raise
     except Exception as e:

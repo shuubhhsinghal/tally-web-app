@@ -3,7 +3,7 @@ from pydantic import BaseModel
 import requests
 import os
 from xml.sax.saxutils import escape
-from backend.database import get_all_ledgers, queue_operation, update_queue_status, set_delivery_uncertain
+from backend.database import get_all_ledgers, queue_operation, update_queue_status, set_delivery_uncertain, get_master_dependency_state, is_master_pending_sync, normalize_master_name
 from backend.services.tally_response import parse_tally_response
 
 router = APIRouter()
@@ -42,13 +42,17 @@ async def preview_transfer(payload: TransferRequest):
         "status": "success"
     }
 
-@router.post("/post")
-async def post_transfer(payload: TransferRequest):
-    from_ledger_xml = escape(str(payload.from_account))
-    to_ledger_xml = escape(str(payload.to_account))
-    narration_xml = escape(str(payload.narration))
-    
-    xml_data = f"""<ENVELOPE>
+def build_contra_voucher_xml(amount: float, from_account: str, to_account: str, tally_date: str, narration: str = "") -> str:
+    """Builds a Tally Contra voucher XML moving `amount` from `from_account`
+    (credited) to `to_account` (debited) -- the correct voucher type for a
+    transfer between two of the user's own ledgers. Reused by both the
+    "Move funds" feature (below) and the bank-statement inter-account
+    transfer merge feature (backend/routers/bank_statement.py)."""
+    from_ledger_xml = escape(str(from_account))
+    to_ledger_xml = escape(str(to_account))
+    narration_xml = escape(str(narration))
+
+    return f"""<ENVELOPE>
   <HEADER>
     <TALLYREQUEST>Import Data</TALLYREQUEST>
   </HEADER>
@@ -60,7 +64,7 @@ async def post_transfer(payload: TransferRequest):
       <REQUESTDATA>
         <TALLYMESSAGE xmlns:UDF="TallyUDF">
           <VOUCHER ACTION="Create" VCHTYPE="Contra">
-            <DATE>{payload.tally_date}</DATE>
+            <DATE>{tally_date}</DATE>
             <VOUCHERTYPENAME>Contra</VOUCHERTYPENAME>
             <PARTYLEDGERNAME>{to_ledger_xml}</PARTYLEDGERNAME>
             <NARRATION>{narration_xml}</NARRATION>
@@ -68,12 +72,12 @@ async def post_transfer(payload: TransferRequest):
             <ALLLEDGERENTRIES.LIST>
               <LEDGERNAME>{from_ledger_xml}</LEDGERNAME>
               <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-              <AMOUNT>{payload.amount}</AMOUNT>
+              <AMOUNT>{amount}</AMOUNT>
             </ALLLEDGERENTRIES.LIST>
             <ALLLEDGERENTRIES.LIST>
               <LEDGERNAME>{to_ledger_xml}</LEDGERNAME>
               <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
-              <AMOUNT>-{payload.amount}</AMOUNT>
+              <AMOUNT>-{amount}</AMOUNT>
             </ALLLEDGERENTRIES.LIST>
           </VOUCHER>
         </TALLYMESSAGE>
@@ -82,10 +86,33 @@ async def post_transfer(payload: TransferRequest):
   </BODY>
 </ENVELOPE>"""
 
+@router.post("/post")
+async def post_transfer(payload: TransferRequest):
+    from_norm, _ = normalize_master_name(payload.from_account)
+    to_norm, _ = normalize_master_name(payload.to_account)
+    if from_norm == to_norm:
+        raise HTTPException(status_code=400, detail="From and To accounts must be different.")
+
+    xml_data = build_contra_voucher_xml(payload.amount, payload.from_account, payload.to_account, payload.tally_date, payload.narration)
+
     # Queue-First Architecture: Always save transaction to DB before attempting to send
     queue_id = queue_operation("POST_VOUCHER", xml_data, payload.model_dump(), f"Transfer: {payload.amount} from {payload.from_account}")
 
     try:
+        for role, ledger_name in (("from", payload.from_account), ("to", payload.to_account)):
+            state, error_msg = get_master_dependency_state("LEDGER", ledger_name, None)
+            if state == "FAILED":
+                update_queue_status(queue_id, "FAILED", f"Cannot post transfer because ledger '{ledger_name}' failed to sync to Tally.")
+                raise HTTPException(status_code=400, detail=f"Cannot post transfer because ledger '{ledger_name}' failed to sync to Tally. Resolve the master first.")
+            if state == "MISSING":
+                update_queue_status(queue_id, "FAILED", f"Cannot post transfer because ledger '{ledger_name}' is not available in Tally or pending sync.")
+                raise HTTPException(status_code=400, detail=f"Cannot post transfer because ledger '{ledger_name}' is not available in Tally or pending sync. Create or refresh the master before posting.")
+            if state == "CONFLICT":
+                update_queue_status(queue_id, "FAILED", f"Definition conflict for ledger '{ledger_name}': {error_msg}")
+                raise HTTPException(status_code=409, detail=f"Cannot post transfer due to definition conflict for ledger '{ledger_name}': {error_msg}")
+            if is_master_pending_sync(state):
+                return {"status": "queued", "reason": "pending_master_dependency", "message": f"Transfer saved to offline queue because ledger '{ledger_name}' is still pending sync to Tally."}
+
         set_delivery_uncertain(queue_id, True)
         response = requests.post(TALLY_URL, data=xml_data.encode('utf-8'), timeout=10)
         parsed = parse_tally_response(response.text, "POST_VOUCHER")
