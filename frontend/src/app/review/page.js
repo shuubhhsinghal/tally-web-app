@@ -71,7 +71,12 @@ export default function ReviewInbox() {
   const formatDate = (isoString) => {
     if (!isoString) return '';
     try {
-      const date = new Date(isoString);
+      // The backend stores this as a naive datetime.now().isoformat() string
+      // with no timezone designator, and its server clock runs in UTC -- JS's
+      // Date constructor interprets a Z-less ISO string as LOCAL time, not
+      // UTC, so without this it silently shows the wrong time (off by
+      // whatever the server-vs-viewer UTC offset is, e.g. 5:30 for IST).
+      const date = new Date(isoString + (isoString.includes('Z') ? '' : 'Z'));
       return date.toLocaleDateString('en-IN', {
         year: 'numeric',
         month: 'short',
