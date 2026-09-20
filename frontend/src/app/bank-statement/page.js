@@ -14,6 +14,7 @@ export default function BankStatementInteractive() {
   const [file, setFile] = useState(null);
   const [bankLedger, setBankLedger] = useState("");
   const [password, setPassword] = useState("");
+  const [showPasswordPrompt, setShowPasswordPrompt] = useState(false);
   
   const [transactions, setTransactions] = useState([]);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -97,11 +98,17 @@ export default function BankStatementInteractive() {
         body: fd
       });
       if (!res.ok) {
-        const errorData = await res.json();
+        const errorData = await res.json().catch(() => ({}));
+        if (res.status === 403) {
+          setShowPasswordPrompt(true);
+          if (password) showToast("Incorrect password. Please try again.", 'error');
+          return;
+        }
         throw new Error(errorData.detail || "Extraction failed");
       }
       const data = await res.json();
       setTransactions(data.transactions);
+      setShowPasswordPrompt(false);
       if (data.skipped_count > 0) {
         showToast(`${data.skipped_count} row(s) could not be read and were skipped.`, 'error');
       }
@@ -758,20 +765,12 @@ export default function BankStatementInteractive() {
             ) : (
               <UploadCloud className="h-12 w-12 text-teal-600 mb-4" />
             )}
-            <span className="text-lg font-bold text-gray-900 dark:text-gray-100">
+            <span className="text-lg font-bold text-gray-900 dark:text-gray-100 w-full break-all px-2">
               {isProcessing ? "Analyzing statement..." : (file ? file.name : "Choose File")}
             </span>
             {!file && <span className="text-sm text-gray-500 mt-1">Supports PDF & Excel</span>}
           </label>
         </div>
-
-        <Input 
-          label="PDF Password (Optional)"
-          type="password"
-          placeholder="Leave blank if not encrypted"
-          value={password}
-          onChange={e => setPassword(e.target.value)}
-        />
 
         <div className="flex gap-3 mt-8">
           <Button variant="secondary" onClick={() => setShowRules(true)} className="flex-1">
@@ -782,6 +781,45 @@ export default function BankStatementInteractive() {
           </Button>
         </div>
       </div>
+
+      {showPasswordPrompt && (
+        <>
+          <div
+            className="fixed inset-0 bg-black/40 dark:bg-black/60 z-40 transition-opacity"
+            onClick={() => setShowPasswordPrompt(false)}
+          />
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 pointer-events-none">
+            <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-xl w-full max-w-sm p-6 pointer-events-auto animate-in zoom-in-95">
+              <h3 className="text-xl font-bold text-gray-900 dark:text-white mb-2">Password Required</h3>
+              <p className="text-gray-500 dark:text-gray-400 mb-4">This PDF is encrypted. Enter its password to continue.</p>
+              <Input
+                label="PDF Password"
+                type="password"
+                autoFocus
+                placeholder="Enter password"
+                value={password}
+                onChange={e => setPassword(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter' && password && !isProcessing) handleAnalyze(); }}
+              />
+              <div className="flex gap-3 mt-6">
+                <button
+                  onClick={() => setShowPasswordPrompt(false)}
+                  className="flex-1 py-3 px-4 bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100 font-semibold rounded-xl"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleAnalyze}
+                  disabled={!password || isProcessing}
+                  className="flex-1 py-3 px-4 font-semibold rounded-xl text-white bg-teal-600 hover:bg-teal-700 disabled:opacity-50"
+                >
+                  {isProcessing ? "Checking..." : "Unlock"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
