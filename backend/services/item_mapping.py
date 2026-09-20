@@ -27,6 +27,13 @@ def normalize_item_name(name: str) -> str:
     name = re.sub(r'\s+', ' ', name)
     name = re.sub(r'\s*\(\s*', '(', name)
     name = re.sub(r'\s*\)\s*', ')', name)
+    # Collapse whitespace between a number and an immediately-following word
+    # (e.g. "500 ml" / "500ml" / "500 ML" all become "500ml"), so a supplier
+    # varying just this spacing/casing still exact-matches for free instead
+    # of needing the AI fallback (or a manual re-pick) every time it varies.
+    # Pure internal comparison key -- never shown to the user -- so being
+    # broad here (any digit+word boundary, not a fixed unit list) is safe.
+    name = re.sub(r'(\d)\s+([a-z])', r'\1\2', name)
     return name
 
 
