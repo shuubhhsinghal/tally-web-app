@@ -5,7 +5,7 @@ import requests
 import os
 import json
 from xml.sax.saxutils import escape
-from backend.database import get_all_ledgers, queue_master_operation, queue_operation, get_db, check_master_exists_locally, normalize_master_name, MasterConflictException, update_queue_status, set_delivery_uncertain
+from backend.database import get_all_ledgers, queue_master_operation, queue_operation, get_db, check_master_exists_locally, normalize_master_name, MasterConflictException, MasterFailedException, update_queue_status, set_delivery_uncertain, get_master_dependency_state, is_master_pending_sync
 from backend.services.tally_response import parse_tally_response
 
 router = APIRouter()
@@ -138,13 +138,18 @@ async def create_payment_ledger(payload: CreateLedgerRequest):
     try:
         queue_payload = {"name": payload.name, "parent": payload.parent}
         result = queue_master_operation("LEDGER", payload.name, "CREATE_LEDGER", xml_data, queue_payload)
-        
-        if result["status"] == "exists_confirmed":
+
+        status = result.get("status")
+        if status == "exists_confirmed":
             return {"status": "success", "message": "Ledger already exists in Tally", "name": payload.name}
-            
+        if status in ("exists_pending", "exists_pending_concurrent"):
+            return {"status": "queued", "message": f"Ledger '{payload.name}' is already waiting to sync.", "name": payload.name}
+
         return {"status": "queued", "message": f"Ledger '{payload.name}' queued successfully.", "name": payload.name}
     except MasterConflictException as e:
         raise HTTPException(status_code=409, detail=str(e))
+    except MasterFailedException as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -197,6 +202,20 @@ async def post_payment(payload: PaymentRequest):
     queue_id = queue_operation("POST_VOUCHER", xml_data, payload.model_dump(), f"Payment: {payload.amount} to {payload.debit_ledger}")
 
     try:
+        for role, ledger_name in (("debit", payload.debit_ledger), ("credit", payload.credit_ledger)):
+            state, error_msg = get_master_dependency_state("LEDGER", ledger_name, None)
+            if state == "FAILED":
+                update_queue_status(queue_id, "FAILED", f"Cannot post payment because ledger '{ledger_name}' failed to sync to Tally.")
+                raise HTTPException(status_code=400, detail=f"Cannot post payment because ledger '{ledger_name}' failed to sync to Tally. Resolve the master first.")
+            if state == "MISSING":
+                update_queue_status(queue_id, "FAILED", f"Cannot post payment because ledger '{ledger_name}' is not available in Tally or pending sync.")
+                raise HTTPException(status_code=400, detail=f"Cannot post payment because ledger '{ledger_name}' is not available in Tally or pending sync. Create or refresh the master before posting.")
+            if state == "CONFLICT":
+                update_queue_status(queue_id, "FAILED", f"Definition conflict for ledger '{ledger_name}': {error_msg}")
+                raise HTTPException(status_code=409, detail=f"Cannot post payment due to definition conflict for ledger '{ledger_name}': {error_msg}")
+            if is_master_pending_sync(state):
+                return {"status": "queued", "reason": "pending_master_dependency", "message": f"Payment saved to offline queue because ledger '{ledger_name}' is still pending sync to Tally."}
+
         set_delivery_uncertain(queue_id, True)
         response = requests.post(TALLY_URL, data=xml_data.encode('utf-8'), timeout=10)
         parsed = parse_tally_response(response.text, "POST_VOUCHER")
