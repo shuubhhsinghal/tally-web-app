@@ -23,7 +23,21 @@ def get_db():
 def init_db():
     with get_db() as conn:
         cursor = conn.cursor()
-        
+
+        # WAL mode is a persistent, file-level setting (survives across
+        # connections/restarts once set) -- setting it here, once, at every
+        # startup is enough; no need to repeat it in get_db() per-connection.
+        # This is the standard fix for a background writer (the sync worker's
+        # periodic master/reporting sync, holding a multi-statement
+        # transaction) blocking concurrent readers (every page's own API
+        # calls) on the same SQLite file -- WAL lets readers proceed
+        # regardless of an in-progress writer. synchronous=NORMAL is WAL's
+        # standard safe pairing: still crash-safe for an app-level crash,
+        # only trades away durability against an OS crash/power loss on the
+        # last commit, which is the accepted standard tradeoff for this gain.
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS ledgers (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -441,7 +455,11 @@ def _init_reporting_db(cursor):
             bank_name TEXT
         )
     """)
-    
+    # Every reporting page (Sales/Purchases/Creditors/Daybook/P&L) filters
+    # this table by date range on every request -- without this, it's a full
+    # table scan every time, getting linearly slower as vouchers accumulate.
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_reporting_vouchers_date ON reporting_vouchers (date)")
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS reporting_ledger_entries (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -451,7 +469,12 @@ def _init_reporting_db(cursor):
             is_deemed_positive BOOLEAN NOT NULL
         )
     """)
-    
+    # voucher_id: joined against reporting_vouchers on essentially every
+    # reporting query. ledger_name: filtered directly (e.g. the Creditors
+    # ledger-movements query), independent of any voucher_id filter.
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_reporting_ledger_entries_voucher_id ON reporting_ledger_entries (voucher_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_reporting_ledger_entries_ledger_name ON reporting_ledger_entries (ledger_name)")
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS reporting_cost_centre_allocations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -460,6 +483,7 @@ def _init_reporting_db(cursor):
             amount REAL NOT NULL
         )
     """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_reporting_cost_centre_allocations_ledger_entry_id ON reporting_cost_centre_allocations (ledger_entry_id)")
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS reporting_ledger_closing_balances (
@@ -482,6 +506,7 @@ def _init_reporting_db(cursor):
             rate REAL
         )
     """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_reporting_inventory_entries_voucher_id ON reporting_inventory_entries (voucher_id)")
     
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS reporting_sync_history (

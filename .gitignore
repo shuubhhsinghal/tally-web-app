@@ -39,6 +39,11 @@ tally_*_cache.json
 *.db
 *.sqlite
 *.sqlite3
+# SQLite WAL-mode sidecar files (created automatically once journal_mode=WAL)
+*.db-shm
+*.db-wal
+*.sqlite-shm
+*.sqlite-wal
 
 # Local uploaded/test data
 backend/uploads/
