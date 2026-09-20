@@ -15,15 +15,18 @@ export default function RepackPage() {
   
   // Unified State
   const [formData, setFormData] = useState({
-    date: new Date().toISOString().split('T')[0], // YYYY-MM-DD
+    // Deliberately NOT new Date().toISOString() alone -- that converts to
+    // UTC, which silently shows yesterday's date for part of the day in any
+    // timezone ahead of UTC (e.g. IST, roughly midnight-5:30am). Compensate
+    // by the local timezone offset first, matching the same fix already used
+    // in sales/payment/transfer/stock-transfer/purchase's own date defaults.
+    date: new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().split('T')[0],
     store_name: '',
     conversion_id: '',
     dest_qty: '',
-    
+
     // New Product Fields
-    new_product_name: '',
-    pack_size: '',
-    pack_unit: 'G'
+    new_product_name: ''
   });
 
   const [components, setComponents] = useState([
@@ -52,37 +55,6 @@ export default function RepackPage() {
 
     fetchConversions();
   }, []);
-
-  const calculateConversionFactor = (packSize, packUnit, targetUnit) => {
-    const weight = parseFloat(packSize);
-    if (isNaN(weight) || weight <= 0) return '';
-    
-    let weightInKg = 0;
-    if (packUnit === 'G') weightInKg = weight / 1000;
-    else if (packUnit === 'KG') weightInKg = weight;
-    else if (packUnit === 'ML') weightInKg = weight / 1000;
-    else if (packUnit === 'L') weightInKg = weight;
-
-    if (targetUnit === 'KG' || targetUnit === 'L') return weightInKg;
-    if (targetUnit === 'G' || targetUnit === 'ML') return weightInKg * 1000;
-    
-    return weightInKg; 
-  };
-
-  // Auto-calculate the primary component's quantity if it's weight-based
-  useEffect(() => {
-    if (formData.conversion_id === 'new' && formData.pack_size && components[0]?.item_name) {
-      const firstItem = stockItems.find(i => i.name === components[0].item_name);
-      if (firstItem && ['KG', 'G', 'L', 'ML'].includes(firstItem.base_unit.toUpperCase())) {
-        const factor = calculateConversionFactor(formData.pack_size, formData.pack_unit, firstItem.base_unit.toUpperCase());
-        if (factor !== '') {
-          const newComps = [...components];
-          newComps[0].quantity = factor;
-          setComponents(newComps);
-        }
-      }
-    }
-  }, [formData.pack_size, formData.pack_unit, components[0]?.item_name, stockItems, formData.conversion_id]);
 
   const handleComponentChange = (index, field, value) => {
     const newComps = [...components];
@@ -135,8 +107,7 @@ export default function RepackPage() {
       setFormData({
         ...formData,
         conversion_id: createData.conversion_id.toString(),
-        new_product_name: '',
-        pack_size: ''
+        new_product_name: ''
       });
       setComponents([{ item_name: '', unit: '', quantity: '' }]);
       
@@ -219,10 +190,9 @@ export default function RepackPage() {
           </div>
           <div className="flex-1">
             <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Store / Godown</label>
-            <Select 
+            <Select
               value={formData.store_name}
               onChange={(e) => setFormData({...formData, store_name: e.target.value})}
-              required
               className="w-full"
             >
               <option value="">Select store...</option>
@@ -230,6 +200,7 @@ export default function RepackPage() {
                 <option key={s.id} value={s.store_name}>{s.store_name}</option>
               ))}
             </Select>
+            <p className="text-xs text-slate-400 mt-1">Only needed when producing — not when defining a new recipe below.</p>
           </div>
         </div>
 
@@ -256,93 +227,96 @@ export default function RepackPage() {
 
         {(formData.conversion_id === 'new' || isExistingWithoutRecipe) && (
           <div className="p-4 bg-slate-50 dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-700 space-y-4">
-            <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-200 mb-2">
-              {isExistingWithoutRecipe ? 'Configure Missing Recipe' : 'New Product Details'}
-            </h3>
-            
-            {formData.conversion_id === 'new' && (
-              <>
-                <div>
-                  <label className="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">New Product Name</label>
-                  <Input 
-                    type="text"
-                    placeholder="e.g. Beetroot Chips 300G"
-                    value={formData.new_product_name}
-                    onChange={(e) => setFormData({...formData, new_product_name: e.target.value})}
-                    required
-                    className="text-sm"
-                  />
-                </div>
+            <div>
+              <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-200">
+                {isExistingWithoutRecipe ? 'Configure Missing Recipe' : 'Define a New Product'}
+              </h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Name the item you&apos;re making, then list what goes into <strong>one</strong> of it.
+              </p>
+            </div>
 
-                <div>
-                  <label className="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">Pack Size (Optional helper)</label>
-                  <div className="flex gap-2">
-                    <Input 
-                      type="number"
-                      step="0.001"
-                      placeholder="e.g. 250"
-                      value={formData.pack_size}
-                      onChange={(e) => setFormData({...formData, pack_size: e.target.value})}
-                      className="w-full text-sm"
-                    />
-                    <Select 
-                      value={formData.pack_unit}
-                      onChange={(e) => setFormData({...formData, pack_unit: e.target.value})}
-                      className="w-32 text-sm"
-                    >
-                      <option value="G">G</option>
-                      <option value="KG">KG</option>
-                      <option value="ML">ML</option>
-                      <option value="L">L</option>
-                    </Select>
-                  </div>
-                </div>
-              </>
+            {formData.conversion_id === 'new' && (
+              <div>
+                <label className="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">What are you making?</label>
+                <Input
+                  type="text"
+                  placeholder="e.g. Beetroot Chips 300G"
+                  value={formData.new_product_name}
+                  onChange={(e) => setFormData({...formData, new_product_name: e.target.value})}
+                  required
+                  className="text-sm"
+                />
+              </div>
             )}
 
             <div className="pt-2">
-              <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-2 uppercase tracking-wide">Recipe Components per 1 PCS</label>
+              <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1 uppercase tracking-wide">
+                What goes into one {formData.new_product_name || selectedConversion?.finished_stock_item || 'unit'}?
+              </label>
+              <p className="text-xs text-slate-500 mb-2">For each ingredient, pick the item and how much of it is used.</p>
               <div className="space-y-3">
                 {components.map((comp, idx) => (
                   <div key={idx} className="flex items-center gap-2">
-                    <Select 
-                      value={comp.item_name}
-                      onChange={(e) => handleComponentChange(idx, 'item_name', e.target.value)}
-                      required
-                      className="flex-1 text-sm"
-                    >
-                      <option value="">Select component...</option>
-                      {stockItems.map(item => (
-                        <option key={item.name} value={item.name}>{item.name}</option>
-                      ))}
-                    </Select>
-                    
-                    <Input 
-                      type="number"
-                      step="0.0001"
-                      placeholder="Qty"
-                      value={comp.quantity}
-                      onChange={(e) => handleComponentChange(idx, 'quantity', e.target.value)}
-                      required
-                      className="w-24 text-sm"
-                    />
-                    
-                    <span className="text-xs font-mono w-8 text-slate-500">{comp.unit}</span>
-                    
+                    {/* Input/Select both hardcode w-full internally, so a width
+                        class passed via their own className prop can lose to
+                        that default depending on Tailwind's generated class
+                        order. Wrapping each in its own sized container makes
+                        w-full resolve against a wrapper we actually control. */}
+                    <div className="w-16 shrink-0">
+                      <Input
+                        type="number"
+                        step="0.0001"
+                        placeholder="Qty"
+                        value={comp.quantity}
+                        onChange={(e) => handleComponentChange(idx, 'quantity', e.target.value)}
+                        required
+                        className="text-sm"
+                      />
+                    </div>
+                    <span className="text-xs font-mono w-8 text-slate-500 shrink-0">{comp.unit || '—'}</span>
+                    <span className="text-xs text-slate-400 shrink-0">of</span>
+                    <div className="flex-1 min-w-0">
+                      <Select
+                        value={comp.item_name}
+                        onChange={(e) => handleComponentChange(idx, 'item_name', e.target.value)}
+                        required
+                        className="text-sm"
+                      >
+                        <option value="">Select ingredient...</option>
+                        {stockItems.map(item => (
+                          <option key={item.name} value={item.name}>{item.name}</option>
+                        ))}
+                      </Select>
+                    </div>
+
                     <button type="button" onClick={() => removeComponent(idx)} className="text-red-400 hover:text-red-600 p-1" disabled={components.length === 1}>
                       <Trash2 className="w-4 h-4" />
                     </button>
                   </div>
                 ))}
               </div>
-              
+
               <Button type="button" variant="secondary" onClick={addComponent} className="mt-3 text-xs flex items-center gap-1 text-indigo-600">
-                <PlusCircle className="w-4 h-4" /> Add Component
+                <PlusCircle className="w-4 h-4" /> Add Another Ingredient
               </Button>
             </div>
-            
-            <Button 
-              type="submit" 
+
+            {components.some(c => c.item_name && c.quantity) && (
+              <div className="p-3 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700">
+                <p className="text-xs text-slate-500">
+                  Making <strong>1 Pcs of {formData.new_product_name || selectedConversion?.finished_stock_item || 'this product'}</strong> will use:
+                </p>
+                <ul className="text-sm font-mono text-slate-700 dark:text-slate-300 mt-1 space-y-0.5">
+                  {components.filter(c => c.item_name && c.quantity).map((c, i) => (
+                    <li key={i}>{c.quantity} {c.unit} — {c.item_name}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            <Button
+              type="submit"
               disabled={loading || !formData.new_product_name || components.some(c => !c.item_name || !c.quantity)}
               className="w-full mt-4 py-3 text-sm shadow-sm"
             >

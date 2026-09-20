@@ -7,7 +7,7 @@ import { Select } from '@/components/ui/Select';
 import { SearchableSelect } from '@/components/ui/SearchableSelect';
 import { useUI } from '@/context/UIContext';
 import { useSearchParams, useRouter } from 'next/navigation';
-import { UploadCloud, Image as ImageIcon, AlertCircle, CheckCircle2, ChevronDown, ChevronRight, PlusCircle, Trash2, Edit3, Camera } from "lucide-react";
+import { UploadCloud, Image as ImageIcon, AlertCircle, CheckCircle2, ChevronDown, ChevronRight, PlusCircle, Trash2, Edit3, Camera, History, X } from "lucide-react";
 import { calculateAndReconcileV4 } from './utils/reconciliation';
 import { CameraCapture } from './CameraCapture';
 
@@ -229,10 +229,10 @@ export function ItemWiseMode({ onPostSuccess }) {
   const [showTaxEdit, setShowTaxEdit] = useState(false);
   const [adjustment, setAdjustment] = useState({
     enabled: false,
-    amount: "",
     store: "",
     reason: "",
-    notes: ""
+    notes: "",
+    items: [] // [{ name, uom, qty, rate, amount, rateStatus: 'idle'|'loading'|'ok'|'error', rateError }]
   });
 
   const [isPosting, setIsPosting] = useState(false);
@@ -292,7 +292,17 @@ export function ItemWiseMode({ onPostSuccess }) {
       if (parsedDraft.items) setItems(parsedDraft.items);
       if (parsedDraft.v4RawData) setV4RawData(parsedDraft.v4RawData);
       if (parsedDraft.v4Config) setV4Config(parsedDraft.v4Config);
-      if (parsedDraft.adjustment) setAdjustment(parsedDraft.adjustment);
+      if (parsedDraft.adjustment) {
+        // Defensive normalizer: an older draft may carry the legacy flat
+        // {amount, store, reason, notes} shape (pre item-wise-return) --
+        // drop the stale `amount` and default `items` so it doesn't crash
+        // the new derived-total logic.
+        setAdjustment({
+          enabled: false, store: "", reason: "", notes: "", items: [],
+          ...parsedDraft.adjustment,
+          items: parsedDraft.adjustment.items || []
+        });
+      }
       if (parsedDraft.totals) setTotals(parsedDraft.totals);
       if (parsedDraft.validationStatus) setValidationStatus(parsedDraft.validationStatus);
       
@@ -351,6 +361,81 @@ export function ItemWiseMode({ onPostSuccess }) {
       v4Config.selected_amount_header
     );
   }, [v4RawData, v4Config, invoice?.gst_rate]);
+
+  const returnTotal = useMemo(() => {
+    return adjustment.items.reduce((sum, i) => sum + (Number(i.qty) || 0) * (Number(i.rate) || 0), 0);
+  }, [adjustment.items]);
+
+  const refreshReturnItemRate = async (name, qty) => {
+    try {
+      const res = await fetch('/api/purchase-item/return-item-rate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ item_name: name, qty })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'No rate found for this item.');
+      setAdjustment(prev => ({
+        ...prev,
+        items: prev.items.map(i => i.name === name
+          ? { ...i, rate: data.rate, amount: data.amount, rateStatus: 'ok', rateError: null }
+          : i)
+      }));
+    } catch (err) {
+      setAdjustment(prev => ({
+        ...prev,
+        items: prev.items.map(i => i.name === name
+          ? { ...i, rate: 0, amount: 0, rateStatus: 'error', rateError: err.message }
+          : i)
+      }));
+    }
+  };
+
+  const handleAddReturnItem = (name) => {
+    if (!name || adjustment.items.some(i => i.name === name)) return;
+    const uom = meta.stock_item_units?.[name] || 'PCS';
+    const newRow = { name, uom, qty: 1, rate: 0, amount: 0, rateStatus: 'loading', rateError: null };
+    setAdjustment(prev => ({ ...prev, items: [...prev.items, newRow] }));
+    refreshReturnItemRate(name, 1);
+  };
+
+  const handleReturnItemQtyChange = (idx, qty) => {
+    setAdjustment(prev => ({
+      ...prev,
+      items: prev.items.map((i, iidx) => iidx === idx ? { ...i, qty } : i)
+    }));
+  };
+
+  const handleRemoveReturnItem = (idx) => {
+    setAdjustment(prev => ({ ...prev, items: prev.items.filter((_, iidx) => iidx !== idx) }));
+  };
+
+  const [historyPicker, setHistoryPicker] = useState({ open: false, itemIdx: null, itemName: null, loading: false, error: null, source: null, entries: [] });
+
+  const openHistoryPicker = async (idx, itemName) => {
+    setHistoryPicker({ open: true, itemIdx: idx, itemName, loading: true, error: null, source: null, entries: [] });
+    try {
+      const url = '/api/purchase-item/return-item-history?' + new URLSearchParams({ item_name: itemName });
+      const res = await fetch(url);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Failed to fetch purchase history.');
+      setHistoryPicker(prev => ({ ...prev, loading: false, source: data.source, entries: data.entries || [] }));
+    } catch (err) {
+      setHistoryPicker(prev => ({ ...prev, loading: false, error: err.message }));
+    }
+  };
+
+  const closeHistoryPicker = () => setHistoryPicker({ open: false, itemIdx: null, itemName: null, loading: false, error: null, source: null, entries: [] });
+
+  const handleSelectHistoryRate = (entry) => {
+    setAdjustment(prev => ({
+      ...prev,
+      items: prev.items.map((i, iidx) => iidx === historyPicker.itemIdx
+        ? { ...i, rate: entry.rate, rateStatus: 'ok', rateError: null }
+        : i)
+    }));
+    closeHistoryPicker();
+  };
 
   useEffect(() => {
     if (v4Data && v4Data.calculated_data) {
@@ -741,6 +826,15 @@ export function ItemWiseMode({ onPostSuccess }) {
     newItems.splice(idx, 1);
     setItems(newItems);
     if (editingItemIdx === idx) setEditingItemIdx(null);
+
+    if (v4RawData) {
+      setV4RawData(prev => {
+        if (!prev || !prev.extracted_data || !prev.extracted_data.items) return prev;
+        const rawItems = [...prev.extracted_data.items];
+        rawItems.splice(idx, 1);
+        return { ...prev, extracted_data: { ...prev.extracted_data, items: rawItems } };
+      });
+    }
   };
 
   const handlePost = async () => {
@@ -781,8 +875,13 @@ export function ItemWiseMode({ onPostSuccess }) {
       return;
     }
 
-    if (adjustment.enabled && Number(adjustment.amount) > 0 && !adjustment.store) {
+    if (adjustment.enabled && adjustment.items.length > 0 && !adjustment.store) {
       showToast("Please select a return cost centre for the adjustment.", 'error');
+      return;
+    }
+
+    if (adjustment.enabled && adjustment.items.some(i => i.rateStatus === 'error' || !(Number(i.rate) > 0))) {
+      showToast("Resolve the purchase rate for all return items before pushing.", 'error');
       return;
     }
 
@@ -805,12 +904,18 @@ export function ItemWiseMode({ onPostSuccess }) {
         sgst: isIncludedInRate ? 0 : invoice.sgst,
         igst: isIncludedInRate ? 0 : invoice.igst
       };
-      if (adjustment.enabled && Number(adjustment.amount) > 0) {
+      if (adjustment.enabled && adjustment.items.length > 0) {
         postPayload.adjustment = {
-          amount: Number(adjustment.amount),
           store: adjustment.store,
           reason: adjustment.reason || "",
-          notes: adjustment.notes || ""
+          notes: adjustment.notes || "",
+          items: adjustment.items.map(i => ({
+            name: i.name,
+            uom: i.uom,
+            qty: Number(i.qty),
+            rate: Number(i.rate),
+            amount: Number(i.qty) * Number(i.rate)
+          }))
         };
       }
 
@@ -831,7 +936,13 @@ export function ItemWiseMode({ onPostSuccess }) {
       } else {
         showToast("Purchase saved to Tally");
       }
-      
+
+      if (data.adjustment?.status === 'failed') {
+        showToast(`Purchase posted, but the return failed: ${data.adjustment.message}`, 'error');
+      } else if (data.adjustment?.status === 'queued' && data.adjustment.message) {
+        showToast(data.adjustment.message);
+      }
+
       // If we posted from a draft, delete the draft now
       if (activeDraftId) {
         try {
@@ -1695,34 +1806,77 @@ export function ItemWiseMode({ onPostSuccess }) {
 
             {adjustment.enabled && (
               <div className="space-y-3 pt-3 border-t border-gray-100 dark:border-gray-800">
-                <p className="text-xs text-gray-500 mb-2">Adjust previous returns against this invoice. This will post a separate Journal Voucher to Tally.</p>
+                <p className="text-xs text-gray-500 mb-2">Select the items being returned to this supplier. This will post a Debit Note (with stock effect) to Tally, using each item&apos;s latest purchase rate.</p>
+
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Add Return Item</label>
+                  <SearchableSelect
+                    options={meta.stock_items.filter(n => !adjustment.items.some(i => i.name === n))}
+                    value=""
+                    onChange={handleAddReturnItem}
+                    placeholder="Search item to add to return..."
+                  />
+                </div>
+
+                {adjustment.items.length > 0 && (
+                  <div className="space-y-2">
+                    {adjustment.items.map((ri, idx) => (
+                      <div key={ri.name} className="flex flex-col gap-2 bg-gray-50 dark:bg-gray-800 p-2 rounded-lg border border-gray-200 dark:border-gray-700">
+                        <div className="flex items-center gap-2">
+                          <span className="flex-1 text-sm font-medium text-gray-900 dark:text-gray-100 break-words" title={ri.name}>{ri.name}</span>
+                          <button type="button" onClick={() => openHistoryPicker(idx, ri.name)} title="Pick a different rate from purchase history" className="text-teal-500 hover:text-teal-700 shrink-0">
+                            <History className="w-4 h-4" />
+                          </button>
+                          <button type="button" onClick={() => handleRemoveReturnItem(idx)} className="text-red-400 hover:text-red-600 shrink-0">
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="number" step="0.01" min="0" value={ri.qty}
+                            onChange={e => handleReturnItemQtyChange(idx, e.target.value)}
+                            className="w-16 p-2 text-sm rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 outline-none focus:border-teal-500"
+                          />
+                          <span className="text-[10px] text-gray-400 w-8">{ri.uom}</span>
+                          <span className="flex-1 text-xs text-right">
+                            {ri.rateStatus === 'loading' ? (
+                              <span className="text-gray-400">Fetching...</span>
+                            ) : ri.rateStatus === 'error' ? (
+                              <span className="text-red-500 font-medium">No rate found</span>
+                            ) : (
+                              <span className="text-gray-500">₹{ri.rate} /unit</span>
+                            )}
+                          </span>
+                          <span className="w-20 text-sm text-right font-bold text-gray-900 dark:text-gray-100">
+                            ₹{((Number(ri.qty) || 0) * (Number(ri.rate) || 0)).toFixed(2)}
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
                 <div className="grid grid-cols-2 gap-3">
                   <div className="space-y-1.5">
-                    <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Adjustment Amount (₹)</label>
-                    <input type="number" step="0.01" value={adjustment.amount} onChange={e => setAdjustment({ ...adjustment, amount: e.target.value })} className="w-full p-2 text-sm rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 outline-none focus:border-teal-500" placeholder="0.00" />
-                  </div>
-                  <div className="space-y-1.5">
                     <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Return Cost Centre <span className="text-red-500">*</span></label>
-                    <select value={adjustment.store} onChange={e => setAdjustment({ ...adjustment, store: e.target.value })} className={`w-full p-2 text-sm rounded border bg-white dark:bg-gray-800 outline-none focus:border-teal-500 ${!adjustment.store && Number(adjustment.amount) > 0 ? 'border-red-500' : 'border-gray-200 dark:border-gray-700'}`}>
+                    <select value={adjustment.store} onChange={e => setAdjustment({ ...adjustment, store: e.target.value })} className={`w-full p-2 text-sm rounded border bg-white dark:bg-gray-800 outline-none focus:border-teal-500 ${!adjustment.store && adjustment.items.length > 0 ? 'border-red-500' : 'border-gray-200 dark:border-gray-700'}`}>
                       <option value="" disabled>Select Store...</option>
                       {meta.stores.map(s => <option key={s} value={s}>{s}</option>)}
                     </select>
                   </div>
-                </div>
-                <div className="grid grid-cols-2 gap-3">
                   <div className="space-y-1.5">
                     <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Reason (Optional)</label>
                     <input type="text" value={adjustment.reason} onChange={e => setAdjustment({ ...adjustment, reason: e.target.value })} className="w-full p-2 text-sm rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 outline-none focus:border-teal-500" placeholder="e.g. Damaged goods" />
                   </div>
-                  <div className="space-y-1.5">
-                    <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Notes (Optional)</label>
-                    <input type="text" value={adjustment.notes} onChange={e => setAdjustment({ ...adjustment, notes: e.target.value })} className="w-full p-2 text-sm rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 outline-none focus:border-teal-500" />
-                  </div>
                 </div>
-                {Number(adjustment.amount) > 0 && (
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Notes (Optional)</label>
+                  <input type="text" value={adjustment.notes} onChange={e => setAdjustment({ ...adjustment, notes: e.target.value })} className="w-full p-2 text-sm rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 outline-none focus:border-teal-500" />
+                </div>
+                {returnTotal > 0 && (
                   <div className="flex justify-between items-center bg-gray-50 dark:bg-gray-800 p-3 rounded-lg mt-2 border border-gray-200 dark:border-gray-700">
                     <span className="font-bold text-gray-900 dark:text-gray-100 text-sm">Net Supplier Payable:</span>
-                    <span className="font-black text-teal-600 dark:text-teal-400 text-lg">₹ {Math.max(0, grandTotal - Number(adjustment.amount)).toFixed(2)}</span>
+                    <span className="font-black text-teal-600 dark:text-teal-400 text-lg">₹ {Math.max(0, grandTotal - returnTotal).toFixed(2)}</span>
                   </div>
                 )}
               </div>
@@ -1745,6 +1899,77 @@ export function ItemWiseMode({ onPostSuccess }) {
             </div>
           )}
         </>
+      )}
+
+      {historyPicker.open && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4" onClick={closeHistoryPicker}>
+          <div className="bg-white dark:bg-gray-900 rounded-t-2xl sm:rounded-2xl w-full sm:max-w-lg max-h-[80vh] flex flex-col" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-4 border-b border-gray-100 dark:border-gray-800">
+              <div>
+                <h3 className="font-bold text-gray-900 dark:text-white">Purchase History</h3>
+                <p className="text-xs text-gray-500 truncate max-w-[240px]">{historyPicker.itemName}</p>
+              </div>
+              <button onClick={closeHistoryPicker} className="text-gray-400 hover:text-gray-600">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="overflow-y-auto flex-1 p-4">
+              {historyPicker.loading && (
+                <p className="text-sm text-gray-400 text-center py-8">Fetching purchase history...</p>
+              )}
+              {historyPicker.error && (
+                <div className="text-center py-8">
+                  <p className="text-sm text-red-500 mb-2">{historyPicker.error}</p>
+                  <button onClick={() => openHistoryPicker(historyPicker.itemIdx, historyPicker.itemName)} className="text-sm text-teal-600 font-bold">Retry</button>
+                </div>
+              )}
+              {!historyPicker.loading && !historyPicker.error && (
+                <>
+                  {historyPicker.source === 'local_cache' && (
+                    <p className="text-xs bg-amber-50 dark:bg-amber-900/20 text-amber-600 dark:text-amber-400 rounded-lg p-2 mb-3">
+                      Showing last known rates — Tally is offline right now.
+                    </p>
+                  )}
+                  {historyPicker.entries.length === 0 ? (
+                    <p className="text-sm text-gray-400 text-center py-8">No purchase history in the last 2 years for this item.</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {historyPicker.entries.map((entry, eidx) => (
+                        <button
+                          key={eidx}
+                          onClick={() => handleSelectHistoryRate(entry)}
+                          className="w-full text-left p-3 rounded-lg border border-gray-200 dark:border-gray-700 hover:border-teal-500 hover:bg-teal-50/50 dark:hover:bg-teal-900/10 transition-colors"
+                        >
+                          <div className="flex justify-between items-center">
+                            <span className="text-sm font-bold text-gray-900 dark:text-gray-100">{entry.date}</span>
+                            <span className="text-lg font-black text-teal-600 dark:text-teal-400">₹{entry.rate}</span>
+                          </div>
+                          <div className="flex justify-between items-center mt-1 text-xs text-gray-500">
+                            <span className="truncate max-w-[150px]">
+                              {entry.origin === 'repack' ? 'Made in-house (Repack)' : (entry.supplier || 'Unknown supplier')}
+                            </span>
+                            <span>{entry.voucher_number || 'No voucher #'} · Qty {entry.qty ?? '—'} {entry.unit || ''}</span>
+                          </div>
+                          {entry.origin === 'app_post' && (
+                            <span className="inline-block mt-1 text-[10px] font-bold uppercase tracking-wider text-amber-600 bg-amber-50 dark:bg-amber-900/30 px-2 py-0.5 rounded">
+                              Pending Tally sync
+                            </span>
+                          )}
+                          {entry.origin === 'repack' && (
+                            <span className="inline-block mt-1 text-[10px] font-bold uppercase tracking-wider text-indigo-600 bg-indigo-50 dark:bg-indigo-900/30 px-2 py-0.5 rounded">
+                              Repack cost
+                            </span>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

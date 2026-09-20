@@ -11,11 +11,12 @@ from backend.services.tally_response import sanitize_tally_xml, parse_tally_resp
 
 from backend.database import (
     get_pending_queue, update_queue_status, set_delivery_uncertain,
-    clear_and_bulk_insert_ledgers, clear_and_bulk_insert_stock_items, clear_and_bulk_insert_uoms, clear_and_bulk_insert_godowns
+    clear_and_bulk_insert_ledgers, clear_and_bulk_insert_stock_items, clear_and_bulk_insert_uoms, clear_and_bulk_insert_godowns,
+    cleanup_purchase_rate_pending_entries
 )
 
 from backend.config import TALLY_URL
-from backend.services.tally_reporting_sync import async_sync_cost_centres, async_sync_vouchers
+from backend.services.tally_reporting_sync import async_sync_cost_centres, async_sync_vouchers, _get_current_fy_start
 
 
 
@@ -499,6 +500,7 @@ async def sync_worker_loop():
     print("Starting Tally Sync Background Worker...")
     last_master_sync = 0
     last_reporting_sync = 0
+    last_history_backfill = 0
 
     while True:
         try:
@@ -542,6 +544,27 @@ async def sync_worker_loop():
                         last_reporting_sync = time.time()
                     except Exception as e:
                         print(f"Reporting sync failed, will retry next loop iteration: {e}")
+
+                # 5. Purchase-rate-history backfill (once/day): the 30-minute
+                # reporting sync above only covers the current fiscal year, but
+                # the return-item rate-history picker needs a rolling 2 years.
+                # This covers the older remainder of that window; closed
+                # prior-year vouchers change far less often than the current
+                # period, so a daily cadence (not 30 minutes) is enough.
+                if time.time() - last_history_backfill > 86400:
+                    print("Performing daily 2-year purchase-rate-history backfill...")
+                    try:
+                        fy_start = _get_current_fy_start()
+                        fy_start_dt = datetime.strptime(fy_start, "%Y%m%d")
+                        backfill_end = (fy_start_dt - timedelta(days=1)).strftime("%Y%m%d")
+                        backfill_start = (datetime.now() - timedelta(days=730)).strftime("%Y%m%d")
+                        if backfill_start < backfill_end:
+                            await async_sync_vouchers(start_date=backfill_start, end_date=backfill_end)
+                        deleted = cleanup_purchase_rate_pending_entries()
+                        print(f"History backfill complete. Cleaned up {deleted} stale pending rate entries.")
+                        last_history_backfill = time.time()
+                    except Exception as e:
+                        print(f"History backfill failed, will retry next loop iteration: {e}")
 
         except Exception as e:
             print(f"Error in sync worker loop: {e}")

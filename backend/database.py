@@ -382,6 +382,33 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
+        try:
+            cursor.execute("ALTER TABLE purchase_rates ADD COLUMN source_queue_id INTEGER")
+        except sqlite3.OperationalError:
+            pass # Column exists
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS purchase_rate_pending_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                stock_item_name TEXT NOT NULL,
+                rate REAL NOT NULL,
+                purchase_date TEXT NOT NULL,
+                supplier TEXT,
+                voucher_number TEXT,
+                qty REAL,
+                unit TEXT,
+                source_queue_id INTEGER,
+                source_type TEXT NOT NULL DEFAULT 'purchase',
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_purchase_rate_pending_item ON purchase_rate_pending_entries (stock_item_name)")
+
+        try:
+            cursor.execute("ALTER TABLE purchase_rate_pending_entries ADD COLUMN source_type TEXT NOT NULL DEFAULT 'purchase'")
+        except sqlite3.OperationalError:
+            pass # Column exists
+
         _init_reporting_db(cursor)
 
         conn.commit()
@@ -851,6 +878,39 @@ def delete_master_queue(queue_id: int):
             conn.rollback()
             raise
 
+def cancel_pending_queue_item(queue_id: int) -> tuple:
+    """Cancels (deletes) one ordinary (non-master) offline_queue row, with the
+    same safety guards as dashboard.py's delete_activity: only a PENDING/FAILED
+    row can be cancelled, a row whose delivery to Tally is unconfirmed
+    (delivery_uncertain) is refused since it may already exist in Tally, and
+    the delete is a compare-and-delete on the row's current status to guard
+    against it changing between the caller's read and this call.
+
+    Returns (success: bool, error_message: str | None)."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT status, payload FROM offline_queue WHERE id = ?", (queue_id,))
+        row = cursor.fetchone()
+        if not row:
+            return False, "Item not found"
+
+        if row['status'] not in ('PENDING', 'FAILED'):
+            return False, "Only pending or failed transactions can be cancelled."
+
+        payload_dict = json.loads(row['payload']) if row['payload'] else {}
+        if payload_dict.get('delivery_uncertain') is True:
+            return False, "Delivery to Tally is unconfirmed for this transaction. Verify manually in Tally before cancelling it."
+
+        cursor.execute("DELETE FROM offline_queue WHERE id = ? AND status = ?", (queue_id, row['status']))
+        if cursor.rowcount == 0:
+            conn.commit()
+            return False, "This item's status just changed -- please refresh and try again."
+
+        cursor.execute("DELETE FROM purchase_rates WHERE source_queue_id = ?", (queue_id,))
+        cursor.execute("DELETE FROM purchase_rate_pending_entries WHERE source_queue_id = ?", (queue_id,))
+        conn.commit()
+        return True, None
+
 def resolve_master_externally(queue_id: int, description: str):
     with get_db() as conn:
         cursor = conn.cursor()
@@ -942,17 +1002,23 @@ def delete_item_alias(alias_id: int) -> bool:
         conn.commit()
         return cursor.rowcount > 0
 
-def record_purchase_rate(item_name: str, rate: float, supplier: str, purchase_date: str):
+def record_purchase_rate(item_name: str, rate: float, supplier: str, purchase_date: str, source_queue_id: int = None):
+    """`source_queue_id` (the offline_queue row this rate came from) lets a later
+    deletion of that exact transaction (see delete_activity in dashboard.py)
+    know whether it still "owns" the current cached rate -- if a newer
+    purchase has since overwritten this row, its source_queue_id will already
+    differ, so the delete correctly leaves the newer value alone."""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO purchase_rates (stock_item_name, latest_rate, supplier, purchase_date)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(stock_item_name) DO UPDATE SET 
+            INSERT INTO purchase_rates (stock_item_name, latest_rate, supplier, purchase_date, source_queue_id)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(stock_item_name) DO UPDATE SET
                 latest_rate=excluded.latest_rate,
                 supplier=excluded.supplier,
-                purchase_date=excluded.purchase_date
-        """, (item_name, rate, supplier, purchase_date))
+                purchase_date=excluded.purchase_date,
+                source_queue_id=excluded.source_queue_id
+        """, (item_name, rate, supplier, purchase_date, source_queue_id))
         conn.commit()
 
 def get_purchase_rates():
@@ -981,6 +1047,153 @@ def get_purchase_rate(item_name: str) -> float:
             return tally_rate
         else:
             return app_rate
+
+def record_pending_purchase_rate_entry(item_name: str, rate: float, purchase_date: str, supplier: str,
+                                        voucher_number: str, qty: float, unit: str, source_queue_id: int = None,
+                                        source_type: str = 'purchase'):
+    """Logs one app-observed rate for the rate-history picker. Unlike
+    record_purchase_rate (a single-row-per-item upsert), this is an
+    append-only log -- every observation gets its own row.
+
+    `source_type` distinguishes *why* this rate was observed:
+    - 'purchase' (default): an app-posted purchase not yet confirmed by
+      Tally -- deduped at read time (see get_local_purchase_rate_history)
+      against Tally-confirmed data once that same purchase has synced.
+    - 'repack': the computed per-unit cost of an item just produced via the
+      Repack & Assembly feature. This will never appear as a Tally
+      'Purchase' voucher (it's a Stock Journal), so it's never deduped away
+      -- it's a permanent, standalone cost record for that item."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO purchase_rate_pending_entries
+                (stock_item_name, rate, purchase_date, supplier, voucher_number, qty, unit, source_queue_id, source_type)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (item_name, rate, purchase_date, supplier, voucher_number, qty, unit, source_queue_id, source_type))
+        conn.commit()
+
+def _tally_date_to_iso(raw_date: str) -> str:
+    """reporting_vouchers.date is stored as Tally's raw YYYYMMDD; normalize to
+    YYYY-MM-DD to match purchase_rate_pending_entries.purchase_date so the two
+    sources sort/dedup/display consistently."""
+    if raw_date and len(raw_date) == 8 and raw_date.isdigit():
+        return f"{raw_date[0:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
+    return raw_date or ""
+
+def _resolve_entry_rate(rate, qty, amount):
+    """reporting_inventory_entries.rate is occasionally 0 for a real,
+    correctly-amounted voucher line (confirmed against live synced data --
+    Tally doesn't always emit a parseable per-line RATE, even when AMOUNT and
+    BILLEDQTY are present). Derive it from amount/qty rather than showing a
+    misleading ₹0 in the rate-history picker."""
+    if rate:
+        return rate
+    if qty:
+        return round(abs(amount or 0) / qty, 2)
+    return 0.0
+
+def get_local_purchase_rate_history(item_name: str, since_date: str) -> list:
+    """Local (offline-safe) purchase history for one item since `since_date`
+    (YYYY-MM-DD), merging Tally-confirmed vouchers (reporting_vouchers /
+    reporting_inventory_entries, voucher_type='Purchase' only -- returns are
+    deliberately excluded, they aren't "a prior purchase" to pick from) with
+    this app's own not-yet-synced entries, newest first. Used both as the
+    fallback when Tally is unreachable and to fetch the confirmed side when
+    building a live-merged response."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT unit FROM stock_items WHERE name = ? COLLATE NOCASE", (item_name,))
+        unit_row = cursor.fetchone()
+        default_unit = unit_row['unit'] if unit_row and unit_row['unit'] else None
+
+        cursor.execute("""
+            SELECT rv.date, rie.rate, rie.amount, rv.party_ledger_name, rv.voucher_number, rie.billed_qty
+            FROM reporting_inventory_entries rie
+            JOIN reporting_vouchers rv ON rv.id = rie.voucher_id
+            WHERE rie.stock_item_name = ? COLLATE NOCASE
+              AND rv.voucher_type = 'Purchase'
+        """, (item_name,))
+        tally_entries = []
+        for row in cursor.fetchall():
+            iso_date = _tally_date_to_iso(row['date'])
+            if iso_date < since_date:
+                continue
+            tally_entries.append({
+                "date": iso_date,
+                "rate": _resolve_entry_rate(row['rate'], row['billed_qty'], row['amount']),
+                "supplier": row['party_ledger_name'] or None,
+                "voucher_number": row['voucher_number'] or None,
+                "qty": row['billed_qty'],
+                "unit": default_unit,
+                "origin": "tally"
+            })
+
+        cursor.execute("""
+            SELECT purchase_date, rate, supplier, voucher_number, qty, unit, source_type
+            FROM purchase_rate_pending_entries
+            WHERE stock_item_name = ? COLLATE NOCASE AND purchase_date >= ?
+        """, (item_name, since_date))
+        pending_entries = []
+        for row in cursor.fetchall():
+            pending_entries.append({
+                "date": row['purchase_date'],
+                "rate": row['rate'],
+                "supplier": row['supplier'] or None,
+                "voucher_number": row['voucher_number'] or None,
+                "qty": row['qty'],
+                "unit": row['unit'] or default_unit,
+                "origin": "repack" if row['source_type'] == 'repack' else "app_post"
+            })
+
+    merged = tally_entries + dedup_pending_against_tally(tally_entries, pending_entries)
+    merged.sort(key=lambda e: e['date'], reverse=True)
+    return merged
+
+def dedup_pending_against_tally(tally_entries: list, pending_entries: list) -> list:
+    """Drops a pending (app-posted) entry once a Tally-confirmed entry for the
+    same item/date/rate exists -- that's the same real purchase, now
+    confirmed. Deliberately loose (no shared key like a Tally GUID exists at
+    app-post time): matches on date + rate only (within 1 paisa), NOT
+    supplier/voucher, since payload.invoice_number is the app's own reference
+    and may not equal Tally's auto-numbered VOUCHERNUMBER. Two genuinely
+    different same-day purchases of the same item at different rates are
+    correctly both kept."""
+    kept = []
+    for pending in pending_entries:
+        is_duplicate = any(
+            t['date'] == pending['date'] and abs((t['rate'] or 0) - (pending['rate'] or 0)) < 0.01
+            for t in tally_entries
+        )
+        if not is_duplicate:
+            kept.append(pending)
+    return kept
+
+def cleanup_purchase_rate_pending_entries(retention_years: int = 2):
+    """Ages out purchase_rate_pending_entries rows that are either older than
+    the retention window or have since been superseded by a confirmed Tally
+    voucher (same dedup rule as get_local_purchase_rate_history's read-time
+    filter, applied here as a hard delete instead). Unlike Tally-confirmed
+    history (which self-prunes because the sync's own date window never
+    re-inserts anything past it), pending rows are never touched by that
+    process and would otherwise grow unboundedly."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"""
+            DELETE FROM purchase_rate_pending_entries
+            WHERE purchase_date < date('now', '-{int(retention_years)} years')
+               OR EXISTS (
+                   SELECT 1 FROM reporting_inventory_entries rie
+                   JOIN reporting_vouchers rv ON rv.id = rie.voucher_id
+                   WHERE rv.voucher_type = 'Purchase'
+                     AND rie.stock_item_name = purchase_rate_pending_entries.stock_item_name COLLATE NOCASE
+                     AND (rv.date = replace(purchase_rate_pending_entries.purchase_date, '-', ''))
+                     AND ABS(rie.rate - purchase_rate_pending_entries.rate) < 0.01
+               )
+        """)
+        deleted = cursor.rowcount
+        conn.commit()
+        return deleted
 
 def clear_and_bulk_insert_godowns(godowns_data):
     with get_db() as db:

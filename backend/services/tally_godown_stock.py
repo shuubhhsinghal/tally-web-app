@@ -6,6 +6,18 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+def is_tally_reachable(timeout: int = 3) -> bool:
+    """Cheap upfront connectivity check (same "micro-ping" pattern
+    tally_sync_worker.py's main loop uses), so a caller doing a best-effort
+    live stock check across multiple items can skip the whole thing in one
+    shot when Tally's offline, instead of paying a separate connection
+    timeout per item."""
+    try:
+        requests.get(TALLY_URL, timeout=timeout)
+        return True
+    except requests.exceptions.RequestException:
+        return False
+
 def get_godown_stock(item_name: str, godown_name: str) -> dict:
     """
     Queries Tally for the exact closing balance and valuation of a given stock item in a specific Godown.
@@ -32,11 +44,17 @@ def get_godown_stock(item_name: str, godown_name: str) -> dict:
     </ENVELOPE>"""
     
     try:
-        response = requests.post(TALLY_URL, data=xml_data.encode('utf-8'), timeout=30)
+        response = requests.post(TALLY_URL, data=xml_data.encode('utf-8'), timeout=10)
         response.raise_for_status()
     except requests.exceptions.RequestException as e:
         logger.error(f"Failed to fetch Godown Summary from Tally: {e}")
-        raise Exception("Could not connect to Tally to verify Godown stock.")
+        # Deliberately re-raised as the original requests exception type (not
+        # wrapped into a generic Exception) so callers can tell "Tally is
+        # unreachable" apart from a genuine data problem (malformed response,
+        # item genuinely has no stock) and treat them differently -- e.g.
+        # repack.py's stock-sufficiency check is best-effort and skips itself
+        # on this specific case rather than blocking the whole operation.
+        raise
 
     # Remove unexpected characters before <ENVELOPE> if any
     raw_xml = response.text

@@ -290,6 +290,119 @@ def fetch_and_store_vouchers(start_date: str, end_date: str, tally_url=TALLY_URL
         print(f"Error fetching reporting vouchers: {e}")
         raise e
 
+_live_purchase_history_cache = {}
+_LIVE_HISTORY_CACHE_TTL_SECONDS = 60
+
+def fetch_live_purchase_history_from_tally(item_name: str, since_date: str, tally_url=TALLY_URL) -> list:
+    """On-demand, per-item purchase history straight from Tally (not the local
+    reporting_vouchers cache) -- used as the primary source for the return-item
+    rate-history picker when Tally is reachable. `since_date` is YYYYMMDD.
+
+    Reuses the exact same VoucherCollection FETCH shape as fetch_and_store_vouchers
+    (deliberately -- that shape is already parser-tested) but fetches the whole
+    company's purchase vouchers in the window and filters to one item in Python,
+    matching the same approach tally_sync_worker.py's master sync already uses
+    for its own per-item rate scan. Never writes to the local DB.
+
+    Raises requests.exceptions.ConnectTimeout/Timeout/ConnectionError on
+    connectivity failure (caller decides whether to fall back to local data),
+    and xml.etree.ElementTree.ParseError on a malformed response (a real data
+    problem, not a connectivity one -- callers should NOT treat this as a
+    reason to silently fall back).
+    """
+    cache_key = item_name.strip().lower()
+    cached = _live_purchase_history_cache.get(cache_key)
+    if cached and (datetime.now().timestamp() - cached['fetched_at']) < _LIVE_HISTORY_CACHE_TTL_SECONDS:
+        return cached['entries']
+
+    today_str = datetime.now().strftime("%Y%m%d")
+    payload = f"""<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>VoucherCollection</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+        <SVFROMDATE>{since_date}</SVFROMDATE>
+        <SVTODATE>{today_str}</SVTODATE>
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          <COLLECTION NAME="VoucherCollection">
+            <TYPE>Voucher</TYPE>
+            <FETCH>GUID, Date, VoucherTypeName, VoucherNumber, PartyLedgerName, Narration, Reference, ReferenceDate, EffectiveDate, IsOptional, IsCancelled</FETCH>
+            <FETCH>AllLedgerEntries.*, AllInventoryEntries.*, AllLedgerEntries.BankAllocations.*</FETCH>
+          </COLLECTION>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
+  </BODY>
+</ENVELOPE>"""
+
+    response = requests.post(tally_url, data=payload, headers={'Content-Type': 'text/xml'}, timeout=10)
+    response.raise_for_status()
+
+    # A malformed/garbled response is a real data problem -- let ET.ParseError
+    # propagate uncaught rather than being mistaken for a connectivity failure.
+    root = ET.fromstring(sanitize_tally_xml(response.text))
+
+    item_name_lower = item_name.strip().lower()
+    entries = []
+    for vch_elem in root.findall('.//VOUCHER'):
+        if vch_elem.findtext('ISOPTIONAL', default='').strip().lower() == 'yes':
+            continue
+        if vch_elem.findtext('ISCANCELLED', default='').strip().lower() == 'yes':
+            continue
+        if vch_elem.findtext('VOUCHERTYPENAME', default='').strip() != 'Purchase':
+            continue
+
+        date_val = vch_elem.findtext('DATE', default='').strip()
+        vch_num = vch_elem.findtext('VOUCHERNUMBER', default='').strip()
+        party_ledger = vch_elem.findtext('PARTYLEDGERNAME', default='').strip()
+
+        for inv_elem in vch_elem.findall('.//ALLINVENTORYENTRIES.LIST'):
+            stock_item = inv_elem.findtext('STOCKITEMNAME', default='').strip()
+            if stock_item.lower() != item_name_lower:
+                continue
+
+            b_qty_str = inv_elem.findtext('BILLEDQTY', default='').strip()
+            qty = None
+            if b_qty_str:
+                match = re.search(r'[-+]?\d*\.\d+|\d+', b_qty_str)
+                if match:
+                    qty = float(match.group())
+
+            rate = _parse_amount(inv_elem.findtext('RATE', default='0'))
+            if not rate and qty:
+                # Tally doesn't always emit a parseable per-line RATE even when
+                # AMOUNT/BILLEDQTY are present (confirmed against real synced
+                # data) -- derive it rather than showing a misleading ₹0.
+                amount = _parse_amount(inv_elem.findtext('AMOUNT', default='0'))
+                rate = round(abs(amount) / qty, 2)
+
+            entries.append({
+                "date": _tally_date_to_iso_str(date_val),
+                "rate": rate,
+                "supplier": party_ledger or None,
+                "voucher_number": vch_num or None,
+                "qty": qty,
+                "unit": None,  # filled in by the caller from stock_items, same as the local-cache path
+                "origin": "tally"
+            })
+
+    entries.sort(key=lambda e: e['date'], reverse=True)
+    _live_purchase_history_cache[cache_key] = {"entries": entries, "fetched_at": datetime.now().timestamp()}
+    return entries
+
+def _tally_date_to_iso_str(raw_date: str) -> str:
+    if raw_date and len(raw_date) == 8 and raw_date.isdigit():
+        return f"{raw_date[0:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
+    return raw_date or ""
+
 async def async_sync_cost_centres(tally_url=TALLY_URL):
     return await asyncio.to_thread(fetch_and_store_cost_centres, tally_url)
 

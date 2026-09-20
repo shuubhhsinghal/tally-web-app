@@ -148,8 +148,9 @@ async def execute_repack(payload: RepackExecuteRequest):
     if payload.dest_qty <= 0:
         raise HTTPException(status_code=400, detail="Quantity must be positive.")
 
-    from backend.database import get_db, queue_operation
-    from backend.services.tally_godown_stock import get_godown_stock
+    from backend.database import get_db, queue_operation, get_purchase_rate
+    from backend.services.tally_godown_stock import get_godown_stock, is_tally_reachable
+    import requests
     import uuid
     import json
 
@@ -178,27 +179,53 @@ async def execute_repack(payload: RepackExecuteRequest):
     if not components:
         raise HTTPException(status_code=400, detail="Product recipe has no components.")
 
-    # 3. Calculate requirements & Fetch live valuation
+    # A single quick reachability check up front, so an offline Tally skips
+    # the stock-sufficiency check for every component in one shot rather than
+    # paying a separate connection timeout per component.
+    tally_reachable = is_tally_reachable()
+
+    # 3. Calculate requirements, using each component's latest purchase rate
     total_source_amount = 0.0
     inventory_out_xml = ""
     component_snapshots = []
-    
+
     from xml.sax.saxutils import escape
     import datetime
 
     for comp in components:
         comp_name = comp["component_item_name"]
         qty_required = payload.dest_qty * comp["quantity_per_finished_unit"]
-        
+
+        # Cost each component at its latest purchase rate (Tally-confirmed,
+        # else this app's own local record) -- the same source used
+        # everywhere else in the app (returns, transfers) -- rather than
+        # Tally's live Godown valuation, which reflects whatever costing
+        # method the item is configured with (Average Cost by default) and
+        # so blends old and new stock instead of reflecting the latest price.
+        comp_rate = get_purchase_rate(comp_name)
+        if comp_rate <= 0:
+            raise HTTPException(status_code=400, detail=f"Could not resolve a purchase rate for '{comp_name}'. Refresh masters or record a purchase for it first.")
+
+        # Stock-sufficiency is still worth checking live against Tally when
+        # possible, but it's best-effort: unlike rate, there's no local cache
+        # of physical stock quantity to fall back on, so if Tally is simply
+        # unreachable we skip this check and trust the recipe rather than
+        # blocking the whole (otherwise fully offline-capable) operation.
+        # Gated on the single upfront reachability ping above so an offline
+        # Tally skips this for every component at once, not one timeout each.
         try:
+            if not tally_reachable:
+                raise requests.exceptions.ConnectionError("Tally is offline (skipped by upfront reachability check).")
             stock = get_godown_stock(comp_name, godown_name)
+            if stock["qty"] < qty_required:
+                raise HTTPException(status_code=400, detail=f"Insufficient stock for '{comp_name}' in Godown '{godown_name}'. Required: {qty_required}, Available: {stock['qty']}")
+        except HTTPException:
+            raise
+        except requests.exceptions.RequestException:
+            pass  # Tally unreachable -- proceed without the stock-sufficiency check.
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
-            
-        if stock["qty"] < qty_required:
-            raise HTTPException(status_code=400, detail=f"Insufficient stock for '{comp_name}' in Godown '{godown_name}'. Required: {qty_required}, Available: {stock['qty']}")
-            
-        comp_rate = stock["rate"]
+
         comp_amount = qty_required * comp_rate
         total_source_amount += comp_amount
 
@@ -230,12 +257,16 @@ async def execute_repack(payload: RepackExecuteRequest):
     
     repack_id = str(uuid.uuid4())
     guid = f"REPACK-{repack_id}"
-    
+    voucher_number = f"RP-{repack_id[:8]}"
+    dest_rate = round(total_source_amount / payload.dest_qty, 2)
+
     if payload.date:
         current_date_tally = payload.date.replace("-", "")
+        purchase_date_iso = payload.date
     else:
         current_date_tally = datetime.datetime.now().strftime('%Y%m%d')
-    
+        purchase_date_iso = datetime.datetime.now().strftime('%Y-%m-%d')
+
     xml_data = f"""<ENVELOPE>
       <HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
       <BODY>
@@ -252,13 +283,14 @@ async def execute_repack(payload: RepackExecuteRequest):
                 <DATE>{current_date_tally}</DATE>
                 <GUID>{guid}</GUID>
                 <VOUCHERTYPENAME>Stock Journal</VOUCHERTYPENAME>
+                <VOUCHERNUMBER>{voucher_number}</VOUCHERNUMBER>
                 <NARRATION>Repack: {payload.dest_qty} {escape(conv['output_unit'])} of {escape(dest_item)} at {escape(payload.store_name)}</NARRATION>
                 <ISINVOICE>No</ISINVOICE>
                 {inventory_out_xml}
                 <INVENTORYENTRIESIN.LIST>
                   <STOCKITEMNAME>{escape(dest_item)}</STOCKITEMNAME>
                   <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
-                  <RATE>{(total_source_amount / payload.dest_qty):.2f}</RATE>
+                  <RATE>{dest_rate:.2f}</RATE>
                   <AMOUNT>-{total_source_amount:.2f}</AMOUNT>
                   <ACTUALQTY> {payload.dest_qty:.4f}</ACTUALQTY>
                   <BILLEDQTY> {payload.dest_qty:.4f}</BILLEDQTY>
@@ -302,11 +334,25 @@ async def execute_repack(payload: RepackExecuteRequest):
         
     # 8. Queue voucher operation (has its own DB connection)
     queue_payload = {"repack_id": repack_id}
-    queue_operation(
+    queue_id = queue_operation(
         operation_type="REPACK_VOUCHER",
         xml_data=xml_data,
         payload=queue_payload,
         description=f"Repack: {payload.dest_qty} {conv['output_unit']} of {dest_item} at {payload.store_name}"
+    )
+
+    # 9. Feed the just-computed cost into the same rate-tracking system real
+    # purchases use, so returning/transferring this item later has a real
+    # rate to work from instead of "no rate found" -- and so this cost shows
+    # up in the item's rate-history picker. Tied to queue_id like every other
+    # rate record, so deleting this queued voucher (dashboard.py's
+    # delete_activity) automatically un-records it too.
+    from backend.database import record_purchase_rate, record_pending_purchase_rate_entry
+    record_purchase_rate(dest_item.lower(), dest_rate, "Repack", purchase_date_iso, source_queue_id=queue_id)
+    record_pending_purchase_rate_entry(
+        dest_item.lower(), rate=dest_rate, purchase_date=purchase_date_iso, supplier=None,
+        voucher_number=guid, qty=payload.dest_qty, unit=conv['output_unit'],
+        source_queue_id=queue_id, source_type='repack'
     )
 
     return {"status": "success", "repack_id": repack_id, "message": f"Repack transaction queued. Value: ₹{total_source_amount:.2f}"}
