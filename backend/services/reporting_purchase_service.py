@@ -1,4 +1,150 @@
+import json
 from backend.database import get_db
+
+# Purchases are posted from three different places, each with its own
+# offline_queue description prefix and payload shape -- unlike Sales, there's
+# no single flat "amount" field to sum:
+#   - Accounting mode (backend/routers/purchase.py): "Purchase Invoice: ..." --
+#     a flat `amount` field.
+#   - Item Wise mode, main invoice (backend/routers/purchase_item.py): "Purchase
+#     Item Invoice: ..." -- no flat amount; it's sum(items[].amount) + cgst +
+#     sgst + igst + rounding_off. (When GST is included in the item rate
+#     rather than shown separately, cgst/sgst/igst are already 0 in the
+#     payload, so this formula is correct either way.)
+#   - Item Wise mode, return (backend/routers/purchase_item.py): "Purchase
+#     Return (Debit Note): ..." -- reuses the ENTIRE original invoice's
+#     payload (not its own), so the actual return items live under
+#     payload['adjustment']['items'], each with its own qty/rate. A return
+#     reduces net purchases, matching the confirmed-side SUM(amount * -1)
+#     sign convention for a synced Debit Note.
+_PURCHASE_QUEUE_DESCRIPTION_PATTERNS = (
+    "Purchase Invoice:%",
+    "Purchase Item Invoice:%",
+    "Purchase Return (Debit Note):%",
+)
+
+def _compute_purchase_queue_amount(description: str, payload: dict):
+    """Returns (signed_amount, store_or_None) for one purchase-related
+    offline_queue row's payload, or (None, None) if it doesn't match any of
+    the three known description patterns above."""
+    if description.startswith("Purchase Return (Debit Note):"):
+        adjustment = payload.get('adjustment') or {}
+        items = adjustment.get('items') or []
+        amount = sum(float(i.get('qty') or 0) * float(i.get('rate') or 0) for i in items)
+        return -amount, adjustment.get('store')
+    if description.startswith("Purchase Invoice:"):
+        return float(payload.get('amount') or 0), payload.get('cost_center')
+    if description.startswith("Purchase Item Invoice:"):
+        items = payload.get('items') or []
+        items_total = sum(float(i.get('amount') or 0) for i in items)
+        gst_total = (
+            float(payload.get('cgst') or 0) + float(payload.get('sgst') or 0)
+            + float(payload.get('igst') or 0) + float(payload.get('rounding_off') or 0)
+        )
+        return items_total + gst_total, payload.get('cost_center')
+    return None, None
+
+def get_unsynced_purchases(start_date: str, end_date: str, cost_centre: str = None) -> dict:
+    """Purchase entries (and returns) posted from this app but not yet
+    reflected in the report above -- mirrors get_unsynced_sales, see that
+    docstring for the general rationale. pending_amount/failed_amount are
+    NET signed totals (a pending return reduces the total, same as a synced
+    one would)."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        placeholders = " OR ".join(["description LIKE ?"] * len(_PURCHASE_QUEUE_DESCRIPTION_PATTERNS))
+        cursor.execute(f"""
+            SELECT payload, status, description FROM offline_queue
+            WHERE operation_type = 'POST_VOUCHER' AND ({placeholders})
+              AND status IN ('PENDING', 'FAILED')
+        """, list(_PURCHASE_QUEUE_DESCRIPTION_PATTERNS))
+        rows = cursor.fetchall()
+
+    pending_count = failed_count = 0
+    pending_amount = failed_amount = 0.0
+    for row in rows:
+        try:
+            payload = json.loads(row['payload']) if row['payload'] else {}
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+        date = payload.get('tally_date')
+        if not date or not (start_date <= date <= end_date):
+            continue
+
+        amount, store = _compute_purchase_queue_amount(row['description'], payload)
+        if amount is None:
+            continue
+
+        if cost_centre:
+            if cost_centre == "Unallocated":
+                if store:
+                    continue
+            elif store != cost_centre:
+                continue
+
+        if row['status'] == 'FAILED':
+            failed_count += 1
+            failed_amount += amount
+        else:
+            pending_count += 1
+            pending_amount += amount
+
+    return {
+        "pending_count": pending_count,
+        "pending_amount": round(pending_amount, 2),
+        "failed_count": failed_count,
+        "failed_amount": round(failed_amount, 2),
+    }
+
+def get_pending_purchases_trend(start_date: str, end_date: str, cost_centre: str = None) -> list[dict]:
+    """The subset of get_unsynced_purchases' PENDING entries that are safe to
+    fold into the report's own figures -- same per-date/per-store shape as
+    get_purchases_trend, and the same delivery_uncertain exclusion rationale
+    as get_pending_sales_trend (backend/services/reporting_sales_service.py)."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        placeholders = " OR ".join(["description LIKE ?"] * len(_PURCHASE_QUEUE_DESCRIPTION_PATTERNS))
+        cursor.execute(f"""
+            SELECT payload, description FROM offline_queue
+            WHERE operation_type = 'POST_VOUCHER' AND ({placeholders})
+              AND status = 'PENDING'
+        """, list(_PURCHASE_QUEUE_DESCRIPTION_PATTERNS))
+        rows = cursor.fetchall()
+
+    trend_dict = {}
+    for row in rows:
+        try:
+            payload = json.loads(row['payload']) if row['payload'] else {}
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+        if payload.get('delivery_uncertain') is True:
+            continue
+
+        date = payload.get('tally_date')
+        if not date or not (start_date <= date <= end_date):
+            continue
+
+        amount, store_raw = _compute_purchase_queue_amount(row['description'], payload)
+        if amount is None:
+            continue
+        store = store_raw or 'Unallocated'
+
+        if cost_centre:
+            if cost_centre == "Unallocated":
+                if store != 'Unallocated':
+                    continue
+            elif store != cost_centre:
+                continue
+
+        if date not in trend_dict:
+            trend_dict[date] = {"date": date, "Combined": 0.0, "Combined_invoices": 0}
+        trend_dict[date][store] = trend_dict[date].get(store, 0.0) + amount
+        trend_dict[date]["Combined"] += amount
+        trend_dict[date]["Combined_invoices"] += 1
+
+    return list(trend_dict.values())
 
 def calculate_purchases(start_date: str, end_date: str, cost_centre: str = None) -> float:
     """
@@ -288,9 +434,7 @@ def get_item_purchase_analysis(start_date: str, end_date: str, page: int = 1, li
             uom_map = {row['name'].lower(): row['unit'] for row in cursor.fetchall()}
             for item in items:
                 item['uom'] = uom_map.get(item['item_name'].lower(), "")
-                if 'uom' in item: # we used MAX(rie.actual_qty) as uom, which was wrong. Let's delete it.
-                    pass
-        
+
         return {
             "items": items,
             "total_count": total_items,
@@ -373,16 +517,20 @@ def get_supplier_purchase_analysis(start_date: str, end_date: str, page: int = 1
     # We need a subquery or a smart join to aggregate correctly without exploding due to multiple items.
     # Actually, it's easier to compute the net purchases per voucher first, then group by supplier.
     
+    # cost_centre is a normal FastAPI query param -- string-interpolating it
+    # directly (as this used to do) is a SQL-injection-shaped pattern even
+    # though it's not exploitable via the router today. Bound as ordinary
+    # parameters instead, same as the rest of this query.
     data_query = f"""
         WITH VoucherPurchases AS (
-            SELECT 
+            SELECT
                 rv.id as voucher_id,
                 rv.party_ledger_name,
                 COALESCE(SUM(
-                    CASE 
-                        WHEN rca.id IS NOT NULL AND '{cost_centre or ""}' != 'Unallocated' AND ('{cost_centre or ""}' = '' OR rca.cost_centre_name = '{cost_centre or ""}') THEN rca.amount * -1
-                        WHEN '{cost_centre or ""}' = 'Unallocated' AND rca.id IS NULL THEN rle.amount * -1
-                        WHEN '{cost_centre or ""}' = '' AND rca.id IS NULL THEN rle.amount * -1
+                    CASE
+                        WHEN rca.id IS NOT NULL AND ? != 'Unallocated' AND (? = '' OR rca.cost_centre_name = ?) THEN rca.amount * -1
+                        WHEN ? = 'Unallocated' AND rca.id IS NULL THEN rle.amount * -1
+                        WHEN ? = '' AND rca.id IS NULL THEN rle.amount * -1
                         ELSE 0
                     END
                 ), 0.0) as voucher_net_purchases
@@ -394,7 +542,7 @@ def get_supplier_purchase_analysis(start_date: str, end_date: str, page: int = 1
               AND l.parent = 'Purchase Accounts'
             GROUP BY rv.id, rv.party_ledger_name
         )
-        SELECT 
+        SELECT
             COALESCE(party_ledger_name, 'Unknown') as supplier_name,
             COUNT(DISTINCT voucher_id) as vouchers_count,
             SUM(voucher_net_purchases) as net_purchases
@@ -404,18 +552,17 @@ def get_supplier_purchase_analysis(start_date: str, end_date: str, page: int = 1
         {order_clause}
         LIMIT ? OFFSET ?
     """
-    
+
     with get_db() as conn:
         cursor = conn.cursor()
-        
+
         cursor.execute(count_query, params)
         total_items = cursor.fetchone()['total']
-        
-        data_params = params + params + [limit, offset] # params are used twice (once in count, twice in data_query due to base_query inside CTE)
-        # Wait, the data query has {base_query} inside the CTE, so it takes `params`. 
-        # So data_params should be just `params + [limit, offset]`. 
-        data_params = params + [limit, offset]
-        
+
+        cost_centre_val = cost_centre or ""
+        case_params = [cost_centre_val, cost_centre_val, cost_centre_val, cost_centre_val, cost_centre_val]
+        data_params = case_params + params + [limit, offset]
+
         cursor.execute(data_query, data_params)
         items = [dict(row) for row in cursor.fetchall()]
         
@@ -485,18 +632,22 @@ def get_purchase_bills(start_date: str, end_date: str, cost_centre: str = None, 
     elif sort_by == "value_asc":
         order_clause = "ORDER BY net_purchases ASC"
         
+    # cost_centre is a normal FastAPI query param -- string-interpolating it
+    # directly (as this used to do) is a SQL-injection-shaped pattern even
+    # though it's not exploitable via the router today. Bound as ordinary
+    # parameters instead, same as the rest of this query.
     data_query = f"""
         WITH VoucherPurchases AS (
-            SELECT 
+            SELECT
                 rv.id as voucher_id,
                 rv.date,
                 rv.voucher_number,
                 rv.party_ledger_name as supplier_name,
                 COALESCE(SUM(
-                    CASE 
-                        WHEN rca.id IS NOT NULL AND '{cost_centre or ""}' != 'Unallocated' AND ('{cost_centre or ""}' = '' OR rca.cost_centre_name = '{cost_centre or ""}') THEN rca.amount * -1
-                        WHEN '{cost_centre or ""}' = 'Unallocated' AND rca.id IS NULL THEN rle.amount * -1
-                        WHEN '{cost_centre or ""}' = '' AND rca.id IS NULL THEN rle.amount * -1
+                    CASE
+                        WHEN rca.id IS NOT NULL AND ? != 'Unallocated' AND (? = '' OR rca.cost_centre_name = ?) THEN rca.amount * -1
+                        WHEN ? = 'Unallocated' AND rca.id IS NULL THEN rle.amount * -1
+                        WHEN ? = '' AND rca.id IS NULL THEN rle.amount * -1
                         ELSE 0
                     END
                 ), 0.0) as net_purchases
@@ -508,33 +659,35 @@ def get_purchase_bills(start_date: str, end_date: str, cost_centre: str = None, 
               AND l.parent = 'Purchase Accounts'
             GROUP BY rv.id
         )
-        SELECT 
+        SELECT
             voucher_id,
             date,
             voucher_number,
             COALESCE(supplier_name, 'Unknown') as supplier_name,
             net_purchases,
-            '{cost_centre or "Combined"}' as store_name
+            ? as store_name
         FROM VoucherPurchases
         WHERE net_purchases != 0
         {order_clause}
         LIMIT ? OFFSET ?
     """
-    
+
     with get_db() as conn:
         cursor = conn.cursor()
-        
+
         cursor.execute(count_query, params)
         total_items = cursor.fetchone()['total']
-        
-        data_params = params + [limit, offset]
-        
+
+        cost_centre_val = cost_centre or ""
+        case_params = [cost_centre_val, cost_centre_val, cost_centre_val, cost_centre_val, cost_centre_val]
+        data_params = case_params + params + [cost_centre or "Combined", limit, offset]
+
         cursor.execute(data_query, data_params)
         items = [dict(row) for row in cursor.fetchall()]
-        
+
         for item in items:
             item['net_purchases'] = round(item['net_purchases'], 2) if item['net_purchases'] else 0.0
-        
+
         return {
             "bills": items,
             "total_count": total_items,

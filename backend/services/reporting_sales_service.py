@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 from backend.database import get_db
@@ -36,6 +37,109 @@ def calculate_sales(start_date: str, end_date: str, cost_centre: str = None) -> 
         cursor = conn.cursor()
         cursor.execute(query, params)
         return cursor.fetchone()['net_sales']
+
+def get_unsynced_sales(start_date: str, end_date: str, cost_centre: str = None) -> dict:
+    """Sales entries posted from this app but not yet reflected in the report
+    above -- either still sitting in the local offline queue (Tally was
+    unreachable / hasn't been re-synced yet) or that Tally itself rejected.
+    The reporting pipeline only ever reads Tally's own confirmed vouchers
+    (via the periodic reporting sync), so a queued-but-unsynced sale is
+    otherwise invisible here with no indication anything is missing."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT payload, status FROM offline_queue
+            WHERE operation_type = 'POST_VOUCHER' AND description LIKE 'Sales:%'
+              AND status IN ('PENDING', 'FAILED')
+        """)
+        rows = cursor.fetchall()
+
+    pending_count = failed_count = 0
+    pending_amount = failed_amount = 0.0
+    for row in rows:
+        try:
+            payload = json.loads(row['payload']) if row['payload'] else {}
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+        date = payload.get('tally_date')
+        if not date or not (start_date <= date <= end_date):
+            continue
+
+        if cost_centre:
+            if cost_centre == "Unallocated":
+                if payload.get('cost_center'):
+                    continue
+            elif payload.get('cost_center') != cost_centre:
+                continue
+
+        amount = payload.get('amount') or 0.0
+        if row['status'] == 'FAILED':
+            failed_count += 1
+            failed_amount += amount
+        else:
+            pending_count += 1
+            pending_amount += amount
+
+    return {
+        "pending_count": pending_count,
+        "pending_amount": round(pending_amount, 2),
+        "failed_count": failed_count,
+        "failed_amount": round(failed_amount, 2),
+    }
+
+def get_pending_sales_trend(start_date: str, end_date: str, cost_centre: str = None) -> list[dict]:
+    """The subset of get_unsynced_sales' PENDING entries that are safe to
+    actually fold into the report's own figures -- same per-date/per-store
+    shape as get_sales_trend, so the caller can merge the two directly.
+
+    Deliberately excludes any row flagged delivery_uncertain (an ambiguous
+    Tally timeout -- the voucher may already exist in Tally with no local way
+    to tell), since blending an uncertain one into a REPORT figure risks a
+    real double-count once the next sync confirms it independently as a
+    Tally voucher. Those still count toward get_unsynced_sales' warning
+    banner; they just aren't added to the numbers here."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT payload FROM offline_queue
+            WHERE operation_type = 'POST_VOUCHER' AND description LIKE 'Sales:%'
+              AND status = 'PENDING'
+        """)
+        rows = cursor.fetchall()
+
+    trend_dict = {}
+    for row in rows:
+        try:
+            payload = json.loads(row['payload']) if row['payload'] else {}
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+        if payload.get('delivery_uncertain') is True:
+            continue
+
+        date = payload.get('tally_date')
+        if not date or not (start_date <= date <= end_date):
+            continue
+
+        store = payload.get('cost_center') or 'Unallocated'
+
+        if cost_centre:
+            if cost_centre == "Unallocated":
+                if store != 'Unallocated':
+                    continue
+            elif store != cost_centre:
+                continue
+
+        amount = payload.get('amount') or 0.0
+
+        if date not in trend_dict:
+            trend_dict[date] = {"date": date, "Combined": 0.0, "Combined_invoices": 0}
+        trend_dict[date][store] = trend_dict[date].get(store, 0.0) + amount
+        trend_dict[date]["Combined"] += amount
+        trend_dict[date]["Combined_invoices"] += 1
+
+    return list(trend_dict.values())
 
 def get_store_comparisons(start_date: str, end_date: str) -> list[dict]:
     query = """
@@ -112,18 +216,24 @@ def get_sales_trend(start_date: str, end_date: str, cost_centre: str = None) -> 
 
 def get_sales_bills(start_date: str, end_date: str, cost_centre: str = None, page: int = 1, limit: int = 50, sort_by: str = "date_desc") -> dict:
     offset = (page - 1) * limit
-    
-    base_query = """
-        FROM reporting_vouchers rv
+
+    # Deliberately kept separate from the "FROM reporting_vouchers rv" clause
+    # (unlike an earlier version of this function, which bundled them into one
+    # "base_query" string and then tried to insert extra JOINs into data_query
+    # AFTER that string -- i.e. after its own WHERE -- which is invalid SQL.
+    # This endpoint has no frontend caller today so that syntax error was
+    # never actually hit; splitting FROM and WHERE like get_purchase_bills
+    # already correctly does avoids reintroducing it.
+    where_clause = """
         WHERE CAST(rv.date AS INTEGER) >= CAST(? AS INTEGER)
           AND CAST(rv.date AS INTEGER) <= CAST(? AS INTEGER)
           AND rv.voucher_type IN ('Sales', 'Credit Note', 'Sales Return')
     """
     params = [start_date, end_date]
-    
+
     if cost_centre:
         if cost_centre == "Unallocated":
-            base_query += """ 
+            where_clause += """
                 AND EXISTS (
                     SELECT 1 FROM reporting_ledger_entries rle
                     JOIN ledgers l ON LOWER(rle.ledger_name) = LOWER(l.name)
@@ -132,7 +242,7 @@ def get_sales_bills(start_date: str, end_date: str, cost_centre: str = None, pag
                 )
             """
         else:
-            base_query += """
+            where_clause += """
                 AND EXISTS (
                     SELECT 1 FROM reporting_ledger_entries rle
                     JOIN ledgers l ON LOWER(rle.ledger_name) = LOWER(l.name)
@@ -142,15 +252,15 @@ def get_sales_bills(start_date: str, end_date: str, cost_centre: str = None, pag
             """
             params.append(cost_centre)
     else:
-        base_query += """
+        where_clause += """
             AND EXISTS (
                 SELECT 1 FROM reporting_ledger_entries rle
                 JOIN ledgers l ON LOWER(rle.ledger_name) = LOWER(l.name)
                 WHERE rle.voucher_id = rv.id AND l.parent = 'Sales Accounts'
             )
         """
-        
-    count_query = f"SELECT COUNT(DISTINCT rv.id) as total {base_query}"
+
+    count_query = f"SELECT COUNT(DISTINCT rv.id) as total FROM reporting_vouchers rv {where_clause}"
     
     order_clause = "ORDER BY date DESC"
     if sort_by == "date_asc":
@@ -160,49 +270,56 @@ def get_sales_bills(start_date: str, end_date: str, cost_centre: str = None, pag
     elif sort_by == "value_asc":
         order_clause = "ORDER BY net_sales ASC"
         
+    # cost_centre is a normal FastAPI query param -- string-interpolating it
+    # directly (as this used to do) is a SQL-injection-shaped pattern even
+    # though it's not exploitable via the router today. Bound as ordinary
+    # parameters instead, same as the rest of this query.
     data_query = f"""
         WITH VoucherSales AS (
-            SELECT 
+            SELECT
                 rv.id as voucher_id,
                 rv.date,
                 rv.voucher_number,
                 rv.party_ledger_name as customer_name,
                 COALESCE(SUM(
-                    CASE 
-                        WHEN rca.id IS NOT NULL AND '{cost_centre or ""}' != 'Unallocated' AND ('{cost_centre or ""}' = '' OR rca.cost_centre_name = '{cost_centre or ""}') THEN rca.amount
-                        WHEN '{cost_centre or ""}' = 'Unallocated' AND rca.id IS NULL THEN rle.amount
-                        WHEN '{cost_centre or ""}' = '' AND rca.id IS NULL THEN rle.amount
+                    CASE
+                        WHEN rca.id IS NOT NULL AND ? != 'Unallocated' AND (? = '' OR rca.cost_centre_name = ?) THEN rca.amount
+                        WHEN ? = 'Unallocated' AND rca.id IS NULL THEN rle.amount
+                        WHEN ? = '' AND rca.id IS NULL THEN rle.amount
                         ELSE 0
                     END
                 ), 0.0) as net_sales
-            {base_query}
+            FROM reporting_vouchers rv
             JOIN reporting_ledger_entries rle ON rv.id = rle.voucher_id
             JOIN ledgers l ON LOWER(rle.ledger_name) = LOWER(l.name)
             LEFT JOIN reporting_cost_centre_allocations rca ON rle.id = rca.ledger_entry_id
-            WHERE l.parent = 'Sales Accounts'
+            {where_clause}
+              AND l.parent = 'Sales Accounts'
             GROUP BY rv.id
         )
-        SELECT 
+        SELECT
             voucher_id,
             date,
             voucher_number,
             COALESCE(customer_name, 'Unknown') as customer_name,
             net_sales,
-            '{cost_centre or "Combined"}' as store_name
+            ? as store_name
         FROM VoucherSales
         WHERE net_sales != 0
         {order_clause}
         LIMIT ? OFFSET ?
     """
-    
+
     with get_db() as conn:
         cursor = conn.cursor()
-        
+
         cursor.execute(count_query, params)
         total_items = cursor.fetchone()['total']
-        
-        data_params = params + [limit, offset]
-        
+
+        cost_centre_val = cost_centre or ""
+        case_params = [cost_centre_val, cost_centre_val, cost_centre_val, cost_centre_val, cost_centre_val]
+        data_params = case_params + params + [cost_centre or "Combined", limit, offset]
+
         cursor.execute(data_query, data_params)
         items = [dict(row) for row in cursor.fetchall()]
         
@@ -252,22 +369,10 @@ def get_sales_bill_details(voucher_id: int) -> dict:
             
         voucher['store_name'] = ", ".join(ccs) if ccs else "Unknown"
         
-        # Items
-        cursor.execute("""
-            SELECT 
-                rie.stock_item_name as item_name,
-                (rie.billed_qty * CASE WHEN rie.amount < 0 THEN 1 WHEN rie.amount > 0 THEN -1 ELSE 1 END) as quantity,
-                (rie.amount * -1) as value
-            FROM reporting_inventory_entries rie
-            WHERE rie.voucher_id = ?
-        """, [voucher_id])
-        items = [dict(row) for row in cursor.fetchall()]
-        
-        # Wait, for Sales, amount < 0 (Debit) means Sales Return! (Because Sales is Credit / positive amount).
-        # Let's fix the quantity sign for Sales.
-        # If amount < 0 (Debit), it's a Return -> quantity should be negative.
-        # If amount > 0 (Credit), it's a Sale -> quantity should be positive.
-        # Let's redo items fetch for Sales.
+        # Items. For Sales, amount > 0 (Credit) is a normal sale (positive
+        # quantity); amount < 0 (Debit) is a Sales Return (negative quantity)
+        # -- the opposite convention from Purchases, since Sales posts as a
+        # credit and a return as a debit.
         cursor.execute("""
             SELECT 
                 rie.stock_item_name as item_name,

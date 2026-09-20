@@ -260,6 +260,12 @@ export default function SupplierLedgerPage() {
 
             {data && (
                 <>
+                    {data.is_data_complete === false && (
+                        <div className="bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-400 p-4 rounded-xl text-sm border border-amber-100 dark:border-amber-900/30">
+                            Reporting data for this period may be incomplete -- run a Tally sync to make sure everything is up to date.
+                        </div>
+                    )}
+
                     <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-white dark:bg-gray-800 p-6 rounded-xl border border-gray-200 dark:border-gray-700 shadow-sm">
                         <div>
                             <h1 className="text-2xl font-bold text-gray-900 dark:text-white">{supplierName}</h1>
@@ -271,11 +277,21 @@ export default function SupplierLedgerPage() {
                             <div>
                                 <p className="text-xs text-gray-500 dark:text-gray-400 uppercase font-medium">Opening Balance</p>
                                 <p className="text-lg font-bold text-gray-900 dark:text-white">{formatCurrency(data.period_opening)}</p>
+                                {Math.abs(data.pending_opening_amount || 0) > 0.005 && (
+                                    <p className="text-[11px] text-amber-600 dark:text-amber-400 mt-0.5">
+                                        incl. {formatCurrency(Math.abs(data.pending_opening_amount))} pending Tally confirmation
+                                    </p>
+                                )}
                             </div>
                             <div className="hidden sm:block w-px bg-gray-200 dark:bg-gray-700"></div>
                             <div>
                                 <p className="text-xs text-gray-500 dark:text-gray-400 uppercase font-medium">Closing Balance</p>
                                 <p className="text-lg font-bold text-blue-600 dark:text-blue-400">{formatCurrency(data.period_closing)}</p>
+                                {Math.abs(data.pending_amount || 0) > 0.005 && (
+                                    <p className="text-[11px] text-amber-600 dark:text-amber-400 mt-0.5">
+                                        incl. {formatCurrency(Math.abs(data.pending_amount))} pending Tally confirmation
+                                    </p>
+                                )}
                             </div>
                         </div>
                     </div>
@@ -301,12 +317,17 @@ export default function SupplierLedgerPage() {
                                         <td className="px-6 py-4 text-gray-500 dark:text-gray-400 font-medium" colSpan="6">Opening Balance</td>
                                         <td className="px-6 py-4 text-right font-medium text-gray-900 dark:text-white">
                                             {formatCurrency(data.period_opening)}
+                                            {Math.abs(data.pending_opening_amount || 0) > 0.005 && (
+                                                <p className="text-[10px] font-normal text-amber-600 dark:text-amber-400 mt-0.5">
+                                                    incl. {formatCurrency(Math.abs(data.pending_opening_amount))} pending
+                                                </p>
+                                            )}
                                         </td>
                                         <td></td>
                                     </tr>
                                     
                                     {data.movements.map((m, idx) => (
-                                        <tr key={idx} className="hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors">
+                                        <tr key={idx} className={`hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors ${m.is_pending ? 'bg-amber-50/50 dark:bg-amber-900/10' : ''}`}>
                                             <td className="px-6 py-4 whitespace-nowrap text-gray-900 dark:text-white">
                                                 {formatDateDisplay(m.date)}
                                             </td>
@@ -318,6 +339,11 @@ export default function SupplierLedgerPage() {
                                                 }`}>
                                                     {m.voucher_type}
                                                 </span>
+                                                {m.is_pending && (
+                                                    <span className="inline-flex items-center px-2 py-0.5 ml-1 rounded text-xs font-medium bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300">
+                                                        Pending
+                                                    </span>
+                                                )}
                                             </td>
                                             <td className="px-6 py-4 text-gray-600 dark:text-gray-400">
                                                 {m.voucher_number || '-'}
@@ -335,12 +361,16 @@ export default function SupplierLedgerPage() {
                                                 {formatCurrency(m.running_balance)}
                                             </td>
                                             <td className="px-6 py-4 text-center">
-                                                <button 
-                                                    onClick={() => fetchVoucherDetails(m.voucher_id, m.voucher_type)}
-                                                    className="text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300 p-1"
-                                                >
-                                                    <Eye className="w-4 h-4 inline" />
-                                                </button>
+                                                {m.voucher_id ? (
+                                                    <button
+                                                        onClick={() => fetchVoucherDetails(m.voucher_id, m.voucher_type)}
+                                                        className="text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300 p-1"
+                                                    >
+                                                        <Eye className="w-4 h-4 inline" />
+                                                    </button>
+                                                ) : (
+                                                    <span className="text-gray-300 dark:text-gray-600 text-xs" title="Not yet synced to Tally">--</span>
+                                                )}
                                             </td>
                                         </tr>
                                     ))}

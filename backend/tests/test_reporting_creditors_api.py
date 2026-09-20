@@ -30,11 +30,13 @@ def test_get_all_creditors_endpoint():
     response = client.get("/api/reporting/creditors?start_date=2026-07-01&end_date=2026-07-31")
     assert response.status_code == 200
     data = response.json()
-    assert len(data) == 1
-    assert data[0]['supplier_name'] == 'Supplier API'
-    assert data[0]['period_opening'] == 1000.0
-    assert data[0]['purchases'] == 500.0
-    assert data[0]['period_closing'] == 1500.0
+    assert "is_data_complete" in data
+    creditors = data['creditors']
+    assert len(creditors) == 1
+    assert creditors[0]['supplier_name'] == 'Supplier API'
+    assert creditors[0]['period_opening'] == 1000.0
+    assert creditors[0]['purchases'] == 500.0
+    assert creditors[0]['period_closing'] == 1500.0
 
 def test_get_creditor_ledger_endpoint():
     response = client.get("/api/reporting/creditors/Supplier API?start_date=2026-07-01&end_date=2026-07-31")

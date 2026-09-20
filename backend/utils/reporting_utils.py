@@ -103,6 +103,41 @@ def get_previous_month_period(start_month: str, end_month: str) -> tuple[str, st
     
     return prev_s_dt.strftime("%Y-%m"), prev_e_dt.strftime("%Y-%m")
 
+def merge_trend_rows(base_trend: list[dict], extra_trend: list[dict]) -> list[dict]:
+    """Adds extra_trend's per-date/per-store amounts on top of base_trend's
+    (both in the {date, Combined, Combined_invoices, [store]: amount} shape
+    used by get_sales_trend/get_purchases_trend and their pending-queue
+    counterparts), so queued-but-unsynced amounts show up on the correct
+    day/store alongside Tally-confirmed ones. Shared between the Sales and
+    Purchases reports rather than duplicated per report."""
+    merged = {row['date']: dict(row) for row in base_trend}
+    for row in extra_trend:
+        date = row['date']
+        if date not in merged:
+            merged[date] = {"date": date, "Combined": 0.0, "Combined_invoices": 0}
+        for key, value in row.items():
+            if key == 'date':
+                continue
+            merged[date][key] = merged[date].get(key, 0.0) + value
+    return sorted(merged.values(), key=lambda r: r['date'])
+
+def merge_pending_into_store_comparison(store_comparison: list[dict], pending_trend: list[dict]) -> list[dict]:
+    """Adds a pending trend's per-store totals (summed across all its dates)
+    into an existing store_comparison list ({store_name, net_sales} or
+    {store_name, net_purchases} shaped rows), so a store with amounts still
+    stuck in the queue isn't left out of the store-wise breakdown. The
+    caller's own value key (net_sales/net_purchases) is preserved."""
+    if not store_comparison and not pending_trend:
+        return []
+    value_key = next((k for k in store_comparison[0].keys() if k != 'store_name'), 'net_sales') if store_comparison else 'net_sales'
+    totals = {row['store_name']: row[value_key] for row in store_comparison}
+    for row in pending_trend:
+        for key, value in row.items():
+            if key in ('date', 'Combined', 'Combined_invoices'):
+                continue
+            totals[key] = totals.get(key, 0.0) + value
+    return [{"store_name": name, value_key: amount} for name, amount in totals.items()]
+
 def get_month_boundaries(year_month: str) -> tuple[str, str]:
     import calendar
     dt = datetime.strptime(year_month, "%Y-%m")

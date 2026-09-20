@@ -136,11 +136,17 @@ export default function PLReport() {
     const renderKPICard = (title, value, prevValue) => {
         const hasValue = value !== null && value !== undefined;
         let changePct = null;
-        
+
         if (hasValue && prevValue !== null && prevValue !== undefined) {
             const diff = value - prevValue;
             changePct = prevValue !== 0 ? (diff / Math.abs(prevValue)) * 100 : (value > 0 ? 100 : 0);
         }
+
+        // getActivePreviousData() only ever returns null because the previous
+        // period's own Tally sync is incomplete (P&L always has *a* previous
+        // month range to compare against) -- say so explicitly instead of
+        // just omitting the comparison with no explanation.
+        const previousIncomplete = changePct === null && data?.previous_period?.is_data_complete === false;
 
         return (
             <div className="bg-white dark:bg-gray-800 p-6 rounded-2xl border border-gray-200 dark:border-gray-700 shadow-sm relative overflow-hidden group">
@@ -151,17 +157,20 @@ export default function PLReport() {
                 {changePct !== null && (
                     <div className="mt-4 flex items-center gap-2">
                         <span className={`flex items-center text-sm font-semibold px-2 py-1 rounded-lg ${
-                            changePct > 0 ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' : 
-                            changePct < 0 ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' : 
+                            changePct > 0 ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' :
+                            changePct < 0 ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' :
                             'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-400'
                         }`}>
-                            {changePct > 0 ? <TrendingUp className="w-3 h-3 mr-1" /> : 
-                             changePct < 0 ? <TrendingDown className="w-3 h-3 mr-1" /> : 
+                            {changePct > 0 ? <TrendingUp className="w-3 h-3 mr-1" /> :
+                             changePct < 0 ? <TrendingDown className="w-3 h-3 mr-1" /> :
                              <RefreshCw className="w-3 h-3 mr-1" />}
                             {changePct > 0 ? '+' : ''}{changePct.toFixed(1)}%
                         </span>
                         <span className="text-xs font-medium text-gray-400">vs Prev Period</span>
                     </div>
+                )}
+                {previousIncomplete && (
+                    <p className="mt-4 text-xs italic text-gray-400">vs Prev Period unavailable -- that period's Tally sync is incomplete</p>
                 )}
             </div>
         );
@@ -245,7 +254,9 @@ export default function PLReport() {
                 )}
                 
                 {loading && !data && (
-                    <div className="text-center py-12 text-gray-500">Loading P&L...</div>
+                    <div className="flex justify-center items-center py-12">
+                        <RefreshCw className="h-8 w-8 text-blue-500 animate-spin" />
+                    </div>
                 )}
 
                 {activeData && (

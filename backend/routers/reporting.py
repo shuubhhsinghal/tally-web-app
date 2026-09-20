@@ -1,9 +1,9 @@
 from fastapi import APIRouter, HTTPException, Query
 from typing import Optional
 from backend.services.tally_reporting_sync import async_sync_cost_centres, async_sync_vouchers
-from backend.services.reporting_sales_service import calculate_sales, get_sales_trend, get_store_comparisons
-from backend.services.reporting_purchase_service import calculate_purchases, get_purchases_trend, get_store_comparisons as get_purchase_store_comparisons, get_item_purchase_analysis
-from backend.utils.reporting_utils import check_data_completeness, get_previous_period
+from backend.services.reporting_sales_service import calculate_sales, get_sales_trend, get_store_comparisons, get_unsynced_sales, get_pending_sales_trend
+from backend.services.reporting_purchase_service import calculate_purchases, get_purchases_trend, get_store_comparisons as get_purchase_store_comparisons, get_item_purchase_analysis, get_unsynced_purchases, get_pending_purchases_trend
+from backend.utils.reporting_utils import check_data_completeness, get_previous_period, merge_trend_rows, merge_pending_into_store_comparison
 from backend.database import get_db
 
 router = APIRouter(prefix="/reporting", tags=["Reporting"])
@@ -102,36 +102,56 @@ async def get_sales_report(
 ):
     try:
         is_complete = check_data_completeness(start_date, end_date)
-        
+
         prev_s, prev_e = get_previous_period(start_date, end_date)
         is_prev_complete = check_data_completeness(prev_s, prev_e)
-        
-        net_sales = calculate_sales(start_date, end_date, cost_centre)
-        
+
+        net_sales_confirmed = calculate_sales(start_date, end_date, cost_centre)
+
+        # Sales still sitting in the local offline queue (Tally unreachable or
+        # not yet re-synced) are otherwise invisible here, since this report
+        # only reads Tally's own confirmed vouchers -- fold the safe subset
+        # (see get_pending_sales_trend's docstring for what's excluded and why)
+        # into the real figures so "Total Sales" reflects what's actually
+        # happened, not just what Tally has confirmed so far.
+        pending_trend = get_pending_sales_trend(start_date, end_date, cost_centre)
+        pending_amount = round(sum(row['Combined'] for row in pending_trend), 2)
+        net_sales = round(net_sales_confirmed + pending_amount, 2)
+
         if is_prev_complete:
-            prev_net_sales = calculate_sales(prev_s, prev_e, cost_centre)
+            prev_net_sales_confirmed = calculate_sales(prev_s, prev_e, cost_centre)
+            prev_pending_trend = get_pending_sales_trend(prev_s, prev_e, cost_centre)
+            prev_pending_amount = sum(row['Combined'] for row in prev_pending_trend)
+            prev_net_sales = round(prev_net_sales_confirmed + prev_pending_amount, 2)
             change_amount = net_sales - prev_net_sales
             change_pct = (change_amount / prev_net_sales * 100) if prev_net_sales != 0 else (100.0 if net_sales > 0 else 0.0)
         else:
             prev_net_sales = None
             change_amount = None
             change_pct = None
-        
-        trend = get_sales_trend(start_date, end_date, cost_centre)
-        store_comparison = get_store_comparisons(start_date, end_date)
-        
+
+        trend = merge_trend_rows(get_sales_trend(start_date, end_date, cost_centre), pending_trend)
+        store_comparison = merge_pending_into_store_comparison(
+            get_store_comparisons(start_date, end_date),
+            get_pending_sales_trend(start_date, end_date)  # unfiltered, matching get_store_comparisons' own scope
+        )
+        unsynced_sales = get_unsynced_sales(start_date, end_date, cost_centre)
+
         return {
             "is_data_complete": is_complete,
             "period": {"start": start_date, "end": end_date},
             "previous_period": {"start": prev_s, "end": prev_e, "is_data_complete": is_prev_complete},
             "summary": {
-                "net_sales": round(net_sales, 2),
+                "net_sales": net_sales,
+                "net_sales_confirmed": round(net_sales_confirmed, 2),
+                "pending_amount": pending_amount,
                 "previous_net_sales": round(prev_net_sales, 2) if prev_net_sales is not None else None,
                 "change_amount": round(change_amount, 2) if change_amount is not None else None,
                 "change_percentage": round(change_pct, 2) if change_pct is not None else None
             },
             "trend": trend,
-            "store_comparison": store_comparison
+            "store_comparison": store_comparison,
+            "unsynced_sales": unsynced_sales
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -140,36 +160,53 @@ async def get_sales_report(
 def get_purchases_report(start_date: str = Query(...), end_date: str = Query(...), cost_centre: Optional[str] = None, page: int = Query(1), limit: int = Query(50), search: str = Query(""), sort_by: str = Query("value_desc")):
     try:
         is_complete = check_data_completeness(start_date, end_date)
-        
+
         prev_s, prev_e = get_previous_period(start_date, end_date)
         is_prev_complete = check_data_completeness(prev_s, prev_e)
-        
-        net_purchases = calculate_purchases(start_date, end_date, cost_centre)
-        
+
+        net_purchases_confirmed = calculate_purchases(start_date, end_date, cost_centre)
+
+        # Purchases (and returns) still sitting in the local offline queue --
+        # see get_pending_purchases_trend's docstring for the three queue
+        # shapes this covers and why a return is subtracted, not added.
+        pending_trend = get_pending_purchases_trend(start_date, end_date, cost_centre)
+        pending_amount = round(sum(row['Combined'] for row in pending_trend), 2)
+        net_purchases = round(net_purchases_confirmed + pending_amount, 2)
+
         if is_prev_complete:
-            prev_net_purchases = calculate_purchases(prev_s, prev_e, cost_centre)
+            prev_net_purchases_confirmed = calculate_purchases(prev_s, prev_e, cost_centre)
+            prev_pending_trend = get_pending_purchases_trend(prev_s, prev_e, cost_centre)
+            prev_pending_amount = sum(row['Combined'] for row in prev_pending_trend)
+            prev_net_purchases = round(prev_net_purchases_confirmed + prev_pending_amount, 2)
             change_amount = net_purchases - prev_net_purchases
             change_pct = (change_amount / prev_net_purchases * 100) if prev_net_purchases != 0 else (100.0 if net_purchases > 0 else 0.0)
         else:
             prev_net_purchases = None
             change_amount = None
             change_pct = None
-        
-        trend = get_purchases_trend(start_date, end_date, cost_centre)
-        store_comparison = get_purchase_store_comparisons(start_date, end_date)
-        
+
+        trend = merge_trend_rows(get_purchases_trend(start_date, end_date, cost_centre), pending_trend)
+        store_comparison = merge_pending_into_store_comparison(
+            get_purchase_store_comparisons(start_date, end_date),
+            get_pending_purchases_trend(start_date, end_date)  # unfiltered, matching get_purchase_store_comparisons' own scope
+        )
+        unsynced_purchases = get_unsynced_purchases(start_date, end_date, cost_centre)
+
         return {
             "is_data_complete": is_complete,
             "period": {"start": start_date, "end": end_date},
             "previous_period": {"start": prev_s, "end": prev_e, "is_data_complete": is_prev_complete},
             "summary": {
-                "net_purchases": round(net_purchases, 2),
+                "net_purchases": net_purchases,
+                "net_purchases_confirmed": round(net_purchases_confirmed, 2),
+                "pending_amount": pending_amount,
                 "previous_purchases": round(prev_net_purchases, 2) if prev_net_purchases is not None else None,
                 "change_amount": round(change_amount, 2) if change_amount is not None else None,
                 "change_pct": round(change_pct, 2) if change_pct is not None else None
             },
             "trend": trend,
-            "store_comparison": store_comparison
+            "store_comparison": store_comparison,
+            "unsynced_purchases": unsynced_purchases
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -236,7 +273,10 @@ def get_creditors_report(
     end_date: str = Query(...)
 ):
     from backend.services.reporting_creditors_service import get_all_creditors_overview
-    return get_all_creditors_overview(start_date, end_date)
+    return {
+        "is_data_complete": check_data_completeness(start_date, end_date),
+        "creditors": get_all_creditors_overview(start_date, end_date),
+    }
 
 @router.get("/creditors/{supplier_name}")
 def get_creditor_ledger_report(
@@ -245,7 +285,9 @@ def get_creditor_ledger_report(
     end_date: str = Query(...)
 ):
     from backend.services.reporting_creditors_service import get_creditor_ledger_movements
-    return get_creditor_ledger_movements(supplier_name, start_date, end_date)
+    result = get_creditor_ledger_movements(supplier_name, start_date, end_date)
+    result["is_data_complete"] = check_data_completeness(start_date, end_date)
+    return result
 
 @router.get("/vouchers/{voucher_id}")
 def get_generic_voucher_details(voucher_id: int):

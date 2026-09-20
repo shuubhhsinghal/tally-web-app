@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-import { TrendingUp, TrendingDown, ChevronLeft, ArrowUpRight, ArrowDownRight, Store, Calendar, ShoppingCart, Users, FileText, Package, X } from 'lucide-react';
+import { TrendingUp, TrendingDown, ChevronLeft, ArrowUpRight, ArrowDownRight, Store, Calendar, ShoppingCart, Users, FileText, Package, X, AlertTriangle } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
@@ -117,6 +117,7 @@ export default function PurchasesReport() {
 
     const [loading, setLoading] = useState(false);
     const [data, setData] = useState(null);
+    const [error, setError] = useState(null);
     const [preset, setPreset] = useState("month");
     const [dates, setDates] = useState(getPresetDates("month"));
     const [costCentres, setCostCentres] = useState([]);
@@ -156,9 +157,12 @@ export default function PurchasesReport() {
         if (selectedStore) url += `&cost_centre=${encodeURIComponent(selectedStore)}`;
         
         fetch(url)
-            .then(res => res.json())
-            .then(d => setData(d))
-            .catch(err => console.error(err))
+            .then(res => {
+                if (!res.ok) throw new Error("Failed to fetch purchases data");
+                return res.json();
+            })
+            .then(d => { setData(d); setError(null); })
+            .catch(err => setError(err.message))
             .finally(() => setLoading(false));
     }, [dates, selectedStore]);
 
@@ -340,13 +344,58 @@ export default function PurchasesReport() {
                 )}
             </div>
 
+            {error && (
+                <div className="mx-5 mb-4 flex items-start gap-2 bg-rose-950/40 border border-rose-800/50 rounded-xl p-3">
+                    <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                    <p className="text-rose-300 text-xs leading-snug">{error}</p>
+                </div>
+            )}
+
             {loading ? (
                 <div className="flex justify-center items-center h-64">
                     <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-amber-400"></div>
                 </div>
-            ) : (
+            ) : error ? null : (
                 <div className="px-5 space-y-5 animate-in fade-in duration-300">
-                        
+
+                        {/* Data-completeness warning -- the periodic Tally sync itself hasn't
+                            fully covered this date range yet, so the figures below may be
+                            missing vouchers Tally already has. */}
+                        {data?.is_data_complete === false && (
+                            <div className="flex items-start gap-2 bg-amber-950/40 border border-amber-800/50 rounded-xl p-3">
+                                <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                                <p className="text-amber-300 text-xs leading-snug">
+                                    Reporting data for this period may be incomplete -- run a Tally sync to make sure everything is up to date.
+                                </p>
+                            </div>
+                        )}
+
+                        {/* Unsynced purchases warning. Plain pending entries (including
+                            pending returns, which are netted in as a deduction) are folded
+                            into the figures below -- see the "confirmed + pending" breakdown
+                            under Total Purchases -- so this only calls out entries that are
+                            NOT reflected anywhere above: delivery-uncertain entries (safety
+                            excluded) and entries Tally has actively rejected. */}
+                        {(data?.unsynced_purchases?.pending_amount || 0) - (data?.summary?.pending_amount || 0) > 0.005 && (
+                            <div className="flex items-start gap-2 bg-amber-950/40 border border-amber-800/50 rounded-xl p-3">
+                                <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                                <p className="text-amber-300 text-xs leading-snug">
+                                    {formatCurrency(data.unsynced_purchases.pending_amount - data.summary.pending_amount)} in purchases has an uncertain Tally delivery status and is not included above -- verify manually in the{' '}
+                                    <button onClick={() => router.push('/queue')} className="underline font-semibold hover:text-amber-200">Queue</button> before it can be counted.
+                                </p>
+                            </div>
+                        )}
+
+                        {data?.unsynced_purchases?.failed_count > 0 && (
+                            <div className="flex items-start gap-2 bg-rose-950/40 border border-rose-800/50 rounded-xl p-3">
+                                <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                                <p className="text-rose-300 text-xs leading-snug">
+                                    {data.unsynced_purchases.failed_count} purchase entr{data.unsynced_purchases.failed_count === 1 ? 'y' : 'ies'} totaling {formatCurrency(data.unsynced_purchases.failed_amount)} failed to sync to Tally and need{data.unsynced_purchases.failed_count === 1 ? 's' : ''} attention in the{' '}
+                                    <button onClick={() => router.push('/queue')} className="underline font-semibold hover:text-rose-200">Queue</button>.
+                                </p>
+                            </div>
+                        )}
+
                         {/* Total Purchases Card */}
                         <div className="bg-slate-800/50 border border-slate-700/50 rounded-2xl p-5 relative overflow-hidden backdrop-blur-sm">
                             <div className="absolute -right-6 -bottom-6 opacity-[0.07] pointer-events-none">
@@ -361,11 +410,17 @@ export default function PurchasesReport() {
                                 </div>
                                 <div>
                                     <p className="text-slate-400 text-sm font-medium mb-1">Total Purchases</p>
-                                    <h2 className="text-4xl font-bold text-white tracking-tight mb-2">
+                                    <h2 className="text-4xl font-bold text-white tracking-tight mb-1">
                                         {formatCurrency(data?.summary?.net_purchases)}
                                     </h2>
-                                    
-                                    {data?.summary?.change_pct !== null && (
+
+                                    {Math.abs(data?.summary?.pending_amount || 0) > 0.005 && (
+                                        <p className="text-amber-400/90 text-xs mb-2">
+                                            {formatCurrency(data.summary.net_purchases_confirmed)} confirmed {data.summary.pending_amount >= 0 ? '+' : '-'} {formatCurrency(Math.abs(data.summary.pending_amount))} pending Tally confirmation
+                                        </p>
+                                    )}
+
+                                    {data?.summary?.change_pct !== null && data?.summary?.change_pct !== undefined && (
                                         <div className="flex items-center gap-2">
                                             <div className={`flex items-center gap-1 text-sm font-semibold ${data.summary.change_pct >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                                                 {data.summary.change_pct >= 0 ? <ArrowUpRight className="w-4 h-4" /> : <ArrowDownRight className="w-4 h-4" />}
@@ -375,6 +430,11 @@ export default function PurchasesReport() {
                                                 vs. last period ({formatCurrency(data?.summary?.previous_purchases)})
                                             </p>
                                         </div>
+                                    )}
+                                    {(data?.summary?.change_pct === null || data?.summary?.change_pct === undefined) && data?.previous_period?.is_data_complete === false && (
+                                        <p className="text-slate-500 text-xs italic">
+                                            vs. last period unavailable -- that period's Tally sync is incomplete
+                                        </p>
                                     )}
                                 </div>
                             </div>
@@ -515,6 +575,9 @@ export default function PurchasesReport() {
 
                                 {listMode === "daily" ? (
                                     <div className="overflow-x-auto">
+                                        {Math.abs(data?.summary?.pending_amount || 0) > 0.005 && (
+                                            <p className="text-slate-500 text-[11px] italic mb-3">Includes entries still pending Tally confirmation.</p>
+                                        )}
                                         <table className="w-full text-sm text-left animate-in fade-in duration-300">
                                             <thead className="text-[10px] text-slate-500 uppercase tracking-wider border-b border-slate-700/50">
                                                 <tr>
@@ -561,6 +624,9 @@ export default function PurchasesReport() {
                                         </div>
                                     ) : (
                                         <div className="overflow-x-auto">
+                                            {Math.abs(data?.summary?.pending_amount || 0) > 0.005 && (
+                                                <p className="text-slate-500 text-[11px] italic mb-3">Confirmed purchases only -- doesn't yet include entries still pending Tally confirmation.</p>
+                                            )}
                                             <table className="w-full text-sm text-left animate-in fade-in duration-300">
                                                 <thead className="text-[10px] text-slate-500 uppercase tracking-wider border-b border-slate-700/50">
                                                     <tr>

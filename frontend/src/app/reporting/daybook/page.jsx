@@ -100,8 +100,21 @@ export default function DaybookReport() {
     
     const [page, setPage] = useState(1);
     const [limit, setLimit] = useState(50);
+    const [searchInput, setSearchInput] = useState("");
     const [search, setSearch] = useState("");
     const [sortBy, setSortBy] = useState("date_desc");
+
+    // Debounce the search box -- typing updates searchInput immediately (so
+    // the field itself feels responsive), but the actual `search` value that
+    // triggers a fetch only updates 400ms after the user stops typing,
+    // instead of firing a full network request on every keystroke.
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            setSearch(searchInput);
+            setPage(1);
+        }, 400);
+        return () => clearTimeout(timer);
+    }, [searchInput]);
     
     const [selectedVoucherId, setSelectedVoucherId] = useState(null);
     const [voucherDetails, setVoucherDetails] = useState(null);
@@ -342,6 +355,11 @@ export default function DaybookReport() {
             <ReportTabs />
             <div className="p-6 max-w-7xl mx-auto space-y-6 w-full flex-1">
             {renderVoucherModal()}
+            {error && (
+                <div className="bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 p-4 rounded-xl text-sm border border-red-100 dark:border-red-900/30">
+                    {error}
+                </div>
+            )}
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                 <div>
                     <h1 className="text-3xl font-bold text-gray-900 dark:text-white tracking-tight">Daybook</h1>
@@ -398,11 +416,11 @@ export default function DaybookReport() {
                     <div className="flex items-center gap-3">
                         <div className="relative">
                             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-                            <input 
+                            <input
                                 type="text"
                                 placeholder="Search particulars, type, ref..."
-                                value={search}
-                                onChange={(e) => {setSearch(e.target.value); setPage(1);}}
+                                value={searchInput}
+                                onChange={(e) => setSearchInput(e.target.value)}
                                 className="pl-9 pr-4 py-2 border border-gray-300 dark:border-gray-700 rounded-xl bg-gray-50 dark:bg-gray-900 text-sm w-full md:w-64 focus:ring-2 focus:ring-blue-500 outline-none"
                             />
                         </div>

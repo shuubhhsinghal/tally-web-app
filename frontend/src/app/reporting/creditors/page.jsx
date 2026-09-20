@@ -56,7 +56,19 @@ function getPresetDates(preset) {
         end = new Date(startY + 1, 2, 31);
     }
     
-    const fmt = d => d ? d.toISOString().split('T')[0] : '';
+    // Deliberately NOT toISOString() -- that converts to UTC, which silently
+    // shifts every date back by a day for any timezone ahead of UTC (e.g.
+    // IST), missing the true last day of the period and pulling in the
+    // previous period's last day instead. Build the string from the Date's
+    // own local components instead, matching the pattern already used
+    // correctly elsewhere (sales/purchases/daybook/pl's own fmt helpers).
+    const fmt = d => {
+        if (!d) return '';
+        const yyyy = d.getFullYear();
+        const mm = String(d.getMonth() + 1).padStart(2, '0');
+        const dd = String(d.getDate()).padStart(2, '0');
+        return `${yyyy}-${mm}-${dd}`;
+    };
     return { start: fmt(start), end: fmt(end) };
 }
 
@@ -65,6 +77,7 @@ export default function CreditorsReport() {
     const [preset, setPreset] = useState("month");
     const [dateRange, setDateRange] = useState(getPresetDates("month"));
     const [data, setData] = useState([]);
+    const [isDataComplete, setIsDataComplete] = useState(true);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
     const [searchTerm, setSearchTerm] = useState("");
@@ -92,7 +105,8 @@ export default function CreditorsReport() {
             const res = await fetch(`${API_BASE}/api/reporting/creditors?${params}`);
             if (!res.ok) throw new Error("Failed to fetch creditors data");
             const d = await res.json();
-            setData(d);
+            setData(d.creditors || []);
+            setIsDataComplete(d.is_data_complete !== false);
         } catch (err) {
             setError(err.message);
         } finally {
@@ -199,6 +213,12 @@ export default function CreditorsReport() {
                 </div>
             )}
 
+            {!isDataComplete && !error && (
+                <div className="bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-400 p-4 rounded-xl text-sm border border-amber-100 dark:border-amber-900/30">
+                    Reporting data for this period may be incomplete -- run a Tally sync to make sure everything is up to date.
+                </div>
+            )}
+
             <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 shadow-sm overflow-hidden">
                 <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center bg-gray-50/50 dark:bg-gray-800/50">
                     <h2 className="font-semibold text-gray-900 dark:text-white">Supplier Balances</h2>
@@ -260,6 +280,11 @@ export default function CreditorsReport() {
                                         </td>
                                         <td className="px-6 py-4 text-right text-gray-600 dark:text-gray-300">
                                             {formatCurrency(row.period_opening)}
+                                            {Math.abs(row.pending_opening_amount || 0) > 0.005 && (
+                                                <p className="text-[10px] font-normal text-amber-600 dark:text-amber-400 mt-0.5">
+                                                    incl. {formatCurrency(Math.abs(row.pending_opening_amount))} pending
+                                                </p>
+                                            )}
                                         </td>
                                         <td className="px-6 py-4 text-right text-gray-600 dark:text-gray-300">
                                             {row.purchases > 0 ? new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(row.purchases) : '-'}
@@ -275,6 +300,11 @@ export default function CreditorsReport() {
                                         </td>
                                         <td className="px-6 py-4 text-right font-medium text-gray-900 dark:text-white">
                                             {formatCurrency(row.period_closing)}
+                                            {Math.abs(row.pending_amount || 0) > 0.005 && (
+                                                <p className="text-[10px] font-normal text-amber-600 dark:text-amber-400 mt-0.5">
+                                                    incl. {formatCurrency(Math.abs(row.pending_amount))} pending
+                                                </p>
+                                            )}
                                         </td>
                                     </tr>
                                 ))
