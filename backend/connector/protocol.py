@@ -25,6 +25,11 @@ MSG_JOB_RESULT = "job_result"
 MSG_HELLO = "hello"
 MSG_PING = "ping"
 MSG_PONG = "pong"
+# Sent periodically by the connector, independent of any job -- reports
+# whether Tally itself is reachable on the connector's own machine, which is
+# a distinct question from "is the connector's WebSocket alive" (the latter
+# stays true even if Tally is closed while the laptop/connector keep running).
+MSG_TALLY_STATUS = "tally_status"
 
 
 def build_job(job_id: str, xml_data):

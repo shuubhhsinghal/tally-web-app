@@ -35,6 +35,14 @@ CONNECT_TIMEOUT_S = 5
 READ_TIMEOUT_S = 150
 MAX_MESSAGE_SIZE = 50 * 1024 * 1024  # 50MB -- matches the backend's --ws-max-size
 
+# How often to tell the backend whether Tally itself is actually reachable on
+# this machine -- separate from the WebSocket connection's own liveness,
+# since this process can stay connected to the backend even while Tally is
+# closed. Kept short so the "online" indicator in the app reflects reality
+# quickly rather than lagging behind reality.
+TALLY_STATUS_INTERVAL_S = 10
+TALLY_STATUS_CHECK_TIMEOUT_S = 3
+
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "connector.log")
 logging.basicConfig(
     level=logging.INFO,
@@ -98,6 +106,29 @@ async def process_jobs(ws, job_queue: "asyncio.Queue"):
             job_queue.task_done()
 
 
+def _check_tally_reachable() -> bool:
+    """Cheap, best-effort local check -- doesn't care what Tally actually
+    says, only whether something is listening and responds at all."""
+    try:
+        requests.get(TALLY_LOCAL_URL, timeout=TALLY_STATUS_CHECK_TIMEOUT_S)
+        return True
+    except requests.exceptions.RequestException:
+        return False
+
+
+async def tally_status_loop(ws):
+    """Reports Tally's own local reachability to the backend on a fixed
+    cadence (not just on change), so a dropped message can't leave the
+    backend's view permanently stale."""
+    while True:
+        reachable = await asyncio.to_thread(_check_tally_reachable)
+        try:
+            await ws.send(json.dumps({"type": "tally_status", "reachable": reachable}))
+        except Exception:
+            return
+        await asyncio.sleep(TALLY_STATUS_INTERVAL_S)
+
+
 async def receive_loop(ws, job_queue: "asyncio.Queue"):
     async for raw in ws:
         try:
@@ -126,10 +157,12 @@ async def connect_once():
         await ws.send(json.dumps({"type": "hello", "connector_version": "1.0.0"}))
         job_queue: asyncio.Queue = asyncio.Queue()
         processor = asyncio.create_task(process_jobs(ws, job_queue))
+        status_reporter = asyncio.create_task(tally_status_loop(ws))
         try:
             await receive_loop(ws, job_queue)
         finally:
             processor.cancel()
+            status_reporter.cancel()
 
 
 async def main():

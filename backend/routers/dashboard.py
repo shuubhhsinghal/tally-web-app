@@ -36,9 +36,11 @@ def get_dashboard_stats():
     except Exception as e:
         print(f"Error fetching stats: {e}")
 
-    # 3. Check Tally Server Status -- "online" now means a connector is
-    # currently connected, a plain in-memory check with no network round-trip.
-    tally_online = connector_manager.is_connected()
+    # 3. Check Tally Server Status -- "online" means Tally itself is
+    # reachable right now (the connector's own periodic local check), not
+    # just that the connector's WebSocket is alive. Still a plain in-memory
+    # read, no network round-trip from this side.
+    tally_online = connector_manager.is_tally_reachable()
 
     return {
         "queue_count": queue_count,

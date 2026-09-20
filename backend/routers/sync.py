@@ -37,8 +37,9 @@ async def flush_queue():
 
 @router.get("/status")
 def sync_status():
-    # "Online" now means "a Tally connector is currently connected to us" --
-    # a plain in-memory check, no network round-trip needed (and no round
-    # trip through the connector to Tally itself either, since that would
-    # reintroduce the same timeout/ambiguity questions this collapses away).
-    return {"online": connector_manager.is_connected()}
+    # "Online" means Tally itself is reachable right now, per the connector's
+    # own periodic local check -- not just "is the connector's WebSocket
+    # alive" (which can stay true even if Tally is closed while the laptop
+    # and connector script keep running). Still a plain in-memory read, no
+    # network round-trip from this side.
+    return {"online": connector_manager.is_tally_reachable()}

@@ -506,11 +506,16 @@ async def sync_worker_loop():
 
     while True:
         try:
-            # 1. Is a connector currently connected? Plain in-memory check --
-            # no network round-trip needed (see backend/connector/manager.py).
-            tally_online = connector_manager.is_connected()
+            # 1. Is Tally itself actually reachable right now (not just "is a
+            # connector attached")? Plain in-memory check -- no network
+            # round-trip from here (see backend/connector/manager.py). Using
+            # the more precise check avoids a wasted attempt-and-fail cycle
+            # every 60s when the connector is up but Tally is closed; the
+            # connector reports this every 10s, well inside this loop's own
+            # 60s cadence, so it doesn't meaningfully delay noticing recovery.
+            tally_online = connector_manager.is_tally_reachable()
 
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Connector online: {tally_online}")
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Tally reachable: {tally_online}")
 
             if tally_online:
                 # 2. Flush Offline Queue

@@ -11,10 +11,10 @@ logger = logging.getLogger(__name__)
 def is_tally_reachable(timeout: int = 3) -> bool:
     """Cheap upfront connectivity check, so a caller doing a best-effort live
     stock check across multiple items can skip the whole thing in one shot
-    when no connector is connected, instead of paying a separate timeout per
-    item. `timeout` is accepted for backward compatibility with existing
+    when Tally isn't actually reachable, instead of paying a separate timeout
+    per item. `timeout` is accepted for backward compatibility with existing
     call sites but unused -- this is now a plain in-memory check."""
-    return connector_manager.is_connected()
+    return connector_manager.is_tally_reachable()
 
 async def get_godown_stock(item_name: str, godown_name: str) -> dict:
     """

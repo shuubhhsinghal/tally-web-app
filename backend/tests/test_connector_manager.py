@@ -153,6 +153,41 @@ async def test_bytes_payload_is_sent_as_json_safe_text():
     assert response.status_code == 200
 
 
+async def test_tally_reachable_defaults_false_until_reported():
+    # Conservative default: a freshly-registered connector hasn't told us
+    # anything about Tally's own reachability yet.
+    manager = ConnectorManager()
+    ws = make_fake_ws()
+    await manager.register(ws)
+    assert manager.is_connected() is True
+    assert manager.is_tally_reachable() is False
+
+
+async def test_tally_reachable_reflects_latest_status_report():
+    manager = ConnectorManager()
+    ws = make_fake_ws()
+    await manager.register(ws)
+
+    await manager.handle_incoming(json.dumps({"type": "tally_status", "reachable": True}))
+    assert manager.is_tally_reachable() is True
+
+    await manager.handle_incoming(json.dumps({"type": "tally_status", "reachable": False}))
+    assert manager.is_tally_reachable() is False
+
+
+async def test_tally_reachable_resets_on_disconnect():
+    # Connector alive but Tally reachable -- then it disconnects. Reachability
+    # must not keep reporting stale "True" once we can no longer verify it.
+    manager = ConnectorManager()
+    ws = make_fake_ws()
+    await manager.register(ws)
+    await manager.handle_incoming(json.dumps({"type": "tally_status", "reachable": True}))
+    assert manager.is_tally_reachable() is True
+
+    await manager.unregister(ws)
+    assert manager.is_tally_reachable() is False
+
+
 async def test_is_connected_reflects_registration_state():
     manager = ConnectorManager()
     assert manager.is_connected() is False

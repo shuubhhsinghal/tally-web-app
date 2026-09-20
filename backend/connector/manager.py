@@ -23,6 +23,7 @@ from backend.connector.protocol import (
     MSG_HELLO,
     MSG_PING,
     MSG_PONG,
+    MSG_TALLY_STATUS,
     build_job,
 )
 
@@ -40,9 +41,22 @@ class ConnectorManager:
         self._acked: set = set()
         self._last_pong: float = 0.0
         self._heartbeat_task: Optional[asyncio.Task] = None
+        # Conservative default: until the connector actually reports in,
+        # assume Tally is NOT reachable rather than assuming it is.
+        self._tally_reachable: bool = False
 
     def is_connected(self) -> bool:
+        """Is a connector's WebSocket currently attached to us -- says
+        nothing about whether Tally itself is open on that machine."""
         return self._ws is not None
+
+    def is_tally_reachable(self) -> bool:
+        """Is Tally actually reachable right now, per the connector's own
+        periodic local check -- this is the more meaningful signal for
+        "can I actually do something with Tally right now", since a
+        connector can stay attached (laptop on, script running) while Tally
+        itself is closed."""
+        return self._ws is not None and self._tally_reachable
 
     async def register(self, ws: WebSocket) -> None:
         if self._ws is not None:
@@ -53,11 +67,13 @@ class ConnectorManager:
             await self._evict_current()
         self._ws = ws
         self._last_pong = time.monotonic()
+        self._tally_reachable = False
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop(ws))
 
     async def unregister(self, ws: WebSocket) -> None:
         if self._ws is ws:
             self._ws = None
+            self._tally_reachable = False
             if self._heartbeat_task is not None:
                 self._heartbeat_task.cancel()
                 self._heartbeat_task = None
@@ -113,6 +129,8 @@ class ConnectorManager:
                 fut.set_result(msg)
         elif msg_type == MSG_PONG:
             self._last_pong = time.monotonic()
+        elif msg_type == MSG_TALLY_STATUS:
+            self._tally_reachable = bool(msg.get("reachable"))
         elif msg_type == MSG_HELLO:
             logger.info(f"Connector connected: {msg.get('connector_version', 'unknown version')}")
 

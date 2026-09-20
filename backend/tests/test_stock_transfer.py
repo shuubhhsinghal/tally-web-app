@@ -114,7 +114,7 @@ def test_post_transfer_queues_both_vouchers_when_tally_offline(monkeypatch):
 
 
 def test_post_transfer_blocks_on_insufficient_stock_when_tally_reachable(monkeypatch):
-    monkeypatch.setattr(connector_manager, "is_connected", lambda: True)
+    monkeypatch.setattr(connector_manager, "is_tally_reachable", lambda: True)
 
     import backend.services.tally_godown_stock as godown_module
     async def mock_get_godown_stock(item_name, godown_name):
@@ -128,7 +128,7 @@ def test_post_transfer_blocks_on_insufficient_stock_when_tally_reachable(monkeyp
 
 
 def test_post_transfer_success_when_reachable_and_sufficient(monkeypatch):
-    monkeypatch.setattr(connector_manager, "is_connected", lambda: True)
+    monkeypatch.setattr(connector_manager, "is_tally_reachable", lambda: True)
 
     import backend.services.tally_godown_stock as godown_module
     async def mock_get_godown_stock(item_name, godown_name):
@@ -148,7 +148,7 @@ def test_post_transfer_success_when_reachable_and_sufficient(monkeypatch):
 
 
 def test_post_transfer_reports_failed_when_tally_rejects(monkeypatch):
-    monkeypatch.setattr(connector_manager, "is_connected", lambda: True)
+    monkeypatch.setattr(connector_manager, "is_tally_reachable", lambda: True)
 
     import backend.services.tally_godown_stock as godown_module
     async def mock_get_godown_stock(item_name, godown_name):
