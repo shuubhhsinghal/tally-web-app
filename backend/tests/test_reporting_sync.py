@@ -87,14 +87,15 @@ def setup_db():
         c.execute("DELETE FROM cost_centres")
         conn.commit()
 
-@patch('backend.services.tally_reporting_sync.requests.post')
-def test_sync_cost_centres(mock_post):
+@pytest.mark.anyio
+@patch('backend.services.tally_reporting_sync.tally_transport.post', new_callable=AsyncMock)
+async def test_sync_cost_centres(mock_post):
     mock_resp = MagicMock()
     mock_resp.text = COST_CENTRE_XML
     mock_resp.raise_for_status = MagicMock()
     mock_post.return_value = mock_resp
 
-    count = fetch_and_store_cost_centres("http://localhost:9000")
+    count = await fetch_and_store_cost_centres("http://localhost:9000")
     assert count == 2
 
     with get_db() as conn:
@@ -105,14 +106,15 @@ def test_sync_cost_centres(mock_post):
         assert rows[0]['name'] == 'Store A'
         assert rows[1]['name'] == 'Store B'
 
-@patch('backend.services.tally_reporting_sync.requests.post')
-def test_sync_vouchers(mock_post):
+@pytest.mark.anyio
+@patch('backend.services.tally_reporting_sync.tally_transport.post', new_callable=AsyncMock)
+async def test_sync_vouchers(mock_post):
     mock_resp = MagicMock()
     mock_resp.text = VOUCHER_XML
     mock_resp.raise_for_status = MagicMock()
     mock_post.return_value = mock_resp
 
-    count = fetch_and_store_vouchers("20230401", "20230430", "http://localhost:9000")
+    count = await fetch_and_store_vouchers("20230401", "20230430", "http://localhost:9000")
     assert count == 1
 
     with get_db() as conn:
@@ -144,7 +146,7 @@ def test_sync_vouchers(mock_post):
         assert inv[0]['amount'] == -100.0
 
     # Test Idempotency (Syncing the same XML again)
-    count2 = fetch_and_store_vouchers("20230401", "20230430", "http://localhost:9000")
+    count2 = await fetch_and_store_vouchers("20230401", "20230430", "http://localhost:9000")
     assert count2 == 1
 
     with get_db() as conn:

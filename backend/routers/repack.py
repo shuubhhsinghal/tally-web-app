@@ -216,7 +216,7 @@ async def execute_repack(payload: RepackExecuteRequest):
         try:
             if not tally_reachable:
                 raise requests.exceptions.ConnectionError("Tally is offline (skipped by upfront reachability check).")
-            stock = get_godown_stock(comp_name, godown_name)
+            stock = await get_godown_stock(comp_name, godown_name)
             if stock["qty"] < qty_required:
                 raise HTTPException(status_code=400, detail=f"Insufficient stock for '{comp_name}' in Godown '{godown_name}'. Required: {qty_required}, Available: {stock['qty']}")
         except HTTPException:

@@ -9,9 +9,9 @@ from xml.sax.saxutils import escape
 
 from backend.database import get_all_ledgers, queue_operation, get_db, update_queue_status, set_delivery_uncertain
 from backend.services.tally_response import parse_tally_response
+from backend.connector.transport import tally_transport
 
 router = APIRouter()
-from backend.config import TALLY_URL
 
 class PurchaseRequest(BaseModel):
     supplier: str
@@ -233,7 +233,7 @@ async def post_purchase(payload: PurchaseRequest):
             return {"status": "queued", "reason": "pending_master_dependency", "message": "Purchase saved to offline queue because a required master is still pending sync to Tally."}
             
         set_delivery_uncertain(queue_id, True)
-        response = requests.post(TALLY_URL, data=xml_data.encode('utf-8'), timeout=10)
+        response = await tally_transport.post(xml_data.encode('utf-8'), timeout=10)
         parsed = parse_tally_response(response.text, "POST_VOUCHER")
 
         if not parsed["is_success"]:

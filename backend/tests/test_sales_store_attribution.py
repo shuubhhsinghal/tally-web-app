@@ -2,7 +2,7 @@ import os
 import json
 import pytest
 import requests
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock
 
 os.environ["TESTING"] = "true"
 
@@ -29,7 +29,7 @@ def _latest_sales_row():
         return dict(cursor.fetchone())
 
 
-@patch('requests.post')
+@patch('backend.routers.sales.tally_transport.post', new_callable=AsyncMock)
 def test_sales_persists_cost_center_for_mahagun(mock_post):
     mock_post.side_effect = requests.exceptions.ConnectionError()
     client.post("/api/sales/post", json={
@@ -40,7 +40,7 @@ def test_sales_persists_cost_center_for_mahagun(mock_post):
     assert payload["cost_center"] == "Mahagun"
 
 
-@patch('requests.post')
+@patch('backend.routers.sales.tally_transport.post', new_callable=AsyncMock)
 def test_sales_persists_correctly_cased_vvip(mock_post):
     mock_post.side_effect = requests.exceptions.ConnectionError()
     client.post("/api/sales/post", json={
@@ -52,7 +52,7 @@ def test_sales_persists_correctly_cased_vvip(mock_post):
     assert payload["cost_center"] != "Vvip"
 
 
-@patch('requests.post')
+@patch('backend.routers.sales.tally_transport.post', new_callable=AsyncMock)
 def test_sales_with_no_store_in_ledger_name_has_no_cost_center(mock_post):
     mock_post.side_effect = requests.exceptions.ConnectionError()
     client.post("/api/sales/post", json={
@@ -63,7 +63,7 @@ def test_sales_with_no_store_in_ledger_name_has_no_cost_center(mock_post):
     assert "cost_center" not in payload
 
 
-@patch('requests.post')
+@patch('backend.routers.sales.tally_transport.post', new_callable=AsyncMock)
 def test_sales_mahagun_now_matches_queue_store_filter(mock_post):
     mock_post.side_effect = requests.exceptions.ConnectionError()
     client.post("/api/sales/post", json={
@@ -79,7 +79,7 @@ def test_sales_mahagun_now_matches_queue_store_filter(mock_post):
     assert res_unallocated.json()["total"] == 0
 
 
-@patch('requests.post')
+@patch('backend.routers.sales.tally_transport.post', new_callable=AsyncMock)
 def test_sales_vvip_matches_queue_store_filter(mock_post):
     mock_post.side_effect = requests.exceptions.ConnectionError()
     client.post("/api/sales/post", json={

@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from backend.routers import stock_transfer, transfer, sales, payment, purchase, purchase_item, bank_statement, sync, dashboard, masters, settings, purchase_drafts, reporting, reporting_pl, repack
 from backend.database import init_db
 from backend.services.tally_sync_worker import sync_worker_loop
+from backend.connector.router import router as connector_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -68,6 +69,7 @@ app.include_router(settings.router, prefix="/api/settings", tags=["Settings"])
 app.include_router(repack.router, prefix="/api/repack", tags=["Repack"])
 app.include_router(reporting.router, prefix="/api")
 app.include_router(reporting_pl.router)
+app.include_router(connector_router, tags=["Tally Connector"])
 
 from backend.routers import whatsapp
 app.include_router(whatsapp.router, prefix="/api/whatsapp", tags=["WhatsApp"])

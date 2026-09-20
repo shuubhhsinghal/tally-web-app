@@ -1,7 +1,7 @@
 import os
 import pytest
 from datetime import datetime
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 
 os.environ["TESTING"] = "true"
 
@@ -111,15 +111,16 @@ def setup_db():
         conn.commit()
     yield
 
-@patch('backend.services.tally_reporting_sync.requests.post')
-def test_calculate_sales(mock_post):
+@pytest.mark.anyio
+@patch('backend.services.tally_reporting_sync.tally_transport.post', new_callable=AsyncMock)
+async def test_calculate_sales(mock_post):
     mock_resp = MagicMock()
     mock_resp.text = MOCK_XML
     mock_resp.raise_for_status = MagicMock()
     mock_post.return_value = mock_resp
 
     # Perform Sync
-    fetch_and_store_vouchers("20230901", "20230930", "http://localhost:9000")
+    await fetch_and_store_vouchers("20230901", "20230930", "http://localhost:9000")
 
     # Test Combined Sales
     # V1 (Sales): 1500

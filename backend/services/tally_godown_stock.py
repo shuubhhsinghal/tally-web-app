@@ -2,23 +2,21 @@ import requests
 import xml.etree.ElementTree as ET
 import re
 from backend.config import TALLY_URL
+from backend.connector.manager import connector_manager
+from backend.connector.transport import tally_transport
 import logging
 
 logger = logging.getLogger(__name__)
 
 def is_tally_reachable(timeout: int = 3) -> bool:
-    """Cheap upfront connectivity check (same "micro-ping" pattern
-    tally_sync_worker.py's main loop uses), so a caller doing a best-effort
-    live stock check across multiple items can skip the whole thing in one
-    shot when Tally's offline, instead of paying a separate connection
-    timeout per item."""
-    try:
-        requests.get(TALLY_URL, timeout=timeout)
-        return True
-    except requests.exceptions.RequestException:
-        return False
+    """Cheap upfront connectivity check, so a caller doing a best-effort live
+    stock check across multiple items can skip the whole thing in one shot
+    when no connector is connected, instead of paying a separate timeout per
+    item. `timeout` is accepted for backward compatibility with existing
+    call sites but unused -- this is now a plain in-memory check."""
+    return connector_manager.is_connected()
 
-def get_godown_stock(item_name: str, godown_name: str) -> dict:
+async def get_godown_stock(item_name: str, godown_name: str) -> dict:
     """
     Queries Tally for the exact closing balance and valuation of a given stock item in a specific Godown.
     Returns: {"qty": float, "rate": float, "amount": float}
@@ -44,7 +42,7 @@ def get_godown_stock(item_name: str, godown_name: str) -> dict:
     </ENVELOPE>"""
     
     try:
-        response = requests.post(TALLY_URL, data=xml_data.encode('utf-8'), timeout=10)
+        response = await tally_transport.post(xml_data.encode('utf-8'), timeout=10)
         response.raise_for_status()
     except requests.exceptions.RequestException as e:
         logger.error(f"Failed to fetch Godown Summary from Tally: {e}")

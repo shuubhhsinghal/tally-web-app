@@ -1,5 +1,6 @@
 import sqlite3
 import os
+import asyncio
 import tempfile
 from unittest import mock
 import xml.etree.ElementTree as ET
@@ -121,12 +122,12 @@ def test_sync_integrity():
             if self.status_code != 200:
                 raise Exception("HTTP Error")
 
-    with mock.patch('backend.services.tally_reporting_sync.requests.post', return_value=MockResponse(mock_xml)):
+    with mock.patch('backend.services.tally_reporting_sync.tally_transport.post', new_callable=mock.AsyncMock, return_value=MockResponse(mock_xml)):
         with mock.patch('backend.services.tally_reporting_sync.get_db') as mock_get_db:
             mock_get_db.return_value.__enter__.return_value = conn
             
             # 1st Sync (I. Syncing the same period twice produces the same DB state)
-            fetch_and_store_vouchers('20260901', '20260930')
+            asyncio.run(fetch_and_store_vouchers('20260901', '20260930'))
             
             # Let's verify DB state after first sync
             cursor = conn.cursor()
@@ -155,7 +156,7 @@ def test_sync_integrity():
             assert cursor.fetchone() is None
 
             # 2nd Sync to prove idempotency
-            fetch_and_store_vouchers('20260901', '20260930')
+            asyncio.run(fetch_and_store_vouchers('20260901', '20260930'))
             cursor.execute("SELECT count(*) as c FROM reporting_vouchers")
             assert cursor.fetchone()[0] == 1 # Only active-guid-1 remains
 
@@ -168,14 +169,14 @@ def test_failed_sync_does_not_delete():
     fd, conn, temp_db_path = setup_db()
     
     # H. Failed/partial sync does NOT delete existing vouchers
-    with mock.patch('backend.services.tally_reporting_sync.requests.post') as mock_post:
+    with mock.patch('backend.services.tally_reporting_sync.tally_transport.post', new_callable=mock.AsyncMock) as mock_post:
         mock_post.side_effect = Exception("Network timeout")
         
         with mock.patch('backend.services.tally_reporting_sync.get_db') as mock_get_db:
             mock_get_db.return_value.__enter__.return_value = conn
             
             try:
-                fetch_and_store_vouchers('20260901', '20260930')
+                asyncio.run(fetch_and_store_vouchers('20260901', '20260930'))
             except Exception:
                 pass
                 

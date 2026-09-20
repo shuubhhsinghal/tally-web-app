@@ -16,9 +16,9 @@ from backend.database import (
     create_bank_mapping, update_bank_mapping, delete_bank_mapping, set_delivery_uncertain
 )
 from backend.services.tally_response import parse_tally_response
+from backend.connector.transport import tally_transport
 
 router = APIRouter()
-from backend.config import TALLY_URL
 
 class TransactionPayload(BaseModel):
     transactions: List[Dict[str, Any]]
@@ -215,7 +215,7 @@ async def create_tally_ledger(payload: dict):
         raise HTTPException(status_code=400, detail=str(e))
     
     try:
-        response = requests.post(TALLY_URL, data=xml_bytes, timeout=4)
+        response = await tally_transport.post(xml_bytes, timeout=4)
         parsed = parse_tally_response(response.text, "CREATE_LEDGER")
         if not parsed["is_success"]:
             raise HTTPException(status_code=400, detail=f"Tally rejected the ledger creation: {parsed['error_message']}")
@@ -225,7 +225,7 @@ async def create_tally_ledger(payload: dict):
         
         insert_name = name
         if is_already_exists_success(parsed, "CREATE_LEDGER"):
-            ver_res, canonical = verify_tally_master_definition("LEDGER", name, {"parent": parent})
+            ver_res, canonical = await verify_tally_master_definition("LEDGER", name, {"parent": parent})
             if ver_res == VerificationResult.UNVERIFIABLE:
                 raise HTTPException(status_code=400, detail="Master already exists in Tally, but its definition could not be verified. Refresh masters and try again.")
             elif ver_res == VerificationResult.CONFLICT:
@@ -495,7 +495,7 @@ def upload_bank_statement(
     return {"transactions": transactions, "skipped_count": skipped_count}
 
 @router.post("/post")
-def post_to_tally(payload: TransactionPayload):
+async def post_to_tally(payload: TransactionPayload):
     transactions = payload.transactions
     bank_ledger_name = payload.bank_ledger_name
     
@@ -642,7 +642,7 @@ def post_to_tally(payload: TransactionPayload):
     try:
         for qid in queue_ids:
             set_delivery_uncertain(qid, True)
-        response = requests.post(TALLY_URL, data=xml_data, timeout=5)
+        response = await tally_transport.post(xml_data, timeout=5)
         if "<LINEERROR>" in response.text:
             for qid in queue_ids:
                 set_delivery_uncertain(qid, False)
@@ -690,7 +690,7 @@ class MergeTransferRequest(BaseModel):
 
 
 @router.post("/merge-transfer")
-def merge_transfer(payload: MergeTransferRequest):
+async def merge_transfer(payload: MergeTransferRequest):
     """Merges a bank-statement transaction with the matching other side of an
     inter-account transfer (already queued from a different bank's statement)
     into a single Contra voucher, instead of posting both sides as separate,
@@ -744,7 +744,7 @@ def merge_transfer(payload: MergeTransferRequest):
 
     try:
         set_delivery_uncertain(new_queue_id, True)
-        response = requests.post(TALLY_URL, data=contra_xml.encode('utf-8'), timeout=10)
+        response = await tally_transport.post(contra_xml.encode('utf-8'), timeout=10)
         parsed = parse_tally_response(response.text, "POST_VOUCHER")
 
         if not parsed["is_success"]:

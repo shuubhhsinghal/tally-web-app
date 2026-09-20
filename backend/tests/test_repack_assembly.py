@@ -2,6 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 from backend.main import app
 from backend.database import get_db
+from backend.connector.manager import connector_manager
 
 @pytest.fixture(autouse=True)
 def setup_db():
@@ -168,10 +169,9 @@ def test_execute_repack_ignores_godown_valuation_rate_when_reachable(monkeypatch
     record_purchase_rate("bulk chips", 100.0, "Test Supplier", "2026-09-01")
     record_purchase_rate("300g box", 5.0, "Test Supplier", "2026-09-01")
 
-    import requests
-    monkeypatch.setattr(requests, "get", lambda *a, **k: None)  # Tally "reachable"
+    monkeypatch.setattr(connector_manager, "is_connected", lambda: True)
 
-    def mock_get_godown_stock(item_name, godown_name):
+    async def mock_get_godown_stock(item_name, godown_name):
         # Deliberately a different rate than get_purchase_rate, simulating a
         # weighted-average Godown valuation blending old and new stock.
         return {"qty": 1000.0, "rate": 999.0, "amount": 999000.0}
@@ -211,10 +211,9 @@ def test_execute_repack_blocks_on_insufficient_stock_when_tally_reachable(monkey
     from backend.database import record_purchase_rate
     record_purchase_rate("bulk chips", 100.0, "Test Supplier", "2026-09-01")
 
-    import requests
-    monkeypatch.setattr(requests, "get", lambda *a, **k: None)  # Tally "reachable"
+    monkeypatch.setattr(connector_manager, "is_connected", lambda: True)
 
-    def mock_get_godown_stock(item_name, godown_name):
+    async def mock_get_godown_stock(item_name, godown_name):
         return {"qty": 1.0, "rate": 100.0, "amount": 100.0}  # far less than required
 
     import backend.services.tally_godown_stock

@@ -1,11 +1,10 @@
 import os
 import json
-import requests
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from backend.database import get_db
-from backend.config import TALLY_URL
+from backend.connector.manager import connector_manager
 
 router = APIRouter()
 
@@ -37,14 +36,9 @@ def get_dashboard_stats():
     except Exception as e:
         print(f"Error fetching stats: {e}")
 
-    # 3. Check Tally Server Status
-    tally_online = False
-    try:
-        response = requests.get(TALLY_URL, timeout=2)
-        if response.status_code == 200:
-            tally_online = True
-    except:
-        pass
+    # 3. Check Tally Server Status -- "online" now means a connector is
+    # currently connected, a plain in-memory check with no network round-trip.
+    tally_online = connector_manager.is_connected()
 
     return {
         "queue_count": queue_count,

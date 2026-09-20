@@ -1,8 +1,9 @@
 import os
 os.environ["TESTING"] = "true"
 
+import asyncio
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 from fastapi.testclient import TestClient
 from backend.main import app
 from backend.database import get_db, init_db
@@ -160,12 +161,12 @@ def setup_teardown_db():
         cursor.execute("DELETE FROM reporting_vouchers WHERE tally_guid IN ('P-1', 'P-2', 'P-3')")
         conn.commit()
         
-    with patch('requests.post') as mock_post:
+    with patch('backend.services.tally_reporting_sync.tally_transport.post', new_callable=AsyncMock) as mock_post:
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.text = MOCK_PURCHASE_XML
         mock_post.return_value = mock_resp
-        fetch_and_store_vouchers('20260701', '20260731')
+        asyncio.run(fetch_and_store_vouchers('20260701', '20260731'))
     
     yield
     

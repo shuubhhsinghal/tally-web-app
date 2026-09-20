@@ -2,12 +2,14 @@ import os
 import json
 import pytest
 import requests
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 
 os.environ["TESTING"] = "true"
 
 from backend.database import get_db, queue_operation
 from backend.services.tally_sync_worker import flush_offline_queue
+
+pytestmark = pytest.mark.anyio
 
 SUCCESS_XML = """<ENVELOPE>
   <HEADER><STATUS>1</STATUS></HEADER>
@@ -34,12 +36,12 @@ def _get_row(queue_id):
         return dict(cursor.fetchone())
 
 
-@patch('requests.post')
-def test_timeout_marks_failed_and_sets_delivery_uncertain(mock_post):
+@patch('backend.services.tally_sync_worker.tally_transport.post', new_callable=AsyncMock)
+async def test_timeout_marks_failed_and_sets_delivery_uncertain(mock_post):
     queue_id = _seed_voucher()
     mock_post.side_effect = requests.exceptions.Timeout()
 
-    flush_offline_queue()
+    await flush_offline_queue()
 
     row = _get_row(queue_id)
     assert row["status"] == "FAILED"
@@ -48,14 +50,14 @@ def test_timeout_marks_failed_and_sets_delivery_uncertain(mock_post):
     assert payload.get("delivery_uncertain") is True
 
 
-@patch('requests.post')
-def test_success_clears_delivery_uncertain_after_proactive_set(mock_post):
+@patch('backend.services.tally_sync_worker.tally_transport.post', new_callable=AsyncMock)
+async def test_success_clears_delivery_uncertain_after_proactive_set(mock_post):
     queue_id = _seed_voucher()
     mock_resp = MagicMock()
     mock_resp.text = SUCCESS_XML
     mock_post.return_value = mock_resp
 
-    flush_offline_queue()
+    await flush_offline_queue()
 
     row = _get_row(queue_id)
     assert row["status"] == "SYNCED"
@@ -63,12 +65,12 @@ def test_success_clears_delivery_uncertain_after_proactive_set(mock_post):
     assert not payload.get("delivery_uncertain")
 
 
-@patch('requests.post')
-def test_connection_error_clears_flag_and_stays_pending(mock_post):
+@patch('backend.services.tally_sync_worker.tally_transport.post', new_callable=AsyncMock)
+async def test_connection_error_clears_flag_and_stays_pending(mock_post):
     queue_id = _seed_voucher()
     mock_post.side_effect = requests.exceptions.ConnectionError()
 
-    flush_offline_queue()
+    await flush_offline_queue()
 
     row = _get_row(queue_id)
     assert row["status"] == "PENDING"
@@ -76,8 +78,8 @@ def test_connection_error_clears_flag_and_stays_pending(mock_post):
     assert not payload.get("delivery_uncertain")
 
 
-@patch('requests.post')
-def test_connect_timeout_clears_flag_and_stays_pending(mock_post):
+@patch('backend.services.tally_sync_worker.tally_transport.post', new_callable=AsyncMock)
+async def test_connect_timeout_clears_flag_and_stays_pending(mock_post):
     # ConnectTimeout means the connection itself never established (Tally
     # unreachable) -- must be treated the same as ConnectionError, NOT as an
     # ambiguous delivery. This is the real-world common case when TALLY_URL
@@ -85,7 +87,7 @@ def test_connect_timeout_clears_flag_and_stays_pending(mock_post):
     queue_id = _seed_voucher()
     mock_post.side_effect = requests.exceptions.ConnectTimeout()
 
-    flush_offline_queue()
+    await flush_offline_queue()
 
     row = _get_row(queue_id)
     assert row["status"] == "PENDING"
@@ -93,12 +95,12 @@ def test_connect_timeout_clears_flag_and_stays_pending(mock_post):
     assert not payload.get("delivery_uncertain")
 
 
-@patch('requests.post')
-def test_repack_voucher_also_gets_delivery_uncertain_protection(mock_post):
+@patch('backend.services.tally_sync_worker.tally_transport.post', new_callable=AsyncMock)
+async def test_repack_voucher_also_gets_delivery_uncertain_protection(mock_post):
     queue_id = _seed_voucher(operation_type="REPACK_VOUCHER")
     mock_post.side_effect = requests.exceptions.Timeout()
 
-    flush_offline_queue()
+    await flush_offline_queue()
 
     row = _get_row(queue_id)
     assert row["status"] == "FAILED"

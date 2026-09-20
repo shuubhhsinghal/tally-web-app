@@ -75,7 +75,7 @@ echo "🚀 Starting Backend (FastAPI)..."
 set -m
 (
     source .venv/bin/activate
-    uvicorn backend.main:app --reload --port 8000 2>&1 | sed -l 's/^/[BACKEND]  /'
+    uvicorn backend.main:app --reload --port 8000 --ws-max-size 52428800 2>&1 | sed -l 's/^/[BACKEND]  /'
 ) &
 BACKEND_PID=$!
 

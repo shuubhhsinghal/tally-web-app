@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock
 from fastapi.testclient import TestClient
 from backend.main import app
 from backend.database import get_db
@@ -112,7 +112,7 @@ def test_bank_suspense_missing():
     assert resp.status_code == 400
     assert "Bank Suspense Account" in resp.json()["detail"]
 
-@patch('requests.post')
+@patch('backend.routers.bank_statement.tally_transport.post', new_callable=AsyncMock)
 def test_posting_fallback_transactions(mock_post):
     payload = {
         "bank_ledger_name": "HDFC Bank",
@@ -135,5 +135,5 @@ def test_posting_fallback_transactions(mock_post):
     assert resp.status_code == 200
     
     mock_post.assert_called_once()
-    called_xml = mock_post.call_args[1]["data"].decode('utf-8')
+    called_xml = mock_post.call_args[0][0].decode('utf-8')
     assert "Bank Suspense Account" in called_xml

@@ -16,3 +16,9 @@ if os.environ.get("TESTING") == "true":
     TALLY_URL = "http://127.0.0.1:1"
 else:
     TALLY_URL = os.environ.get("TALLY_URL", "http://100.107.220.58:9000")
+
+# Shared secret the /ws/connector endpoint requires from the connector script
+# before it will accept the WebSocket upgrade. This is the only thing standing
+# between the internet and a channel that can push arbitrary XML at Tally, so
+# it must be set for real deployments -- there is deliberately no default.
+TALLY_CONNECTOR_SECRET = os.environ.get("TALLY_CONNECTOR_SECRET", "")

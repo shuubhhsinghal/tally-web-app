@@ -6,6 +6,7 @@ import calendar
 import logging
 from backend.database import get_db
 from backend.config import TALLY_URL
+from backend.connector.transport import tally_transport
 from backend.services.tally_sync_service import sanitize_tally_xml
 
 logger = logging.getLogger(__name__)
@@ -45,7 +46,7 @@ def _safe_float(val: str) -> float:
     except ValueError:
         return 0.0
 
-def fetch_stock_for_month_sync(ym_str: str, first_day: str, last_day: str, tally_url: str):
+async def fetch_stock_for_month_sync(ym_str: str, first_day: str, last_day: str, tally_url: str):
     payload = f"""<ENVELOPE>
   <HEADER>
     <TALLYREQUEST>Export Data</TALLYREQUEST>
@@ -70,7 +71,7 @@ def fetch_stock_for_month_sync(ym_str: str, first_day: str, last_day: str, tally
 </ENVELOPE>"""
 
     try:
-        response = requests.post(tally_url, data=payload.strip(), headers={'Content-Type': 'text/xml'}, timeout=30)
+        response = await tally_transport.post(payload.strip(), timeout=30)
         response.raise_for_status()
         xml_text = response.text
         
@@ -117,7 +118,7 @@ async def async_sync_monthly_stock(start_date: str, end_date: str, tally_url: st
     async def bound_fetch(month_tuple):
         ym_str, first_day, last_day = month_tuple
         async with semaphore:
-            return await asyncio.to_thread(fetch_stock_for_month_sync, ym_str, first_day, last_day, tally_url)
+            return await fetch_stock_for_month_sync(ym_str, first_day, last_day, tally_url)
                 
     tasks = [bound_fetch(m) for m in months]
     batch_results = await asyncio.gather(*tasks)

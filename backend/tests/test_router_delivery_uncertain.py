@@ -2,7 +2,7 @@ import os
 import json
 import pytest
 import requests
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 
 os.environ["TESTING"] = "true"
 
@@ -43,7 +43,7 @@ def _delivery_uncertain(row):
 
 # --- Sales ---
 
-@patch('requests.post')
+@patch('backend.routers.sales.tally_transport.post', new_callable=AsyncMock)
 def test_sales_timeout_sets_delivery_uncertain(mock_post):
     mock_post.side_effect = requests.exceptions.Timeout()
     res = client.post("/api/sales/post", json={
@@ -55,7 +55,7 @@ def test_sales_timeout_sets_delivery_uncertain(mock_post):
     assert _delivery_uncertain(row) is True
 
 
-@patch('requests.post')
+@patch('backend.routers.sales.tally_transport.post', new_callable=AsyncMock)
 def test_sales_connection_error_clears_delivery_uncertain(mock_post):
     mock_post.side_effect = requests.exceptions.ConnectionError()
     res = client.post("/api/sales/post", json={
@@ -67,7 +67,7 @@ def test_sales_connection_error_clears_delivery_uncertain(mock_post):
     assert not _delivery_uncertain(row)
 
 
-@patch('requests.post')
+@patch('backend.routers.sales.tally_transport.post', new_callable=AsyncMock)
 def test_sales_connect_timeout_clears_delivery_uncertain(mock_post):
     # ConnectTimeout means the connection itself never established (Tally
     # unreachable) -- as safe as ConnectionError, must NOT be treated as ambiguous.
@@ -83,7 +83,7 @@ def test_sales_connect_timeout_clears_delivery_uncertain(mock_post):
 
 # --- Purchase ---
 
-@patch('requests.post')
+@patch('backend.routers.purchase.tally_transport.post', new_callable=AsyncMock)
 def test_purchase_timeout_sets_delivery_uncertain(mock_post):
     mock_post.side_effect = requests.exceptions.Timeout()
     res = client.post("/api/purchase/post", json={
@@ -96,7 +96,7 @@ def test_purchase_timeout_sets_delivery_uncertain(mock_post):
     assert _delivery_uncertain(row) is True
 
 
-@patch('requests.post')
+@patch('backend.routers.purchase.tally_transport.post', new_callable=AsyncMock)
 def test_purchase_connection_error_clears_delivery_uncertain(mock_post):
     mock_post.side_effect = requests.exceptions.ConnectionError()
     res = client.post("/api/purchase/post", json={
@@ -109,7 +109,7 @@ def test_purchase_connection_error_clears_delivery_uncertain(mock_post):
     assert not _delivery_uncertain(row)
 
 
-@patch('requests.post')
+@patch('backend.routers.purchase.tally_transport.post', new_callable=AsyncMock)
 def test_purchase_connect_timeout_clears_delivery_uncertain(mock_post):
     mock_post.side_effect = requests.exceptions.ConnectTimeout()
     res = client.post("/api/purchase/post", json={
@@ -124,7 +124,7 @@ def test_purchase_connect_timeout_clears_delivery_uncertain(mock_post):
 
 # --- Payment ---
 
-@patch('requests.post')
+@patch('backend.routers.payment.tally_transport.post', new_callable=AsyncMock)
 def test_payment_timeout_sets_delivery_uncertain(mock_post):
     mock_post.side_effect = requests.exceptions.Timeout()
     res = client.post("/api/payment/post", json={
@@ -137,7 +137,7 @@ def test_payment_timeout_sets_delivery_uncertain(mock_post):
     assert _delivery_uncertain(row) is True
 
 
-@patch('requests.post')
+@patch('backend.routers.payment.tally_transport.post', new_callable=AsyncMock)
 def test_payment_connection_error_clears_delivery_uncertain(mock_post):
     mock_post.side_effect = requests.exceptions.ConnectionError()
     res = client.post("/api/payment/post", json={
@@ -150,7 +150,7 @@ def test_payment_connection_error_clears_delivery_uncertain(mock_post):
     assert not _delivery_uncertain(row)
 
 
-@patch('requests.post')
+@patch('backend.routers.payment.tally_transport.post', new_callable=AsyncMock)
 def test_payment_connect_timeout_clears_delivery_uncertain(mock_post):
     mock_post.side_effect = requests.exceptions.ConnectTimeout()
     res = client.post("/api/payment/post", json={
@@ -165,7 +165,7 @@ def test_payment_connect_timeout_clears_delivery_uncertain(mock_post):
 
 # --- Transfer ---
 
-@patch('requests.post')
+@patch('backend.routers.transfer.tally_transport.post', new_callable=AsyncMock)
 def test_transfer_timeout_sets_delivery_uncertain(mock_post):
     mock_post.side_effect = requests.exceptions.Timeout()
     res = client.post("/api/transfer/post", json={
@@ -178,7 +178,7 @@ def test_transfer_timeout_sets_delivery_uncertain(mock_post):
     assert _delivery_uncertain(row) is True
 
 
-@patch('requests.post')
+@patch('backend.routers.transfer.tally_transport.post', new_callable=AsyncMock)
 def test_transfer_connection_error_clears_delivery_uncertain(mock_post):
     mock_post.side_effect = requests.exceptions.ConnectionError()
     res = client.post("/api/transfer/post", json={
@@ -191,7 +191,7 @@ def test_transfer_connection_error_clears_delivery_uncertain(mock_post):
     assert not _delivery_uncertain(row)
 
 
-@patch('requests.post')
+@patch('backend.routers.transfer.tally_transport.post', new_callable=AsyncMock)
 def test_transfer_connect_timeout_clears_delivery_uncertain(mock_post):
     mock_post.side_effect = requests.exceptions.ConnectTimeout()
     res = client.post("/api/transfer/post", json={
@@ -206,7 +206,7 @@ def test_transfer_connect_timeout_clears_delivery_uncertain(mock_post):
 
 # --- Stock Transfer ---
 
-@patch('requests.post')
+@patch('backend.routers.stock_transfer.tally_transport.post', new_callable=AsyncMock)
 def test_stock_transfer_timeout_sets_delivery_uncertain(mock_post):
     mock_post.side_effect = requests.exceptions.Timeout()
     res = client.post("/api/stock-transfer/post", json={
@@ -219,7 +219,7 @@ def test_stock_transfer_timeout_sets_delivery_uncertain(mock_post):
     assert _delivery_uncertain(row) is True
 
 
-@patch('requests.post')
+@patch('backend.routers.stock_transfer.tally_transport.post', new_callable=AsyncMock)
 def test_stock_transfer_connection_error_clears_delivery_uncertain(mock_post):
     mock_post.side_effect = requests.exceptions.ConnectionError()
     res = client.post("/api/stock-transfer/post", json={
@@ -232,7 +232,7 @@ def test_stock_transfer_connection_error_clears_delivery_uncertain(mock_post):
     assert not _delivery_uncertain(row)
 
 
-@patch('requests.post')
+@patch('backend.routers.stock_transfer.tally_transport.post', new_callable=AsyncMock)
 def test_stock_transfer_connect_timeout_clears_delivery_uncertain(mock_post):
     mock_post.side_effect = requests.exceptions.ConnectTimeout()
     res = client.post("/api/stock-transfer/post", json={
@@ -262,7 +262,7 @@ def _purchase_item_payload(invoice_number):
     }
 
 
-@patch('requests.post')
+@patch('backend.routers.purchase_item.tally_transport.post', new_callable=AsyncMock)
 def test_purchase_item_timeout_sets_delivery_uncertain(mock_post):
     mock_post.side_effect = requests.exceptions.Timeout()
     res = client.post("/api/purchase-item/post", json=_purchase_item_payload("PI-1"))
@@ -272,7 +272,7 @@ def test_purchase_item_timeout_sets_delivery_uncertain(mock_post):
     assert _delivery_uncertain(row) is True
 
 
-@patch('requests.post')
+@patch('backend.routers.purchase_item.tally_transport.post', new_callable=AsyncMock)
 def test_purchase_item_connection_error_clears_delivery_uncertain(mock_post):
     mock_post.side_effect = requests.exceptions.ConnectionError()
     res = client.post("/api/purchase-item/post", json=_purchase_item_payload("PI-2"))
@@ -282,7 +282,7 @@ def test_purchase_item_connection_error_clears_delivery_uncertain(mock_post):
     assert not _delivery_uncertain(row)
 
 
-@patch('requests.post')
+@patch('backend.routers.purchase_item.tally_transport.post', new_callable=AsyncMock)
 def test_purchase_item_connect_timeout_clears_delivery_uncertain(mock_post):
     mock_post.side_effect = requests.exceptions.ConnectTimeout()
     res = client.post("/api/purchase-item/post", json=_purchase_item_payload("PI-2c"))
@@ -294,7 +294,7 @@ def test_purchase_item_connect_timeout_clears_delivery_uncertain(mock_post):
 
 # --- Bank Statement (batch) ---
 
-@patch('requests.post')
+@patch('backend.routers.bank_statement.tally_transport.post', new_callable=AsyncMock)
 def test_bank_statement_timeout_flags_every_row_in_batch(mock_post):
     mock_post.side_effect = requests.exceptions.Timeout()
     res = client.post("/api/bank-statement/post", json={
@@ -315,7 +315,7 @@ def test_bank_statement_timeout_flags_every_row_in_batch(mock_post):
         assert _delivery_uncertain(row) is True
 
 
-@patch('requests.post')
+@patch('backend.routers.bank_statement.tally_transport.post', new_callable=AsyncMock)
 def test_bank_statement_connection_error_clears_every_row_in_batch(mock_post):
     mock_post.side_effect = requests.exceptions.ConnectionError()
     res = client.post("/api/bank-statement/post", json={
@@ -330,7 +330,7 @@ def test_bank_statement_connection_error_clears_every_row_in_batch(mock_post):
     assert not _delivery_uncertain(row)
 
 
-@patch('requests.post')
+@patch('backend.routers.bank_statement.tally_transport.post', new_callable=AsyncMock)
 def test_bank_statement_connect_timeout_clears_every_row_in_batch(mock_post):
     mock_post.side_effect = requests.exceptions.ConnectTimeout()
     res = client.post("/api/bank-statement/post", json={

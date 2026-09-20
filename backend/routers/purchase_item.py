@@ -28,7 +28,7 @@ from backend.utils.math_reconciler import reconcile_full_invoice
 
 router = APIRouter()
 
-from backend.config import TALLY_URL
+from backend.connector.transport import tally_transport
 from backend.services.image_normalizer import normalize_uploaded_invoice
 from backend.services.item_mapping import normalize_item_name, map_items_to_tally, map_supplier_to_tally
 
@@ -156,7 +156,7 @@ async def get_return_item_history(item_name: str = Query(...)):
             break
 
     try:
-        entries = fetch_live_purchase_history_from_tally(item_name, since_date_compact)
+        entries = await fetch_live_purchase_history_from_tally(item_name, since_date_compact)
         for e in entries:
             e['unit'] = unit
         # Merge in any not-yet-Tally-confirmed local purchases, plus repack
@@ -462,7 +462,7 @@ async def create_supplier(payload: NewSupplierRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
     try:
-        response = requests.post(TALLY_URL, data=xml_data.encode('utf-8'), timeout=4)
+        response = await tally_transport.post(xml_data.encode('utf-8'), timeout=4)
         parsed = parse_tally_response(response.text, "CREATE_LEDGER")
         if not parsed["is_success"]:
             raise HTTPException(status_code=400, detail=f"Tally rejected the creation: {parsed['error_message']}")
@@ -472,7 +472,7 @@ async def create_supplier(payload: NewSupplierRequest):
         
         insert_name = payload.name
         if is_already_exists_success(parsed, "CREATE_LEDGER"):
-            ver_res, canonical = verify_tally_master_definition("LEDGER", payload.name, {"parent": "Sundry Creditors"})
+            ver_res, canonical = await verify_tally_master_definition("LEDGER", payload.name, {"parent": "Sundry Creditors"})
             if ver_res == VerificationResult.UNVERIFIABLE:
                 raise HTTPException(status_code=400, detail="Master already exists in Tally, but its definition could not be verified. Refresh masters and try again.")
             elif ver_res == VerificationResult.CONFLICT:
@@ -1029,7 +1029,7 @@ async def post_purchase_item(payload: PurchaseItemPostRequest):
             
         # Post Purchase Voucher
         set_delivery_uncertain(queue_id, True)
-        response = requests.post(TALLY_URL, data=xml.encode('utf-8'), timeout=15)
+        response = await tally_transport.post(xml.encode('utf-8'), timeout=15)
         parsed = parse_tally_response(response.text, "POST_VOUCHER")
 
         if not parsed["is_success"]:
@@ -1046,7 +1046,7 @@ async def post_purchase_item(payload: PurchaseItemPostRequest):
             adjustment_result = {"status": "queued"}
             try:
                 set_delivery_uncertain(adjustment_queue_id, True)
-                adj_response = requests.post(TALLY_URL, data=debit_note_xml.encode('utf-8'), timeout=15)
+                adj_response = await tally_transport.post(debit_note_xml.encode('utf-8'), timeout=15)
                 adj_parsed = parse_tally_response(adj_response.text, "POST_VOUCHER")
                 if not adj_parsed["is_success"]:
                     set_delivery_uncertain(adjustment_queue_id, False)

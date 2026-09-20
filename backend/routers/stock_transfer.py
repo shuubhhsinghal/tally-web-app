@@ -6,8 +6,7 @@ from fastapi import HTTPException
 from backend.database import get_all_stock_items, queue_operation, update_queue_status, set_delivery_uncertain, get_active_stores, get_store_mapping
 import requests
 from backend.services.tally_response import parse_tally_response
-
-from backend.config import TALLY_URL
+from backend.connector.transport import tally_transport
 
 router = APIRouter()
 
@@ -76,14 +75,14 @@ class PostRequest(BaseModel):
     to_store: str
     tally_date: str # YYYYMMDD
 
-def _attempt_post_voucher(queue_id: int, xml_payload: str) -> dict:
+async def _attempt_post_voucher(queue_id: int, xml_payload: str) -> dict:
     """Attempts an immediate live POST for one already-queued voucher and
     reports its own outcome, independent of any other voucher in the same
     request -- mirrors the queue-first + best-effort-immediate-send pattern
     used for the main invoice/adjustment pair in purchase_item.py."""
     try:
         set_delivery_uncertain(queue_id, True)
-        response = requests.post(TALLY_URL, data=xml_payload.encode('utf-8'), timeout=10)
+        response = await tally_transport.post(xml_payload.encode('utf-8'), timeout=10)
         parsed = parse_tally_response(response.text, "POST_VOUCHER")
 
         if not parsed["is_success"]:
@@ -142,7 +141,7 @@ async def post_transfer(payload: PostRequest):
     # still hard-blocks the transfer.
     if is_tally_reachable():
         try:
-            stock = get_godown_stock(payload.item_name, from_mapping['godown_name'])
+            stock = await get_godown_stock(payload.item_name, from_mapping['godown_name'])
             if stock["qty"] < payload.qty:
                 raise HTTPException(status_code=400, detail=f"Insufficient stock for '{payload.item_name}' in Godown '{from_mapping['godown_name']}'. Required: {payload.qty}, Available: {stock['qty']}")
         except HTTPException:
@@ -281,8 +280,8 @@ async def post_transfer(payload: PostRequest):
     accounting_queue_id = queue_operation("POST_VOUCHER", accounting_xml, payload.model_dump(), f"Stock Transfer: {payload.qty} pcs of {safe_item} (Accounting)")
     physical_queue_id = queue_operation("POST_VOUCHER", physical_xml, payload.model_dump(), f"Stock Transfer: {payload.qty} pcs of {safe_item} (Physical)")
 
-    accounting_result = _attempt_post_voucher(accounting_queue_id, accounting_xml)
-    physical_result = _attempt_post_voucher(physical_queue_id, physical_xml)
+    accounting_result = await _attempt_post_voucher(accounting_queue_id, accounting_xml)
+    physical_result = await _attempt_post_voucher(physical_queue_id, physical_xml)
 
     statuses = {accounting_result["status"], physical_result["status"]}
     if statuses == {"success"}:

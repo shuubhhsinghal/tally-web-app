@@ -2,18 +2,16 @@ import requests
 from xml.sax.saxutils import escape
 import xml.etree.ElementTree as ET
 from enum import Enum
-import os
 
 from backend.database import normalize_master_name, _check_definitions_conflict
-
-TALLY_URL = os.environ.get("TALLY_URL", "http://localhost:9000")
+from backend.connector.transport import tally_transport
 
 class VerificationResult(Enum):
     COMPATIBLE = "COMPATIBLE"
     CONFLICT = "CONFLICT"
     UNVERIFIABLE = "UNVERIFIABLE"
 
-def verify_tally_master_definition(entity_type: str, requested_name: str, requested_payload: dict):
+async def verify_tally_master_definition(entity_type: str, requested_name: str, requested_payload: dict):
     """
     Looks up a specific master by name in Tally and verifies if its definition
     is compatible with the requested payload.
@@ -55,7 +53,7 @@ def verify_tally_master_definition(entity_type: str, requested_name: str, reques
     </ENVELOPE>"""
     
     try:
-        resp = requests.post(TALLY_URL, data=xml_request.encode('utf-8'), timeout=4)
+        resp = await tally_transport.post(xml_request.encode('utf-8'), timeout=4)
         resp.raise_for_status()
     except Exception:
         return VerificationResult.UNVERIFIABLE, None

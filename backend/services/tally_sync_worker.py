@@ -17,10 +17,12 @@ from backend.database import (
 
 from backend.config import TALLY_URL
 from backend.services.tally_reporting_sync import async_sync_cost_centres, async_sync_vouchers, _get_current_fy_start
+from backend.connector.manager import connector_manager
+from backend.connector.transport import tally_transport
 
 
 
-def fetch_and_cache_masters():
+async def fetch_and_cache_masters():
     # 1. Ledgers
     from datetime import datetime
     dt = datetime.now()
@@ -58,7 +60,7 @@ def fetch_and_cache_masters():
       </BODY>
     </ENVELOPE>"""
     try:
-        response = requests.post(TALLY_URL, data=ledger_payload, headers={'Content-Type': 'text/xml'}, timeout=15)
+        response = await tally_transport.post(ledger_payload, timeout=15)
         response.raise_for_status()
         root = ET.fromstring(sanitize_tally_xml(response.text))
         ledgers = []
@@ -95,7 +97,7 @@ def fetch_and_cache_masters():
             </EXPORTDATA>
           </BODY>
         </ENVELOPE>"""
-        closing_resp = requests.post(TALLY_URL, data=closing_payload.encode('utf-8'), timeout=45)
+        closing_resp = await tally_transport.post(closing_payload.encode('utf-8'), timeout=45)
         closing_resp.raise_for_status()
         c_root = ET.fromstring(sanitize_tally_xml(closing_resp.text))
         
@@ -146,7 +148,7 @@ def fetch_and_cache_masters():
       </BODY>
     </ENVELOPE>"""
     try:
-        response = requests.post(TALLY_URL, data=godown_payload.encode('utf-8'), timeout=15)
+        response = await tally_transport.post(godown_payload.encode('utf-8'), timeout=15)
         response.raise_for_status()
         root = ET.fromstring(sanitize_tally_xml(response.text))
         godowns = []
@@ -185,7 +187,7 @@ def fetch_and_cache_masters():
       </BODY>
     </ENVELOPE>"""
     try:
-        response = requests.post(TALLY_URL, data=item_payload, headers={'Content-Type': 'text/xml'}, timeout=15)
+        response = await tally_transport.post(item_payload, timeout=15)
         response.raise_for_status()
         root = ET.fromstring(sanitize_tally_xml(response.text))
         items = []
@@ -233,7 +235,7 @@ def fetch_and_cache_masters():
         
         item_latest_rates = {}
         try:
-            v_response = requests.post(TALLY_URL, data=voucher_payload, headers={'Content-Type': 'text/xml'}, timeout=15)
+            v_response = await tally_transport.post(voucher_payload, timeout=15)
             if v_response.status_code == 200:
                 v_root = ET.fromstring(sanitize_tally_xml(v_response.text))
                 for vch in v_root.findall('.//VOUCHER'):
@@ -305,7 +307,7 @@ def fetch_and_cache_masters():
       </BODY>
     </ENVELOPE>"""
     try:
-        response = requests.post(TALLY_URL, data=uom_payload, headers={'Content-Type': 'text/xml'}, timeout=15)
+        response = await tally_transport.post(uom_payload, timeout=15)
         response.raise_for_status()
         root = ET.fromstring(sanitize_tally_xml(response.text))
         uoms = []
@@ -340,7 +342,7 @@ def fetch_and_cache_masters():
     except Exception as e:
         print(f"Error during master refresh reconciliation: {e}")
 
-def flush_offline_queue():
+async def flush_offline_queue():
     queue = get_pending_queue()
     if not queue:
         return 0, 0
@@ -409,7 +411,7 @@ def flush_offline_queue():
             set_delivery_uncertain(item["id"], True)
 
         try:
-            resp = requests.post(TALLY_URL, data=item["xml_data"], headers={'Content-Type': 'text/xml'}, timeout=10)
+            resp = await tally_transport.post(item["xml_data"], timeout=10)
 
             parsed_resp = parse_tally_response(resp.text, item.get("operation_type", ""))
 
@@ -504,23 +506,20 @@ async def sync_worker_loop():
 
     while True:
         try:
-            # 1. Micro-Ping
-            try:
-                requests.get(TALLY_URL, timeout=3)
-                tally_online = True
-            except Exception:
-                tally_online = False
+            # 1. Is a connector currently connected? Plain in-memory check --
+            # no network round-trip needed (see backend/connector/manager.py).
+            tally_online = connector_manager.is_connected()
 
-            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Pinging Tally... Online: {tally_online}")
+            print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Connector online: {tally_online}")
 
             if tally_online:
                 # 2. Flush Offline Queue
-                flush_offline_queue()
+                await flush_offline_queue()
                             
                 # 3. Master Sync (every 5 minutes)
                 if time.time() - last_master_sync > 300:
                     print("Performing 5-minute master sync from Tally...")
-                    await asyncio.to_thread(fetch_and_cache_masters)
+                    await fetch_and_cache_masters()
                     last_master_sync = time.time()
                     print("Master sync complete.")
 

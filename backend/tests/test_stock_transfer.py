@@ -1,10 +1,11 @@
 import json
 import pytest
 import requests
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, AsyncMock
 from fastapi.testclient import TestClient
 from backend.main import app
 from backend.database import get_db
+from backend.connector.manager import connector_manager
 
 client = TestClient(app)
 
@@ -76,11 +77,9 @@ def test_post_transfer_missing_to_godown_returns_400(monkeypatch):
 
 
 def test_post_transfer_queues_both_vouchers_when_tally_offline(monkeypatch):
-    def _simulate_offline(*a, **k):
-        raise requests.exceptions.ConnectionError("simulated offline")
-    monkeypatch.setattr(requests, "get", _simulate_offline)
-    monkeypatch.setattr(requests, "post", _simulate_offline)
-
+    # No connector registered (the default in tests) -- is_tally_reachable()
+    # is naturally False and tally_transport.post() naturally raises
+    # ConnectTimeout, exactly like a real "nothing connected" state.
     response = client.post("/api/stock-transfer/post", json=_post_payload())
     assert response.status_code == 200
     data = response.json()
@@ -115,10 +114,10 @@ def test_post_transfer_queues_both_vouchers_when_tally_offline(monkeypatch):
 
 
 def test_post_transfer_blocks_on_insufficient_stock_when_tally_reachable(monkeypatch):
-    monkeypatch.setattr(requests, "get", lambda *a, **k: None)  # Tally "reachable"
+    monkeypatch.setattr(connector_manager, "is_connected", lambda: True)
 
     import backend.services.tally_godown_stock as godown_module
-    def mock_get_godown_stock(item_name, godown_name):
+    async def mock_get_godown_stock(item_name, godown_name):
         return {"qty": 2.0, "rate": 50.0, "amount": 100.0}
     monkeypatch.setattr(godown_module, "get_godown_stock", mock_get_godown_stock)
 
@@ -129,16 +128,16 @@ def test_post_transfer_blocks_on_insufficient_stock_when_tally_reachable(monkeyp
 
 
 def test_post_transfer_success_when_reachable_and_sufficient(monkeypatch):
-    monkeypatch.setattr(requests, "get", lambda *a, **k: None)  # Tally "reachable"
+    monkeypatch.setattr(connector_manager, "is_connected", lambda: True)
 
     import backend.services.tally_godown_stock as godown_module
-    def mock_get_godown_stock(item_name, godown_name):
+    async def mock_get_godown_stock(item_name, godown_name):
         return {"qty": 100.0, "rate": 50.0, "amount": 5000.0}
     monkeypatch.setattr(godown_module, "get_godown_stock", mock_get_godown_stock)
 
     mock_resp = MagicMock()
     mock_resp.text = SUCCESS_XML
-    monkeypatch.setattr(requests, "post", lambda *a, **k: mock_resp)
+    monkeypatch.setattr("backend.routers.stock_transfer.tally_transport.post", AsyncMock(return_value=mock_resp))
 
     response = client.post("/api/stock-transfer/post", json=_post_payload())
     assert response.status_code == 200
@@ -149,14 +148,16 @@ def test_post_transfer_success_when_reachable_and_sufficient(monkeypatch):
 
 
 def test_post_transfer_reports_failed_when_tally_rejects(monkeypatch):
-    monkeypatch.setattr(requests, "get", lambda *a, **k: None)  # Tally "reachable"
+    monkeypatch.setattr(connector_manager, "is_connected", lambda: True)
 
     import backend.services.tally_godown_stock as godown_module
-    monkeypatch.setattr(godown_module, "get_godown_stock", lambda *a, **k: {"qty": 100.0, "rate": 50.0, "amount": 5000.0})
+    async def mock_get_godown_stock(item_name, godown_name):
+        return {"qty": 100.0, "rate": 50.0, "amount": 5000.0}
+    monkeypatch.setattr(godown_module, "get_godown_stock", mock_get_godown_stock)
 
     mock_resp = MagicMock()
     mock_resp.text = REJECTED_XML
-    monkeypatch.setattr(requests, "post", lambda *a, **k: mock_resp)
+    monkeypatch.setattr("backend.routers.stock_transfer.tally_transport.post", AsyncMock(return_value=mock_resp))
 
     response = client.post("/api/stock-transfer/post", json=_post_payload())
     assert response.status_code == 200
