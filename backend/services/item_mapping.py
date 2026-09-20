@@ -2,6 +2,7 @@ import os
 import re
 import json
 import difflib
+from typing import Optional
 from google import genai
 from google.genai import types
 from json_repair import repair_json
@@ -35,6 +36,35 @@ def normalize_item_name(name: str) -> str:
     # broad here (any digit+word boundary, not a fixed unit list) is safe.
     name = re.sub(r'(\d)\s+([a-z])', r'\1\2', name)
     return name
+
+
+# How close a name has to be to auto-accept it with no human/AI review at
+# all. Deliberately conservative (vs. the 0.3 shortlist cutoff used for the
+# AI step below) since nothing double-checks this decision -- it's meant to
+# catch clearly-the-same-item noise (one dropped/extra character, a
+# look-alike character swap like 0/O or 1/l), not genuinely ambiguous calls.
+_LOCAL_FUZZY_AUTO_MATCH_CUTOFF = float(os.getenv("ITEM_MATCHING_LOCAL_FUZZY_CUTOFF", "0.85"))
+
+
+def _local_fuzzy_match_key(norm_name: str, candidate_keys) -> Optional[str]:
+    """Zero-cost, no-AI fuzzy match for small extraction noise -- an extra or
+    missing character, or a look-alike character substitution. Only ever
+    auto-accepts when the best candidate is both above the cutoff AND
+    clearly ahead of the next-best one, so a genuine tie between two
+    plausible items is never silently guessed."""
+    candidate_keys = list(candidate_keys)
+    if not candidate_keys:
+        return None
+    scores = sorted(
+        ((key, difflib.SequenceMatcher(None, norm_name, key).ratio()) for key in candidate_keys),
+        key=lambda kv: kv[1], reverse=True
+    )
+    best_key, best_score = scores[0]
+    if best_score < _LOCAL_FUZZY_AUTO_MATCH_CUTOFF:
+        return None
+    if len(scores) > 1 and (best_score - scores[1][1]) < 0.05:
+        return None
+    return best_key
 
 
 def map_items_to_tally(raw_items: list) -> list:
@@ -80,6 +110,14 @@ def map_items_to_tally(raw_items: list) -> list:
                     mapped_unit = stock_data.get('unit', mapped_unit)
                     match_found = True
                     break
+
+            if not match_found:
+                fuzzy_key = _local_fuzzy_match_key(norm_name, stock_cache.keys())
+                if fuzzy_key:
+                    stock_data = stock_cache[fuzzy_key]
+                    mapped_name = stock_data.get('name')
+                    mapped_unit = stock_data.get('unit', mapped_unit)
+                    match_found = True
 
         item['mapped_name'] = mapped_name if match_found else ""
         item['mapped_unit'] = mapped_unit
