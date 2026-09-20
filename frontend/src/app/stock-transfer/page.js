@@ -117,10 +117,21 @@ export default function StockTransfer() {
       });
       
       if (response.ok) {
-        showToast("Stock transfer saved");
+        const data = await response.json();
+        if (data.status === "success") {
+          showToast("Stock transfer posted to Tally");
+        } else if (data.status === "failed") {
+          const problems = [];
+          if (data.accounting?.status === "failed") problems.push(`Accounting entry: ${data.accounting.message}`);
+          if (data.physical?.status === "failed") problems.push(`Stock movement: ${data.physical.message}`);
+          showToast(problems.join(" | ") || "Tally rejected the transfer.", 'error');
+        } else {
+          showToast("Tally is offline. Saved to queue.");
+        }
         router.push('/dashboard');
       } else {
-        showToast("Failed to post to Tally.", 'error');
+        const errorData = await response.json().catch(() => ({}));
+        showToast(errorData.detail || 'Failed to post to Tally.', 'error');
       }
     } catch (error) {
       showToast("Network error while posting.", 'error');
