@@ -14,6 +14,13 @@ from backend.database import get_all_stock_items, get_all_aliases, get_all_ledge
 # affecting which match Gemini's answer is validated against.
 _FUZZY_CANDIDATES_PER_ITEM = 15
 
+def _item_ai_matching_enabled() -> bool:
+    # Worth turning off while your Tally item catalog is still small/empty --
+    # the AI step has nothing useful to match against yet (it can only ever
+    # return "no match"), so it's pure cost with zero benefit until you've
+    # built up a real list of items via the app's own create-item flow.
+    return os.getenv("ITEM_MATCHING_AI_ENABLED", "true").strip().lower() not in ("false", "0", "no")
+
 
 def normalize_item_name(name: str) -> str:
     name = (name or "").strip().casefold()
@@ -77,7 +84,7 @@ def map_items_to_tally(raw_items: list) -> list:
             unmapped_raw_items.append(item)
             mapped_items.append(item)
 
-    if unmapped_raw_items:
+    if unmapped_raw_items and _item_ai_matching_enabled():
         api_key = os.getenv("GEMINI_API_KEY")
         if api_key:
             client = genai.Client(api_key=api_key)
