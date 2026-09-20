@@ -30,8 +30,20 @@ uploads_dir = os.path.join(os.getcwd(), "backend", "uploads")
 os.makedirs(uploads_dir, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=uploads_dir), name="uploads")
 
+# Always allow the known production domains, regardless of FRONTEND_URL --
+# the frontend calls the backend cross-origin (tallybot-api.duckdns.org),
+# so a missing/misconfigured FRONTEND_URL on the backend host (e.g. after a
+# restart that didn't carry the env var) would otherwise silently block
+# every single request with an opaque browser-side "Failed to fetch",
+# indistinguishable from Tally being disconnected.
+_KNOWN_PRODUCTION_ORIGINS = [
+    "https://www.tallybot.duckdns.org",
+    "https://tallybot.duckdns.org",
+]
 frontend_url = os.environ.get("FRONTEND_URL", "http://localhost:3000")
-allow_origins = [url.strip() for url in frontend_url.split(",")]
+allow_origins = list(dict.fromkeys(
+    [url.strip() for url in frontend_url.split(",")] + _KNOWN_PRODUCTION_ORIGINS
+))
 
 app.add_middleware(
     CORSMiddleware,
