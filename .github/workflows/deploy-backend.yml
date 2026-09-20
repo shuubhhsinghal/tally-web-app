@@ -3,6 +3,10 @@ name: Deploy backend
 on:
   push:
     branches: [main]
+    paths:
+      - 'backend/**'
+      - 'requirements.txt'
+      - '.github/workflows/deploy-backend.yml'
   workflow_dispatch: {}
 
 jobs:
