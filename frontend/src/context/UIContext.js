@@ -25,6 +25,17 @@ export const UIProvider = ({ children }) => {
     }
   }, [toast]);
 
+  // Lock background scroll while a full-screen overlay is open -- otherwise
+  // a touch drag on the action sheet/dialog (or its backdrop) scrolls the
+  // page underneath instead of staying contained to the overlay.
+  useEffect(() => {
+    if (actionSheet || confirmDialog) {
+      const original = document.body.style.overflow;
+      document.body.style.overflow = 'hidden';
+      return () => { document.body.style.overflow = original; };
+    }
+  }, [actionSheet, confirmDialog]);
+
   const showToast = (message, type = 'success') => setToast({ message, type });
 
   const showActionSheet = (config) => setActionSheet(config);
