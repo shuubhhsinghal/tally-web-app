@@ -18,14 +18,15 @@ export default function SalesVoucher() {
     ledger: "",
     amount: "",
     narration: "",
+    store: "",
     date: "" // Local YYYY-MM-DD
   });
-  
+
   const [preview, setPreview] = useState(null);
   const [loading, setLoading] = useState(false);
   const [posting, setPosting] = useState(false);
-  
-  const [meta, setMeta] = useState({ customers: [] });
+
+  const [meta, setMeta] = useState({ customers: [], stores: ["Mahagun", "Vvip", "Gulshan"] });
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -56,6 +57,7 @@ export default function SalesVoucher() {
           amount: parseFloat(formData.amount),
           tally_date: formData.date.replace(/-/g, ''),
           narration: formData.narration,
+          store: formData.store,
         }),
       });
       if (!response.ok) {
@@ -86,6 +88,7 @@ export default function SalesVoucher() {
           amount: preview.amount,
           tally_date: preview.tally_date,
           narration: finalNarration,
+          store: preview.store,
         }),
       });
       
@@ -115,6 +118,11 @@ export default function SalesVoucher() {
             <div>
               <p className="text-xs font-semibold text-gray-500 uppercase">Ledger</p>
               <p className="text-xl font-bold text-gray-900 dark:text-white mt-1">{preview.ledger}</p>
+            </div>
+            <div className="h-px bg-gray-100 dark:bg-gray-800 my-2" />
+            <div>
+              <p className="text-xs font-semibold text-gray-500 uppercase">Store</p>
+              <p className="text-xl font-bold text-gray-900 dark:text-white mt-1">{preview.store}</p>
             </div>
             {formData.narration && (
               <>
@@ -166,7 +174,7 @@ export default function SalesVoucher() {
             required
           />
 
-          <Select 
+          <Select
             label="Customer / Ledger"
             name="ledger"
             value={formData.ledger}
@@ -179,7 +187,20 @@ export default function SalesVoucher() {
             ))}
           </Select>
 
-          <TextArea 
+          <Select
+            label="Store"
+            name="store"
+            value={formData.store}
+            onChange={handleChange}
+            required
+          >
+            <option value="" disabled>Select store...</option>
+            {meta.stores.map((s) => (
+              <option key={s} value={s}>{s}</option>
+            ))}
+          </Select>
+
+          <TextArea
             label="Notes (Optional)"
             name="narration"
             placeholder="Any extra details?"

@@ -4,7 +4,7 @@ import requests
 import json
 import os
 from xml.sax.saxutils import escape
-from backend.database import get_all_ledgers, queue_operation, update_queue_status, set_delivery_uncertain, resolve_cost_center_for_ledger
+from backend.database import get_all_ledgers, queue_operation, update_queue_status, set_delivery_uncertain, get_store_mapping, get_active_stores
 from backend.services.tally_response import parse_tally_response
 from backend.connector.transport import tally_transport
 
@@ -15,6 +15,7 @@ class SalesRequest(BaseModel):
     amount: float
     tally_date: str
     narration: str
+    store: str
 
 @router.get("/metadata")
 async def get_sales_metadata():
@@ -29,7 +30,9 @@ async def get_sales_metadata():
     except Exception:
         pass
 
-    return {"customers": sorted(list(set(customers)))}
+    store_names = [s['store_name'] for s in get_active_stores()]
+
+    return {"customers": sorted(list(set(customers))), "stores": store_names}
 
 @router.post("/preview")
 async def preview_sales(payload: SalesRequest):
@@ -38,6 +41,7 @@ async def preview_sales(payload: SalesRequest):
         "amount": payload.amount,
         "tally_date": payload.tally_date,
         "narration": payload.narration,
+        "store": payload.store,
         "status": "success"
     }
 
@@ -45,11 +49,14 @@ async def preview_sales(payload: SalesRequest):
 async def post_sales(payload: SalesRequest):
     safe_ledger = escape(str(payload.ledger))
     safe_nar = escape(str(payload.narration))
-    
-    # Auto-derive cost center by matching the ledger name against the real stores
-    # table, so the allocation uses the exact Tally cost-centre casing and the
-    # resolved value can be persisted below for the Queue page's store filter.
-    cost_center = resolve_cost_center_for_ledger(payload.ledger)
+
+    # Store is picked explicitly on the form now (not guessed from the ledger
+    # name), so the allocation always uses the exact Tally cost-centre casing
+    # regardless of which ledger was chosen.
+    store_mapping = get_store_mapping(payload.store)
+    if not store_mapping:
+        raise HTTPException(status_code=400, detail=f"Store '{payload.store}' does not have a mapped Cost Centre. Please configure it.")
+    cost_center = store_mapping['cost_center_name']
 
     allocation = ""
     if cost_center:
@@ -89,8 +96,7 @@ async def post_sales(payload: SalesRequest):
 
     # Queue-First Architecture: Always save transaction to DB before attempting to send
     queue_payload = payload.model_dump()
-    if cost_center:
-        queue_payload['cost_center'] = cost_center
+    queue_payload['cost_center'] = cost_center
     queue_id = queue_operation("POST_VOUCHER", xml_data, queue_payload, f"Sales: {payload.amount} from {payload.ledger}")
 
     try:

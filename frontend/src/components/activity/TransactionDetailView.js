@@ -31,6 +31,14 @@ export const TransactionDetailView = ({ itemId, onBack, onMutated }) => {
   const [viewMode, setViewMode] = useState('preview');
   const [isEditMode, setIsEditMode] = useState(false);
   const [editPayload, setEditPayload] = useState(null);
+  const [stores, setStores] = useState(["Mahagun", "Vvip", "Gulshan"]);
+
+  useEffect(() => {
+    fetch('/api/sales/metadata')
+      .then(res => res.json())
+      .then(data => { if (Array.isArray(data.stores)) setStores(data.stores); })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -286,6 +294,17 @@ export const TransactionDetailView = ({ itemId, onBack, onMutated }) => {
                   onChange={e => setEditPayload({ ...editPayload, amount: parseFloat(e.target.value) || 0 })}
                   className="w-full px-3 py-2 text-sm rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 outline-none focus:border-teal-500"
                 />
+              </div>
+              <div>
+                <p className="text-xs font-bold text-gray-400 uppercase mb-1">Store</p>
+                <select
+                  value={editPayload.store || ''}
+                  onChange={e => setEditPayload({ ...editPayload, store: e.target.value })}
+                  className="w-full px-3 py-2 text-sm rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 outline-none focus:border-teal-500"
+                >
+                  <option value="" disabled>Select store...</option>
+                  {stores.map(s => <option key={s} value={s}>{s}</option>)}
+                </select>
               </div>
               <div>
                 <p className="text-xs font-bold text-gray-400 uppercase mb-1">Date</p>

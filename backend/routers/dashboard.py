@@ -520,7 +520,7 @@ def _rebuild_purchase_item_voucher(item_id: int, p: dict):
 
 def _rebuild_sales_voucher(item_id: int, p: dict):
     from xml.sax.saxutils import escape as _escape
-    from backend.database import resolve_cost_center_for_ledger
+    from backend.database import resolve_cost_center_for_ledger, get_store_mapping
 
     try:
         ledger = _escape(str(p.get("ledger", "")))
@@ -528,7 +528,16 @@ def _rebuild_sales_voucher(item_id: int, p: dict):
         tally_date = str(p.get("tally_date", ""))
         narration = _escape(str(p.get("narration", "")))
 
-        cost_center = resolve_cost_center_for_ledger(p.get("ledger", ""))
+        # Newer queued items carry an explicit store; older ones predate that
+        # field, so fall back to the legacy ledger-name inference for those.
+        store = p.get("store")
+        if store:
+            store_mapping = get_store_mapping(store)
+            if not store_mapping:
+                raise HTTPException(status_code=400, detail=f"Store '{store}' does not have a mapped Cost Centre. Please configure it.")
+            cost_center = store_mapping['cost_center_name']
+        else:
+            cost_center = resolve_cost_center_for_ledger(p.get("ledger", ""))
         allocation = ""
         if cost_center:
             allocation = f"""

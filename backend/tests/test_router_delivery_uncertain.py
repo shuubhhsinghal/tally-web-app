@@ -47,7 +47,7 @@ def _delivery_uncertain(row):
 def test_sales_timeout_sets_delivery_uncertain(mock_post):
     mock_post.side_effect = requests.exceptions.Timeout()
     res = client.post("/api/sales/post", json={
-        "ledger": "Cash Mahagun", "amount": 100.0, "tally_date": "20260101", "narration": "test"
+        "ledger": "Cash Mahagun", "amount": 100.0, "tally_date": "20260101", "narration": "test", "store": "Mahagun"
     })
     assert res.status_code == 200
     row = _latest_row("Sales:%")
@@ -59,7 +59,7 @@ def test_sales_timeout_sets_delivery_uncertain(mock_post):
 def test_sales_connection_error_clears_delivery_uncertain(mock_post):
     mock_post.side_effect = requests.exceptions.ConnectionError()
     res = client.post("/api/sales/post", json={
-        "ledger": "Cash Mahagun", "amount": 100.0, "tally_date": "20260101", "narration": "test"
+        "ledger": "Cash Mahagun", "amount": 100.0, "tally_date": "20260101", "narration": "test", "store": "Mahagun"
     })
     assert res.status_code == 200
     row = _latest_row("Sales:%")
@@ -73,7 +73,7 @@ def test_sales_connect_timeout_clears_delivery_uncertain(mock_post):
     # unreachable) -- as safe as ConnectionError, must NOT be treated as ambiguous.
     mock_post.side_effect = requests.exceptions.ConnectTimeout()
     res = client.post("/api/sales/post", json={
-        "ledger": "Cash Mahagun", "amount": 100.0, "tally_date": "20260101", "narration": "test"
+        "ledger": "Cash Mahagun", "amount": 100.0, "tally_date": "20260101", "narration": "test", "store": "Mahagun"
     })
     assert res.status_code == 200
     row = _latest_row("Sales:%")
