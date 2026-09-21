@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { SearchableSelect } from '@/components/ui/SearchableSelect';
 import { useUI } from '@/context/UIContext';
-import { AlertCircle, CheckCircle2, Search, RefreshCw, XCircle, Pencil, Trash2, ArrowRight } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Search, RefreshCw, XCircle, Pencil, Trash2, ArrowRight, X } from 'lucide-react';
 
 function StatusBadge({ status }) {
   if (status === 'in_tally') {
@@ -53,6 +53,23 @@ export default function MastersPage() {
 
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
+
+  const [historyPicker, setHistoryPicker] = useState({ open: false, itemName: null, loading: false, error: null, source: null, entries: [] });
+
+  const openItemHistory = async (itemName) => {
+    setHistoryPicker({ open: true, itemName, loading: true, error: null, source: null, entries: [] });
+    try {
+      const url = '/api/purchase-item/return-item-history?' + new URLSearchParams({ item_name: itemName });
+      const res = await fetch(url);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Failed to fetch purchase history.');
+      setHistoryPicker(prev => ({ ...prev, loading: false, source: data.source, entries: data.entries || [] }));
+    } catch (err) {
+      setHistoryPicker(prev => ({ ...prev, loading: false, error: err.message }));
+    }
+  };
+
+  const closeItemHistory = () => setHistoryPicker({ open: false, itemName: null, loading: false, error: null, source: null, entries: [] });
 
   const fetchMasters = async () => {
     setLoading(true);
@@ -296,7 +313,11 @@ export default function MastersPage() {
             {sortedItems.length === 0 && <div className="text-center py-8 text-gray-400 text-sm">No items found</div>}
             <Card className="divide-y divide-gray-100 dark:divide-gray-800 !p-0">
               {sortedItems.map((item, idx) => (
-                <div key={idx} className="flex items-center justify-between p-3 sm:p-4 hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors">
+                <button
+                  key={idx}
+                  onClick={() => openItemHistory(item.name)}
+                  className="w-full flex items-center justify-between p-3 sm:p-4 text-left hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors"
+                >
                   <div className="flex flex-col gap-0.5">
                     <span className="text-sm font-semibold text-gray-900 dark:text-gray-100">{item.name}</span>
                     <span className="text-[10px] text-gray-500 font-bold tracking-wider">{item.unit}</span>
@@ -305,7 +326,7 @@ export default function MastersPage() {
                     )}
                   </div>
                   <StatusBadge status={item.status} />
-                </div>
+                </button>
               ))}
             </Card>
           </div>
@@ -364,6 +385,76 @@ export default function MastersPage() {
           </div>
         )}
       </div>
+
+      {historyPicker.open && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4" onClick={closeItemHistory}>
+          <div className="bg-white dark:bg-gray-900 rounded-t-2xl sm:rounded-2xl w-full sm:max-w-lg max-h-[80vh] flex flex-col" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-4 border-b border-gray-100 dark:border-gray-800">
+              <div className="min-w-0">
+                <h3 className="font-bold text-gray-900 dark:text-white">Purchase History</h3>
+                <p className="text-xs text-gray-500 truncate">{historyPicker.itemName}</p>
+              </div>
+              <button onClick={closeItemHistory} className="text-gray-400 hover:text-gray-600 shrink-0">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="overflow-y-auto flex-1 p-4">
+              {historyPicker.loading && (
+                <p className="text-sm text-gray-400 text-center py-8">Fetching purchase history...</p>
+              )}
+              {historyPicker.error && (
+                <div className="text-center py-8">
+                  <p className="text-sm text-red-500 mb-2">{historyPicker.error}</p>
+                  <button onClick={() => openItemHistory(historyPicker.itemName)} className="text-sm text-teal-600 font-bold">Retry</button>
+                </div>
+              )}
+              {!historyPicker.loading && !historyPicker.error && (
+                <>
+                  {historyPicker.source === 'local_cache' && (
+                    <p className="text-xs bg-amber-50 dark:bg-amber-900/20 text-amber-600 dark:text-amber-400 rounded-lg p-2 mb-3">
+                      Showing last known rates — Tally is offline right now.
+                    </p>
+                  )}
+                  {historyPicker.entries.length === 0 ? (
+                    <p className="text-sm text-gray-400 text-center py-8">No purchase history in the last 2 years for this item.</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {historyPicker.entries.map((entry, eidx) => (
+                        <div
+                          key={eidx}
+                          className="p-3 rounded-lg border border-gray-200 dark:border-gray-700"
+                        >
+                          <div className="flex justify-between items-center">
+                            <span className="text-sm font-bold text-gray-900 dark:text-gray-100">{entry.date}</span>
+                            <span className="text-lg font-black text-teal-600 dark:text-teal-400">₹{entry.rate}</span>
+                          </div>
+                          <div className="flex justify-between items-center mt-1 text-xs text-gray-500">
+                            <span className="truncate max-w-[150px]">
+                              {entry.origin === 'repack' ? 'Made in-house (Repack)' : (entry.supplier || 'Unknown supplier')}
+                            </span>
+                            <span>{entry.voucher_number || 'No voucher #'} · Qty {entry.qty ?? '—'} {entry.unit || ''}</span>
+                          </div>
+                          {entry.origin === 'app_post' && (
+                            <span className="inline-block mt-1 text-[10px] font-bold uppercase tracking-wider text-amber-600 bg-amber-50 dark:bg-amber-900/30 px-2 py-0.5 rounded">
+                              Pending Tally sync
+                            </span>
+                          )}
+                          {entry.origin === 'repack' && (
+                            <span className="inline-block mt-1 text-[10px] font-bold uppercase tracking-wider text-indigo-600 bg-indigo-50 dark:bg-indigo-900/30 px-2 py-0.5 rounded">
+                              Repack cost
+                            </span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
