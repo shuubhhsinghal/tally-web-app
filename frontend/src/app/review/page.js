@@ -133,8 +133,7 @@ export default function ReviewInbox() {
                       <p className="text-xs font-bold text-gray-400 uppercase mt-0.5">{draft.invoice_number || 'No Invoice #'}</p>
                     </div>
                     <div className="text-right pl-2">
-                      <p className="text-sm font-black text-teal-600 dark:text-teal-400 whitespace-nowrap">₹ {(draft.grand_total || 0).toFixed(2)}</p>
-                      <p className="text-xs font-bold text-gray-400 uppercase mt-0.5">{draft.invoice_date || '-'}</p>
+                      <p className="text-xs font-bold text-gray-400 uppercase">{draft.invoice_date || '-'}</p>
                     </div>
                   </div>
                   
