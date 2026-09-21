@@ -4,9 +4,10 @@ import React, { useState, useEffect } from 'react';
 import TopBar from '@/components/layout/TopBar';
 import { Card } from '@/components/ui/Card';
 import { EmptyState } from '@/components/ui/EmptyState';
-import { Database, TrendingUp, Clock, AlertCircle } from 'lucide-react';
+import { Database, TrendingUp, Clock, AlertCircle, Settings as SettingsIcon } from 'lucide-react';
 import Link from 'next/link';
 import { useUI } from '@/context/UIContext';
+import { useAuth } from '@/context/AuthContext';
 import { ActivityRow } from '@/components/activity/ActivityRow';
 import { TransactionDetailView } from '@/components/activity/TransactionDetailView';
 
@@ -14,6 +15,7 @@ const formatRupees = (amount) => `₹${Math.round(amount || 0).toLocaleString('e
 
 export default function Dashboard() {
   const { showToast } = useUI();
+  const { user } = useAuth();
   const [stats, setStats] = useState({ queue_count: 0, cache_count: 0, failed_count: 0, today_sales: 0, today_sales_pending_count: 0, tally_online: false });
   const [activities, setActivities] = useState([]);
   const [mounted, setMounted] = useState(false);
@@ -148,6 +150,14 @@ export default function Dashboard() {
               <span className="text-sm font-bold text-gray-900 dark:text-gray-100">Masters Overview</span>
             </Card>
           </Link>
+          {user?.is_owner && (
+            <Link href="/settings" className="flex-1">
+              <Card className="flex items-center justify-center gap-2 py-3 hover:ring-2 hover:ring-teal-500/50 transition-all cursor-pointer bg-white dark:bg-gray-800">
+                <SettingsIcon className="w-4 h-4 text-teal-600" />
+                <span className="text-sm font-bold text-gray-900 dark:text-gray-100">Settings</span>
+              </Card>
+            </Link>
+          )}
         </div>
 
         {/* Recent Activity */}

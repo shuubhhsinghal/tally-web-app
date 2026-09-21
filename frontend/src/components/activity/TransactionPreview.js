@@ -76,6 +76,7 @@ export const TransactionPreview = ({ operation, payloadStr }) => {
           </div>
           {data.cost_center && <div><p className="text-xs font-bold text-gray-400 uppercase">Cost Center</p><p className="text-sm font-medium text-gray-900 dark:text-gray-300">{data.cost_center}</p></div>}
           {data.narration && <div><p className="text-xs font-bold text-gray-400 uppercase">Narration</p><p className="text-sm font-medium text-gray-900 dark:text-gray-300">{data.narration}</p></div>}
+          {data.created_by && <div><p className="text-xs font-bold text-gray-400 uppercase">Recorded By</p><p className="text-sm font-medium text-gray-900 dark:text-gray-300">{data.created_by}</p></div>}
         </Card>
       );
     } else if ((data.debit_ledger && data.credit_ledger) || (data.from_account && data.to_account)) {

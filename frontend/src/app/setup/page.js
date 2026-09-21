@@ -1,0 +1,91 @@
+'use client';
+
+import { useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { Input } from '@/components/ui/Input';
+import { Button } from '@/components/ui/Button';
+import { useAuth } from '@/context/AuthContext';
+import { ShieldCheck } from 'lucide-react';
+
+export default function SetupPage() {
+  const router = useRouter();
+  const { login } = useAuth();
+  const [name, setName] = useState('');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setError('');
+    if (!username.trim() || !password) {
+      setError('Enter a username and password.');
+      return;
+    }
+    if (password.length < 4) {
+      setError('Password must be at least 4 characters.');
+      return;
+    }
+    setLoading(true);
+    try {
+      const res = await fetch('/api/auth/setup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: name.trim(), username: username.trim(), password }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Setup failed.');
+      login(data.token, data.user);
+      router.replace('/dashboard');
+    } catch (err) {
+      setError(err.message || 'Setup failed.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900 p-4">
+      <div className="w-full max-w-sm">
+        <div className="flex flex-col items-center mb-8">
+          <div className="w-14 h-14 rounded-2xl bg-teal-600 flex items-center justify-center mb-4">
+            <ShieldCheck className="w-7 h-7 text-white" />
+          </div>
+          <h1 className="text-xl font-black text-gray-900 dark:text-white">Create your owner account</h1>
+          <p className="text-sm text-gray-500 dark:text-gray-400 mt-1 text-center">
+            This is the first account on this app. It has access to every store and can add staff logins later.
+          </p>
+        </div>
+
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <Input
+            label="Your name"
+            value={name}
+            onChange={e => setName(e.target.value)}
+            placeholder="e.g. Shubh"
+            autoFocus
+          />
+          <Input
+            label="Username"
+            value={username}
+            onChange={e => setUsername(e.target.value)}
+            placeholder="pick a username"
+            autoCapitalize="none"
+          />
+          <Input
+            label="Password"
+            type="password"
+            value={password}
+            onChange={e => setPassword(e.target.value)}
+            placeholder="at least 4 characters"
+          />
+          {error && <p className="text-sm text-red-500">{error}</p>}
+          <Button type="submit" disabled={loading} className="w-full mt-2">
+            {loading ? 'Creating account...' : 'Create account'}
+          </Button>
+        </form>
+      </div>
+    </div>
+  );
+}

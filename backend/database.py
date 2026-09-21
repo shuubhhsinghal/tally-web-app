@@ -100,7 +100,32 @@ def init_db():
                 ("Gulshan", "Gulshan", "Gulshan"),
                 ("VVIP", "VVIP", "VVIP")
             ])
-        
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                username TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                store_name TEXT,
+                is_owner BOOLEAN DEFAULT 0,
+                active BOOLEAN DEFAULT 1,
+                created_at TEXT NOT NULL
+            )
+        """)
+        # store_name is NULL for an owner (access to every store); a staff
+        # account is scoped to exactly one store.
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sessions (
+                token TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                created_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions (user_id)")
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS purchase_rates (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1942,4 +1967,102 @@ def update_product_conversion_status(finished_stock_item: str, status: str):
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("UPDATE product_conversions SET status = ? WHERE finished_stock_item = ?", (status, finished_stock_item))
+        conn.commit()
+
+
+# --- Auth ---
+# Password hashing uses the standard library's PBKDF2 (no new dependency)
+# rather than bcrypt/passlib -- this is a small-business tool defending
+# against someone picking up an unlocked phone, not a high-value target, so
+# stdlib crypto is a reasonable tradeoff against adding a native-extension
+# dependency to a server that already has a deploy-friction history.
+import hashlib
+import secrets
+
+_PBKDF2_ITERATIONS = 260_000
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), bytes.fromhex(salt), _PBKDF2_ITERATIONS).hex()
+    return f"{salt}${digest}"
+
+def verify_password(password: str, password_hash: str) -> bool:
+    try:
+        salt, digest = password_hash.split('$', 1)
+    except ValueError:
+        return False
+    candidate = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), bytes.fromhex(salt), _PBKDF2_ITERATIONS).hex()
+    return secrets.compare_digest(candidate, digest)
+
+def any_users_exist() -> bool:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) as c FROM users")
+        return cursor.fetchone()['c'] > 0
+
+def create_user(name: str, username: str, password: str, store_name: Optional[str], is_owner: bool) -> dict:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO users (name, username, password_hash, store_name, is_owner, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (name, username, hash_password(password), store_name, is_owner, datetime.now().isoformat())
+        )
+        conn.commit()
+        return get_user_by_id(cursor.lastrowid)
+
+def get_user_by_username(username: str) -> Optional[dict]:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM users WHERE username = ? COLLATE NOCASE", (username,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+def get_user_by_id(user_id: int) -> Optional[dict]:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+def list_users() -> list:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, name, username, store_name, is_owner, active, created_at FROM users ORDER BY is_owner DESC, name ASC")
+        return [dict(row) for row in cursor.fetchall()]
+
+def deactivate_user(user_id: int):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE users SET active = 0 WHERE id = ?", (user_id,))
+        cursor.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+        conn.commit()
+
+def create_session(user_id: int) -> str:
+    token = secrets.token_hex(32)
+    now = datetime.now().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO sessions (token, user_id, created_at, last_seen_at) VALUES (?, ?, ?, ?)", (token, user_id, now, now))
+        conn.commit()
+    return token
+
+def get_user_by_session_token(token: str) -> Optional[dict]:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT users.* FROM sessions
+            JOIN users ON users.id = sessions.user_id
+            WHERE sessions.token = ? AND users.active = 1
+        """, (token,))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        cursor.execute("UPDATE sessions SET last_seen_at = ? WHERE token = ?", (datetime.now().isoformat(), token))
+        conn.commit()
+        return dict(row)
+
+def delete_session(token: str):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM sessions WHERE token = ?", (token,))
         conn.commit()

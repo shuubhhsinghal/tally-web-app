@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 import requests
 import json
@@ -46,9 +46,16 @@ async def preview_sales(payload: SalesRequest):
     }
 
 @router.post("/post")
-async def post_sales(payload: SalesRequest):
+async def post_sales(payload: SalesRequest, request: Request):
     safe_ledger = escape(str(payload.ledger))
     safe_nar = escape(str(payload.narration))
+
+    # A staff account is scoped to one store -- even if they tamper with the
+    # request, they can't post a sale into a different store's figures. The
+    # owner account (store_name is None) can post to any store.
+    current_user = request.state.user
+    if not current_user['is_owner'] and payload.store != current_user['store_name']:
+        raise HTTPException(status_code=403, detail=f"Your account can only post sales for {current_user['store_name']}.")
 
     # Store is picked explicitly on the form now (not guessed from the ledger
     # name), so the allocation always uses the exact Tally cost-centre casing
@@ -97,6 +104,7 @@ async def post_sales(payload: SalesRequest):
     # Queue-First Architecture: Always save transaction to DB before attempting to send
     queue_payload = payload.model_dump()
     queue_payload['cost_center'] = cost_center
+    queue_payload['created_by'] = current_user['name']
     queue_id = queue_operation("POST_VOUCHER", xml_data, queue_payload, f"Sales: {payload.amount} from {payload.ledger}")
 
     try:

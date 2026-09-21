@@ -3,13 +3,15 @@
 import React, { useState, useEffect } from 'react';
 import { useTheme } from 'next-themes';
 import { useRouter } from 'next/navigation';
-import { Moon, Sun, ArrowLeft, Wifi, WifiOff, RefreshCw } from 'lucide-react';
+import { Moon, Sun, ArrowLeft, Wifi, WifiOff, RefreshCw, LogOut } from 'lucide-react';
 import { useUI } from '@/context/UIContext';
+import { useAuth } from '@/context/AuthContext';
 
 export default function TopBar({ title, showBack = false, onBack }) {
   const { theme, setTheme } = useTheme();
   const router = useRouter();
-  const { showToast } = useUI();
+  const { showToast, showConfirmDialog } = useUI();
+  const { user, logout } = useAuth();
   const [mounted, setMounted] = useState(false);
   const [isOnline, setIsOnline] = useState(null);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -68,11 +70,18 @@ export default function TopBar({ title, showBack = false, onBack }) {
               <ArrowLeft className="w-6 h-6" />
             </button>
           ) : (
-            <div className="flex items-center gap-2">
-              <div className={`w-2.5 h-2.5 rounded-full ${isOnline === null ? 'bg-yellow-500 animate-pulse' : isOnline ? 'bg-green-500' : 'bg-red-500'}`} />
-              <span className="text-xs font-semibold text-gray-500 dark:text-gray-400">
-                {isOnline === null ? 'Connecting...' : isOnline ? 'Tally connected' : 'Tally offline'}
-              </span>
+            <div className="flex flex-col">
+              <div className="flex items-center gap-2">
+                <div className={`w-2.5 h-2.5 rounded-full ${isOnline === null ? 'bg-yellow-500 animate-pulse' : isOnline ? 'bg-green-500' : 'bg-red-500'}`} />
+                <span className="text-xs font-semibold text-gray-500 dark:text-gray-400">
+                  {isOnline === null ? 'Connecting...' : isOnline ? 'Tally connected' : 'Tally offline'}
+                </span>
+              </div>
+              {user && (
+                <span className="text-[10px] text-gray-400 dark:text-gray-500 ml-4 truncate max-w-[90px]">
+                  {user.name}{!user.is_owner && user.store_name ? ` · ${user.store_name}` : ''}
+                </span>
+              )}
             </div>
           )}
         </div>
@@ -95,12 +104,19 @@ export default function TopBar({ title, showBack = false, onBack }) {
           {mounted && (
             <button
               onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-              className="p-2 -mr-2 text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-full transition-colors"
+              className="p-2 text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-full transition-colors"
               aria-label="Toggle Theme"
             >
               {theme === 'dark' ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
             </button>
           )}
+          <button
+            onClick={() => showConfirmDialog({ title: 'Log out?', onConfirm: logout })}
+            className="p-2 -mr-2 text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-full transition-colors"
+            aria-label="Log out"
+          >
+            <LogOut className="w-5 h-5" />
+          </button>
         </div>
 
       </div>

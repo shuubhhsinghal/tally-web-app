@@ -7,12 +7,15 @@ import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { TextArea } from '@/components/ui/TextArea';
 import { useUI } from '@/context/UIContext';
+import { useAuth } from '@/context/AuthContext';
 import { useRouter } from 'next/navigation';
 import { SALES_LEDGERS } from '@/utils/salesLedgers';
 
 export default function SalesVoucher() {
   const router = useRouter();
   const { showToast } = useUI();
+  const { user } = useAuth();
+  const lockedStore = user && !user.is_owner ? user.store_name : null;
 
   const [formData, setFormData] = useState({
     ledger: "",
@@ -32,14 +35,16 @@ export default function SalesVoucher() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setFormData(prev => ({
       ...prev,
-      date: new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().split('T')[0]
+      date: new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().split('T')[0],
+      store: lockedStore || prev.store,
     }));
 
     fetch("/api/sales/metadata")
       .then(res => res.json())
       .then(data => setMeta(data))
       .catch(err => console.error("Failed to load metadata", err));
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lockedStore]);
 
   const handleChange = (e) => {
     setFormData({ ...formData, [e.target.name]: e.target.value });
@@ -193,6 +198,7 @@ export default function SalesVoucher() {
             value={formData.store}
             onChange={handleChange}
             required
+            disabled={!!lockedStore}
           >
             <option value="" disabled>Select store...</option>
             {meta.stores.map((s) => (
