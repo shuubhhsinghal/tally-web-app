@@ -82,10 +82,10 @@ QUEUE_PAGE_CAP = 200
 QUEUE_STATUSES = ("PENDING", "FAILED", "SYNCED")
 
 # A transaction "belongs" to a store if its payload carries a matching cost_center
-# (purchase/payment/bank_statement) or from_store/to_store (stock transfer -- shows
-# under BOTH stores it touches), or if it's a repack voucher whose repack_operations
-# row records that store. Sales, fund transfers, and master creates never carry a
-# store field at all, so they never match this and fall into "Unallocated" instead.
+# (sales/purchase/payment/bank_statement) or from_store/to_store (stock transfer --
+# shows under BOTH stores it touches), or if it's a repack voucher whose
+# repack_operations row records that store. Fund transfers and master creates never
+# carry a store field at all, so they never match this and fall into "Unallocated".
 STORE_MATCH_SQL = """(
     json_extract(offline_queue.payload, '$.cost_center') = ?
     OR json_extract(offline_queue.payload, '$.from_store') = ?
@@ -126,14 +126,7 @@ TYPE_FILTERS = {
     "REPACK": ("offline_queue.operation_type = ?", ["REPACK_VOUCHER"]),
 }
 
-@router.get("/queue")
-def get_queue_page(
-    status: str = Query(..., description="One of PENDING, FAILED, SYNCED"),
-    store: Optional[str] = Query(None, description="A store name, or 'Unallocated'; omit for all stores"),
-    type: Optional[str] = Query(None, description=f"One of {', '.join(TYPE_FILTERS.keys())}; omit for all types"),
-    page: int = Query(1, ge=1),
-    limit: int = Query(10, ge=1, le=50),
-):
+def _build_queue_where(status: str, store: Optional[str], type: Optional[str]):
     if status not in QUEUE_STATUSES:
         raise HTTPException(status_code=400, detail=f"status must be one of {', '.join(QUEUE_STATUSES)}")
     if type is not None and type not in TYPE_FILTERS:
@@ -150,6 +143,17 @@ def get_queue_page(
         type_sql, type_params = TYPE_FILTERS[type]
         where += f" AND {type_sql}"
         params += type_params
+    return where, params
+
+@router.get("/queue")
+def get_queue_page(
+    status: str = Query(..., description="One of PENDING, FAILED, SYNCED"),
+    store: Optional[str] = Query(None, description="A store name, or 'Unallocated'; omit for all stores"),
+    type: Optional[str] = Query(None, description=f"One of {', '.join(TYPE_FILTERS.keys())}; omit for all types"),
+    page: int = Query(1, ge=1),
+    limit: int = Query(10, ge=1, le=50),
+):
+    where, params = _build_queue_where(status, store, type)
 
     try:
         with get_db() as conn:
@@ -175,6 +179,86 @@ def get_queue_page(
         raise
     except Exception as e:
         print(f"Error fetching queue page: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/queue/clear-failed")
+def clear_failed_queue(
+    store: Optional[str] = Query(None, description="A store name, or 'Unallocated'; omit for all stores"),
+    type: Optional[str] = Query(None, description=f"One of {', '.join(TYPE_FILTERS.keys())}; omit for all types"),
+):
+    """Permanently removes every FAILED item matching the given store/type
+    filters, the same way the single-item Delete button does -- setting
+    is_hidden alone (like the Dashboard's "Clear Finished") would have no
+    visible effect here, since the Queue page is a full ledger view that
+    deliberately ignores is_hidden. A row whose delivery to Tally is
+    unconfirmed (delivery_uncertain) is left alone rather than deleted,
+    since it may already exist in Tally and needs a human to verify first."""
+    from backend.database import delete_master_queue, cancel_pending_queue_item
+    where, params = _build_queue_where("FAILED", store, type)
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"SELECT id, operation_type FROM offline_queue WHERE {where}", params)
+            rows = cursor.fetchall()
+
+        cleared = 0
+        skipped = 0
+        for row in rows:
+            if row['operation_type'] in ('CREATE_LEDGER', 'CREATE_ITEM', 'CREATE_UOM'):
+                delete_master_queue(row['id'])
+                cleared += 1
+                continue
+            success, _ = cancel_pending_queue_item(row['id'])
+            if success:
+                cleared += 1
+            else:
+                skipped += 1
+        return {"message": f"Cleared {cleared} failed item(s)", "cleared": cleared, "skipped": skipped}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/queue/retry-failed")
+def retry_failed_queue(
+    store: Optional[str] = Query(None, description="A store name, or 'Unallocated'; omit for all stores"),
+    type: Optional[str] = Query(None, description=f"One of {', '.join(TYPE_FILTERS.keys())}; omit for all types"),
+):
+    """Retries every FAILED item matching the given store/type filters, the
+    same way the single-item retry button does -- except an item whose
+    delivery to Tally is unconfirmed (delivery_uncertain) is left alone
+    rather than blocking the whole batch, since retrying it risks a
+    duplicate voucher and it needs a human to verify in Tally first."""
+    where, params = _build_queue_where("FAILED", store, type)
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"SELECT id, payload FROM offline_queue WHERE {where}", params)
+            rows = cursor.fetchall()
+
+            retried = 0
+            skipped_uncertain = 0
+            for row in rows:
+                payload_dict = json.loads(row['payload']) if row['payload'] else {}
+                if payload_dict.get('delivery_uncertain') is True:
+                    skipped_uncertain += 1
+                    continue
+                cursor.execute(
+                    "UPDATE offline_queue SET status = 'PENDING', error_message = NULL, is_hidden = 0, updated_at = datetime('now', 'localtime') WHERE id = ?",
+                    (row['id'],)
+                )
+                # No-op for non-master rows -- only CREATE_LEDGER/CREATE_ITEM/CREATE_UOM
+                # rows have a matching pending_masters entry to reset.
+                cursor.execute(
+                    "UPDATE pending_masters SET status = 'PENDING', error_message = NULL, updated_at = datetime('now', 'localtime') WHERE queue_id = ?",
+                    (row['id'],)
+                )
+                retried += 1
+            conn.commit()
+            return {"message": f"Retrying {retried} item(s)", "retried": retried, "skipped_uncertain": skipped_uncertain}
+    except HTTPException:
+        raise
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 class QueueUpdatePayload(BaseModel):

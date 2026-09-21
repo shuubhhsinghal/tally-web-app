@@ -273,3 +273,115 @@ def test_status_store_type_combine_with_and():
 
     res = client.get("/api/dashboard/queue?status=PENDING&store=Mahagun&type=SALES&page=1&limit=10")
     assert res.json()["total"] == 0
+
+
+# --- Bulk clear/retry for the Failed tab ---
+
+def test_clear_failed_deletes_only_failed_items():
+    # Queue is a full ledger view that deliberately ignores is_hidden (see
+    # get_queue_page), so "Clear All" must actually remove the rows -- just
+    # hiding them would have no visible effect on this page.
+    _insert_rows("FAILED", 3)
+    _insert_rows("PENDING", 2)
+
+    res = client.post("/api/dashboard/queue/clear-failed")
+    assert res.status_code == 200
+    assert res.json()["cleared"] == 3
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) as c FROM offline_queue WHERE status = 'FAILED'")
+        assert cursor.fetchone()["c"] == 0
+        cursor.execute("SELECT COUNT(*) as c FROM offline_queue WHERE status = 'PENDING'")
+        assert cursor.fetchone()["c"] == 2
+
+
+def test_clear_failed_respects_store_filter():
+    mahagun_id = _insert_row("POST_VOUCHER", "FAILED", {"cost_center": "Mahagun"})
+    gulshan_id = _insert_row("POST_VOUCHER", "FAILED", {"cost_center": "Gulshan"})
+
+    res = client.post("/api/dashboard/queue/clear-failed?store=Mahagun")
+    assert res.json()["cleared"] == 1
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) as c FROM offline_queue WHERE id = ?", (mahagun_id,))
+        assert cursor.fetchone()["c"] == 0
+        cursor.execute("SELECT COUNT(*) as c FROM offline_queue WHERE id = ?", (gulshan_id,))
+        assert cursor.fetchone()["c"] == 1
+
+
+def test_clear_failed_skips_delivery_uncertain_items():
+    uncertain_id = _insert_row("POST_VOUCHER", "FAILED", {"delivery_uncertain": True})
+    safe_id = _insert_row("POST_VOUCHER", "FAILED", {"delivery_uncertain": False})
+
+    res = client.post("/api/dashboard/queue/clear-failed")
+    body = res.json()
+    assert body["cleared"] == 1
+    assert body["skipped"] == 1
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) as c FROM offline_queue WHERE id = ?", (uncertain_id,))
+        assert cursor.fetchone()["c"] == 1
+        cursor.execute("SELECT COUNT(*) as c FROM offline_queue WHERE id = ?", (safe_id,))
+        assert cursor.fetchone()["c"] == 0
+
+
+def test_clear_failed_deletes_master_rows():
+    ledger_id = _insert_typed_row("CREATE_LEDGER", "FAILED", "Create Ledger: Test Ledger")
+
+    res = client.post("/api/dashboard/queue/clear-failed")
+    assert res.json()["cleared"] == 1
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) as c FROM offline_queue WHERE id = ?", (ledger_id,))
+        assert cursor.fetchone()["c"] == 0
+
+
+def test_retry_failed_moves_items_back_to_pending():
+    _insert_rows("FAILED", 3)
+
+    res = client.post("/api/dashboard/queue/retry-failed")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["retried"] == 3
+    assert body["skipped_uncertain"] == 0
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) as c FROM offline_queue WHERE status = 'PENDING'")
+        assert cursor.fetchone()["c"] == 3
+        cursor.execute("SELECT COUNT(*) as c FROM offline_queue WHERE status = 'FAILED'")
+        assert cursor.fetchone()["c"] == 0
+
+
+def test_retry_failed_skips_delivery_uncertain_items():
+    uncertain_id = _insert_row("POST_VOUCHER", "FAILED", {"delivery_uncertain": True})
+    safe_id = _insert_row("POST_VOUCHER", "FAILED", {"delivery_uncertain": False})
+
+    res = client.post("/api/dashboard/queue/retry-failed")
+    body = res.json()
+    assert body["retried"] == 1
+    assert body["skipped_uncertain"] == 1
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT status FROM offline_queue WHERE id = ?", (uncertain_id,))
+        assert cursor.fetchone()["status"] == "FAILED"
+        cursor.execute("SELECT status FROM offline_queue WHERE id = ?", (safe_id,))
+        assert cursor.fetchone()["status"] == "PENDING"
+
+
+def test_retry_failed_respects_type_filter():
+    _insert_typed_row("POST_VOUCHER", "FAILED", "Sales: 1 from Cash")
+    _insert_typed_row("POST_VOUCHER", "FAILED", "Purchase Invoice: 1 from X")
+
+    res = client.post("/api/dashboard/queue/retry-failed?type=SALES")
+    assert res.json()["retried"] == 1
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) as c FROM offline_queue WHERE status = 'FAILED'")
+        assert cursor.fetchone()["c"] == 1

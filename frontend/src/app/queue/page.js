@@ -9,6 +9,7 @@ import { EmptyState } from '@/components/ui/EmptyState';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { ActivityRow } from '@/components/activity/ActivityRow';
 import { TransactionDetailView } from '@/components/activity/TransactionDetailView';
+import { useUI } from '@/context/UIContext';
 
 const LIMIT = 10;
 const TABS = [
@@ -36,6 +37,7 @@ const TYPE_OPTIONS = [
 function QueueContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const { showToast, showConfirmDialog } = useUI();
 
   const status = searchParams.get('status') || 'PENDING';
   const store = searchParams.get('store') || 'All';
@@ -47,6 +49,7 @@ function QueueContent() {
   const [loading, setLoading] = useState(true);
   const [selectedItemId, setSelectedItemId] = useState(null);
   const [storeNames, setStoreNames] = useState([]);
+  const [bulkActing, setBulkActing] = useState(false);
 
   useEffect(() => {
     fetch('/api/settings/stores')
@@ -55,12 +58,16 @@ function QueueContent() {
       .catch(() => {});
   }, []);
 
+  const filterParams = (forStore, forType) => {
+    const storeParam = forStore !== 'All' ? `&store=${encodeURIComponent(forStore)}` : '';
+    const typeParam = forType ? `&type=${encodeURIComponent(forType)}` : '';
+    return `${storeParam}${typeParam}`;
+  };
+
   const fetchQueue = async () => {
     setLoading(true);
     try {
-      const storeParam = store !== 'All' ? `&store=${encodeURIComponent(store)}` : '';
-      const typeParam = type ? `&type=${encodeURIComponent(type)}` : '';
-      const res = await fetch(`/api/dashboard/queue?status=${status}${storeParam}${typeParam}&page=${page}&limit=${LIMIT}`);
+      const res = await fetch(`/api/dashboard/queue?status=${status}${filterParams(store, type)}&page=${page}&limit=${LIMIT}`);
       if (res.ok) {
         const data = await res.json();
         setItems(data.items);
@@ -79,14 +86,57 @@ function QueueContent() {
   }, [status, store, type, page]);
 
   const navigate = (newStatus, newStore, newType, newPage) => {
-    const storeParam = newStore !== 'All' ? `&store=${encodeURIComponent(newStore)}` : '';
-    const typeParam = newType ? `&type=${encodeURIComponent(newType)}` : '';
-    router.replace(`/queue?status=${newStatus}${storeParam}${typeParam}&page=${newPage}`);
+    router.replace(`/queue?status=${newStatus}${filterParams(newStore, newType)}&page=${newPage}`);
   };
 
   const setTab = (newStatus) => navigate(newStatus, store, type, 1);
   const setStoreFilter = (newStore) => navigate(status, newStore, type, 1);
   const setTypeFilter = (newType) => navigate(status, store, newType, 1);
+
+  const handleClearAllFailed = () => {
+    showConfirmDialog({
+      title: "Clear All Failed?",
+      message: `This permanently deletes all ${total} failed item${total === 1 ? '' : 's'} currently shown (items with unconfirmed Tally delivery are skipped). This can't be undone.`,
+      danger: true,
+      onConfirm: async () => {
+        setBulkActing(true);
+        try {
+          const res = await fetch(`/api/dashboard/queue/clear-failed?${filterParams(store, type).slice(1)}`, { method: 'POST' });
+          const body = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(body.detail || "Failed to clear items");
+          if (body.skipped > 0) {
+            showToast(`Cleared ${body.cleared}. Skipped ${body.skipped} with unconfirmed Tally delivery -- verify those manually.`);
+          } else {
+            showToast(body.message || "Cleared");
+          }
+          fetchQueue();
+        } catch (e) {
+          showToast(e.message || "Failed to clear items", "error");
+        } finally {
+          setBulkActing(false);
+        }
+      }
+    });
+  };
+
+  const handleRetryAllFailed = async () => {
+    setBulkActing(true);
+    try {
+      const res = await fetch(`/api/dashboard/queue/retry-failed?${filterParams(store, type).slice(1)}`, { method: 'POST' });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.detail || "Failed to retry items");
+      if (body.skipped_uncertain > 0) {
+        showToast(`Retrying ${body.retried}. Skipped ${body.skipped_uncertain} with unconfirmed Tally delivery -- verify those manually.`);
+      } else {
+        showToast(body.message || "Retrying");
+      }
+      fetchQueue();
+    } catch (e) {
+      showToast(e.message || "Failed to retry items", "error");
+    } finally {
+      setBulkActing(false);
+    }
+  };
   const goToPage = (newPage) => navigate(status, store, type, newPage);
 
   if (selectedItemId) {
@@ -141,6 +191,27 @@ function QueueContent() {
             <option key={opt.id} value={opt.id}>{opt.label}</option>
           ))}
         </Select>
+
+        {status === 'FAILED' && total > 0 && (
+          <div className="flex gap-2">
+            <Button
+              variant="secondary"
+              className="flex-1"
+              onClick={handleRetryAllFailed}
+              disabled={bulkActing}
+            >
+              Retry All
+            </Button>
+            <Button
+              variant="danger"
+              className="flex-1"
+              onClick={handleClearAllFailed}
+              disabled={bulkActing}
+            >
+              Clear All
+            </Button>
+          </div>
+        )}
 
         {loading && items.length === 0 ? (
           <div className="text-center py-12 text-sm font-medium text-gray-400">Loading...</div>
