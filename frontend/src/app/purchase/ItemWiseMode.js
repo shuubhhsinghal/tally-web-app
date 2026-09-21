@@ -17,6 +17,17 @@ function MasterAutocomplete({ value, onChange, placeholder, confirmed = [], mast
   const [hasEditedSearch, setHasEditedSearch] = useState(false);
   const [focusedIndex, setFocusedIndex] = useState(-1);
   const wrapperRef = useRef(null);
+  const inputRef = useRef(null);
+
+  useEffect(() => {
+    if (isOpen && inputRef.current) inputRef.current.focus();
+  }, [isOpen]);
+
+  const openDropdown = () => {
+    if (disabled) return;
+    if (!hasEditedSearch) setSearch(value || rawItemName || "");
+    setIsOpen(true);
+  };
 
   const normalize = (s) => {
     if (!s) return "";
@@ -131,62 +142,90 @@ function MasterAutocomplete({ value, onChange, placeholder, confirmed = [], mast
 
   return (
     <div className="relative w-full" ref={wrapperRef}>
-      <input
-        role="combobox"
-        aria-expanded={isOpen}
-        aria-controls="listbox"
-        type="text"
-        value={isOpen ? search : value}
-        onChange={(e) => {
-          setSearch(e.target.value);
-          setHasEditedSearch(true);
-          if (!isOpen) setIsOpen(true);
-        }}
-        onFocus={() => {
-          if (!hasEditedSearch) {
-            setSearch(value || rawItemName || "");
-          }
-          setIsOpen(true);
-        }}
-        onKeyDown={handleKeyDown}
-        disabled={disabled}
-        className={`w-full min-h-[48px] px-4 rounded-xl border outline-none transition-colors ${inputClassName || "border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-teal-500/50"}`}
-        placeholder={placeholder}
-      />
+      {isOpen ? (
+        <input
+          ref={inputRef}
+          role="combobox"
+          aria-expanded={isOpen}
+          aria-controls="listbox"
+          type="text"
+          value={search}
+          onChange={(e) => {
+            setSearch(e.target.value);
+            setHasEditedSearch(true);
+          }}
+          onKeyDown={handleKeyDown}
+          disabled={disabled}
+          className={`w-full min-h-[48px] px-4 rounded-xl border outline-none transition-colors ${inputClassName || "border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-teal-500/50"}`}
+          placeholder={placeholder}
+        />
+      ) : (
+        // Closed state is a wrapping div, not an <input> -- inputs are
+        // permanently single-line (white-space CSS has no effect on them),
+        // so a long selected item name would always show clipped otherwise.
+        <div
+          role="combobox"
+          aria-expanded={isOpen}
+          aria-disabled={disabled}
+          tabIndex={disabled ? -1 : 0}
+          onClick={openDropdown}
+          onFocus={openDropdown}
+          onKeyDown={(e) => {
+            if (disabled) return;
+            if (e.key === 'Enter' || e.key === 'ArrowDown') {
+              e.preventDefault();
+              openDropdown();
+            }
+          }}
+          className={`w-full min-h-[48px] px-4 py-2.5 flex items-center rounded-xl border outline-none transition-colors whitespace-pre-wrap break-words ${disabled ? 'opacity-60 cursor-not-allowed' : 'cursor-text'} ${inputClassName || "border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-teal-500/50"}`}
+        >
+          {value ? (
+            <span>{value}</span>
+          ) : (
+            <span className="text-gray-400">{placeholder}</span>
+          )}
+        </div>
+      )}
 
       {isOpen && (
-        <div className="absolute z-50 w-full mt-2 bg-white dark:bg-gray-800 rounded-xl shadow-lg border border-gray-100 dark:border-gray-700 max-h-60 overflow-y-auto" role="listbox">
-          {filtered.map((item, idx) => {
-            const isFailed = item.state === 'failed';
-            const isFocused = idx === focusedIndex;
-            return (
-              <div
-                key={idx}
-                role="option"
-                aria-selected={isFocused}
-                className={`px-4 py-3 border-b border-gray-50 dark:border-gray-700 last:border-0 flex items-center justify-between ${isFailed ? 'opacity-75 cursor-not-allowed' : 'cursor-pointer'} ${isFocused ? 'bg-gray-100 dark:bg-gray-700' : 'hover:bg-gray-50 dark:hover:bg-gray-700'}`}
-                onClick={() => {
-                  if (isFailed) {
-                    alert("Could not sync this supplier to Tally. Resolve it from Dashboard before using it.");
-                  } else {
-                    setHasEditedSearch(false);
-                    onChange(item.name);
-                    setIsOpen(false);
-                  }
-                }}
-              >
-                <div className="flex flex-col">
-                  <span className="text-sm font-medium text-gray-900 dark:text-white">{item.name}</span>
-                  {isFailed && <span className="text-xs text-red-500 mt-1">{item.error}</span>}
+        <div className="absolute z-50 w-full mt-2 bg-white dark:bg-gray-800 rounded-xl shadow-lg border border-gray-100 dark:border-gray-700 overflow-hidden">
+          {/* Only the match list scrolls -- "Create new" below is a pinned
+              footer outside this box, so it stays reachable with no scrolling
+              even when many similar items (e.g. several pack sizes of the
+              same product) fill the list. */}
+          <div className="max-h-60 overflow-y-auto" role="listbox">
+            {filtered.map((item, idx) => {
+              const isFailed = item.state === 'failed';
+              const isFocused = idx === focusedIndex;
+              return (
+                <div
+                  key={idx}
+                  role="option"
+                  aria-selected={isFocused}
+                  className={`px-4 py-3 border-b border-gray-50 dark:border-gray-700 last:border-0 flex items-center justify-between ${isFailed ? 'opacity-75 cursor-not-allowed' : 'cursor-pointer'} ${isFocused ? 'bg-gray-100 dark:bg-gray-700' : 'hover:bg-gray-50 dark:hover:bg-gray-700'}`}
+                  onClick={() => {
+                    if (isFailed) {
+                      alert("Could not sync this supplier to Tally. Resolve it from Dashboard before using it.");
+                    } else {
+                      setHasEditedSearch(false);
+                      onChange(item.name);
+                      setIsOpen(false);
+                    }
+                  }}
+                >
+                  <div className="flex flex-col">
+                    <span className="text-sm font-medium text-gray-900 dark:text-white">{item.name}</span>
+                    {isFailed && <span className="text-xs text-red-500 mt-1">{item.error}</span>}
+                  </div>
+                  {badgeConfig[item.state] && (
+                    <span className={`text-xs px-2 py-1 rounded-full whitespace-nowrap ${badgeConfig[item.state].cls}`}>
+                      {badgeConfig[item.state].text}
+                    </span>
+                  )}
                 </div>
-                {badgeConfig[item.state] && (
-                  <span className={`text-xs px-2 py-1 rounded-full whitespace-nowrap ${badgeConfig[item.state].cls}`}>
-                    {badgeConfig[item.state].text}
-                  </span>
-                )}
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
 
           {(!exactMatch) && search.trim() !== "" && onCreate && (
             <div
