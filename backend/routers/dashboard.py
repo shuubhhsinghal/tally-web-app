@@ -1,5 +1,6 @@
 import os
 import json
+from datetime import datetime
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
@@ -13,7 +14,7 @@ def get_dashboard_stats():
     queue_count = 0
     cache_count = 0
     failed_count = 0
-    
+
     # 1. Check SQLite Queue
     try:
         with get_db() as conn:
@@ -36,6 +37,23 @@ def get_dashboard_stats():
     except Exception as e:
         print(f"Error fetching stats: {e}")
 
+    # 2. Today's sales -- Tally-confirmed (from the reporting sync) plus
+    # anything still sitting in the offline queue, so the figure doesn't
+    # silently drop whenever Tally is unreachable. Deliberately excludes
+    # FAILED entries -- those need a fix/retry before they count as a real
+    # sale, and get surfaced separately via failed_count instead.
+    today_sales = 0.0
+    today_sales_pending_count = 0
+    try:
+        from backend.services.reporting_sales_service import calculate_sales, get_unsynced_sales
+        today_str = datetime.now().strftime("%Y%m%d")
+        confirmed = calculate_sales(today_str, today_str)
+        unsynced = get_unsynced_sales(today_str, today_str)
+        today_sales = round(confirmed + unsynced['pending_amount'], 2)
+        today_sales_pending_count = unsynced['pending_count']
+    except Exception as e:
+        print(f"Error computing today's sales: {e}")
+
     # 3. Check Tally Server Status -- "online" means Tally itself is
     # reachable right now (the connector's own periodic local check), not
     # just that the connector's WebSocket is alive. Still a plain in-memory
@@ -46,6 +64,8 @@ def get_dashboard_stats():
         "queue_count": queue_count,
         "cache_count": cache_count,
         "failed_count": failed_count,
+        "today_sales": today_sales,
+        "today_sales_pending_count": today_sales_pending_count,
         "tally_online": tally_online
     }
 
