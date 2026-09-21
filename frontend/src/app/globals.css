@@ -40,3 +40,41 @@ body {
     padding-bottom: calc(env(safe-area-inset-bottom) + 0.5rem);
   }
 }
+
+/* Thin, app-themed scrollbar instead of each browser's raw default (which,
+   unlike macOS's auto-hiding overlay bar, is a wide gray block on
+   Windows/Linux Chrome and looks out of place next to this app's UI). */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 transparent; /* gray-300 */
+}
+
+.dark * {
+  scrollbar-color: #4b5563 transparent; /* gray-600 */
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: #cbd5e1; /* gray-300 */
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: #0d9488; /* teal-600 */
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background-color: #4b5563; /* gray-600 */
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background-color: #2dd4bf; /* teal-400 */
+}
