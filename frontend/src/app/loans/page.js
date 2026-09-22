@@ -23,6 +23,11 @@ function LoanDetailRow({ loan }) {
       <p className="text-xs text-gray-500">
         {formatRupees(loan.daily_amount)}/day &middot; {loan.number_of_days} days &middot; {formatRupees(loan.total_interest)} interest &middot; received into {loan.received_into_ledger}
       </p>
+      {loan.accrued_interest_to_date > 0 && (
+        <p className="text-xs text-gray-500">
+          {formatRupees(loan.accrued_interest_to_date)} interest posted to Tally so far
+        </p>
+      )}
       {loan.this_month_interest_pending > 0 && (
         <p className="text-xs text-teal-600 dark:text-teal-400">
           {formatRupees(loan.this_month_interest_pending)} interest posts to Tally on {loan.this_month_interest_posts_on}
