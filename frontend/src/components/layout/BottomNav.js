@@ -5,11 +5,13 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { Home, Plus, Landmark, ListChecks, ShoppingBag, ShoppingCart, CreditCard, ArrowRightLeft, ArrowRight, Inbox, BarChart3, Package } from 'lucide-react';
 import { useUI } from '@/context/UIContext';
+import { useAuth } from '@/context/AuthContext';
 
 export default function BottomNav() {
   const pathname = usePathname();
   const router = useRouter();
   const { showActionSheet } = useUI();
+  const { user } = useAuth();
 
   // Highlight 'home' if on dashboard, 'bank' if on bank-statement, 'queue' if on queue
   const isHome = pathname === '/dashboard' || pathname === '/';
@@ -28,6 +30,9 @@ export default function BottomNav() {
         { label: 'Record a payment', icon: <CreditCard className="w-5 h-5" />, colorClass: 'bg-orange-100 text-orange-600 dark:bg-orange-900/30 dark:text-orange-400', onClick: () => router.push('/payment') },
         { label: 'Move money between accounts', icon: <ArrowRightLeft className="w-5 h-5" />, colorClass: 'bg-green-100 text-green-600 dark:bg-green-900/30 dark:text-green-400', onClick: () => router.push('/transfer') },
         { label: 'Move stock between stores', icon: <ArrowRight className="w-5 h-5" />, colorClass: 'bg-indigo-100 text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400', onClick: () => router.push('/stock-transfer') },
+        ...(user?.is_owner ? [
+          { label: 'Loans', icon: <Landmark className="w-5 h-5" />, colorClass: 'bg-teal-100 text-teal-600 dark:bg-teal-900/30 dark:text-teal-400', onClick: () => router.push('/loans') },
+        ] : []),
       ]
     });
   };

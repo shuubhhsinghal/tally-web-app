@@ -348,7 +348,7 @@ export default function BankStatementInteractive() {
     
     return (
       <div className="min-h-screen bg-gray-50 dark:bg-gray-900 pb-36">
-        <TopBar title="Review Statement" />
+        <TopBar title="Review" />
         <div className="max-w-md mx-auto p-4 space-y-4 mt-4">
           
           <Card className="flex flex-col gap-2 bg-white dark:bg-gray-800">
@@ -739,7 +739,7 @@ export default function BankStatementInteractive() {
 
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-gray-900 pb-20">
-      <TopBar title="Import Bank Statement" showBack />
+      <TopBar title="Bank Statement" showBack />
       
       <div className="max-w-md mx-auto p-4 mt-4 space-y-6">
         <Select 

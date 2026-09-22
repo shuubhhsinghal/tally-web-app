@@ -7,7 +7,7 @@ import tempfile
 from xml.sax.saxutils import escape
 from typing import List, Optional, Dict, Any
 
-from fastapi import APIRouter, File, UploadFile, HTTPException, Form, Query
+from fastapi import APIRouter, File, UploadFile, HTTPException, Form, Query, Request
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 import requests
@@ -25,6 +25,7 @@ from backend.database import (
 )
 from backend.services.tally_response import parse_tally_response
 from backend.utils.math_reconciler import reconcile_full_invoice
+from backend.services.auth_helpers import enforce_store_access
 
 router = APIRouter()
 
@@ -503,7 +504,8 @@ async def create_supplier(payload: NewSupplierRequest):
         except MasterFailedException as e:
             raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+            print(f"Unexpected error: {e}")
+            raise HTTPException(status_code=500, detail="Something went wrong. Please try again.")
             
         print(f"--- [PURCHASE-ITEM] Tally offline. Queued supplier: {payload.name} ---", flush=True)
         return {"status": "queued", "message": f"Supplier '{payload.name}' saved to offline queue.", "name": payload.name}
@@ -545,7 +547,8 @@ async def create_item(payload: NewItemRequest):
         if check_master_exists_locally('UOM', norm_uom, {}):
             uom_state = "CONFIRMED"
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        print(f"Unexpected error: {e}")
+        raise HTTPException(status_code=400, detail="Something went wrong. Please try again.")
         
     if uom_state == "NEW":
         try:
@@ -557,7 +560,8 @@ async def create_item(payload: NewItemRequest):
         except MasterFailedException:
             raise HTTPException(status_code=400, detail="UOM creation previously failed. Resolution required in Dashboard.")
         except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+            print(f"Unexpected error: {e}")
+            raise HTTPException(status_code=500, detail="Something went wrong. Please try again.")
 
     # --- ITEM PHASE ---
     try:
@@ -567,7 +571,8 @@ async def create_item(payload: NewItemRequest):
     except MasterConflictException as e:
         raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        print(f"Unexpected error: {e}")
+        raise HTTPException(status_code=400, detail="Something went wrong. Please try again.")
 
     try:
         res = queue_master_operation("ITEM", payload.name, "CREATE_ITEM", item_xml, payload.model_dump())
@@ -580,7 +585,8 @@ async def create_item(payload: NewItemRequest):
     except MasterFailedException as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail="Something went wrong. Please try again.")
 
 @router.post("/save-alias")
 async def save_alias_endpoint(payload: SaveAliasRequest):
@@ -590,7 +596,8 @@ async def save_alias_endpoint(payload: SaveAliasRequest):
             db_save_alias(normalized_orig, payload.mapped_name)
         return {"status": "success"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail="Something went wrong. Please try again.")
 
 @router.post("/detect-corners")
 async def detect_corners_endpoint(file: UploadFile = File(...)):
@@ -603,8 +610,13 @@ async def detect_corners_endpoint(file: UploadFile = File(...)):
     return {"corners": corners}
 
 @router.post("/post")
-async def post_purchase_item(payload: PurchaseItemPostRequest):
+async def post_purchase_item(payload: PurchaseItemPostRequest, request: Request):
     print(f"--- [PURCHASE-ITEM POST] Received payload ---", flush=True)
+    current_user = request.state.user
+    enforce_store_access(current_user, payload.cost_center, "post purchases for")
+    if payload.adjustment:
+        enforce_store_access(current_user, payload.adjustment.store, "post returns for")
+
     supplier = escape(payload.supplier)
     inv_no = escape(payload.invoice_number)
     
@@ -948,10 +960,12 @@ async def post_purchase_item(payload: PurchaseItemPostRequest):
 </ENVELOPE>"""
 
     # Queue-First Architecture: Always save transaction(s) to DB before attempting to send.
-    queue_id = queue_operation("POST_VOUCHER", xml, payload.model_dump(), f"Purchase Item Invoice: {inv_no} from {supplier}")
+    queue_payload = payload.model_dump()
+    queue_payload['created_by'] = current_user['name']
+    queue_id = queue_operation("POST_VOUCHER", xml, queue_payload, f"Purchase Item Invoice: {inv_no} from {supplier}")
     adjustment_queue_id = None
     if debit_note_xml:
-        adjustment_queue_id = queue_operation("POST_VOUCHER", debit_note_xml, payload.model_dump(), f"Purchase Return (Debit Note): {inv_no} from {supplier}")
+        adjustment_queue_id = queue_operation("POST_VOUCHER", debit_note_xml, queue_payload, f"Purchase Return (Debit Note): {inv_no} from {supplier}")
 
     try:
         from backend.database import get_master_dependency_state, is_master_pending_sync

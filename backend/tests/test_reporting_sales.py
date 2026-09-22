@@ -120,7 +120,7 @@ async def test_calculate_sales(mock_post):
     mock_post.return_value = mock_resp
 
     # Perform Sync
-    await fetch_and_store_vouchers("20230901", "20230930", "http://localhost:9000")
+    await fetch_and_store_vouchers("20230901", "20230930")
 
     # Test Combined Sales
     # V1 (Sales): 1500

@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from fastapi import APIRouter, HTTPException, UploadFile, File
+from fastapi import APIRouter, HTTPException, UploadFile, File, Request
 import requests
 import json
 import os
@@ -10,6 +10,7 @@ from xml.sax.saxutils import escape
 from backend.database import get_all_ledgers, queue_operation, get_db, update_queue_status, set_delivery_uncertain
 from backend.services.tally_response import parse_tally_response
 from backend.connector.transport import tally_transport
+from backend.services.auth_helpers import enforce_store_access
 
 router = APIRouter()
 
@@ -88,7 +89,8 @@ async def create_supplier(payload: NewSupplierRequest):
     except MasterFailedException as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail="Something went wrong. Please try again.")
 
     return {"status": "success", "message": f"Supplier '{payload.name}' processed.", "name": payload.name}
 
@@ -166,7 +168,17 @@ def extract_invoice(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/post")
-async def post_purchase(payload: PurchaseRequest):
+async def post_purchase(payload: PurchaseRequest, request: Request):
+    current_user = request.state.user
+    # An "unallocated" (no cost centre) purchase can't be attributed to a
+    # staff account's store, so it's owner-only; a staff account posting
+    # with a cost centre must match their own store.
+    if not payload.cost_center or payload.cost_center.lower() == "none":
+        if not current_user['is_owner']:
+            raise HTTPException(status_code=403, detail="Your account must select a store for this purchase.")
+    else:
+        enforce_store_access(current_user, payload.cost_center, "post purchases for")
+
     safe_supplier = escape(str(payload.supplier))
     safe_inv = escape(str(payload.invoice_number))
     safe_nar = escape(str(payload.narration))
@@ -214,7 +226,9 @@ async def post_purchase(payload: PurchaseRequest):
 </ENVELOPE>"""
 
     # Queue-First Architecture: Always save transaction to DB before attempting to send
-    queue_id = queue_operation("POST_VOUCHER", xml_data, payload.model_dump(), f"Purchase Invoice: {payload.invoice_number} from {payload.supplier}")
+    queue_payload = payload.model_dump()
+    queue_payload['created_by'] = current_user['name']
+    queue_id = queue_operation("POST_VOUCHER", xml_data, queue_payload, f"Purchase Invoice: {payload.invoice_number} from {payload.supplier}")
 
     try:
         from backend.database import get_master_dependency_state, is_master_pending_sync

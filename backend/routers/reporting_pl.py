@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Depends, Query, HTTPException
+from fastapi import APIRouter, Depends, Query, HTTPException, Request
 from typing import Optional
 from backend.database import get_db
 from backend.services.tally_group_stock import fetch_stock_balances_from_db
 from backend.utils.reporting_utils import check_data_completeness, get_previous_month_period, get_month_boundaries
+from backend.services.auth_helpers import resolve_view_store_filter
 
 router = APIRouter(prefix="/api/reporting/profit-loss", tags=["Reporting P&L"])
 
@@ -108,17 +109,25 @@ def calculate_pl_for_store(store: Optional[str], start_date: str, end_date: str,
 
 @router.get("/")
 def get_profit_loss(
+    request: Request,
     start_month: str = Query(..., description="Start Month in YYYY-MM format"),
     end_month: str = Query(..., description="End Month in YYYY-MM format"),
     cost_centre: Optional[str] = Query(None, description="Specific Cost Centre")
 ):
+    # A staff account is always forced to their own store's P&L -- omitting
+    # cost_centre entirely would otherwise return every store's numbers
+    # plus a company-wide "combined" figure (see the un-filtered branch
+    # below), which is exactly the cross-store leak this exists to close.
+    cost_centre = resolve_view_store_filter(request.state.user, cost_centre)
+
     start_date, _ = get_month_boundaries(start_month)
     _, end_date = get_month_boundaries(end_month)
     
     try:
         stock_balances = fetch_stock_balances_from_db(start_month, end_month)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        print(f"Unexpected error: {e}")
+        raise HTTPException(status_code=400, detail="Something went wrong. Please try again.")
     
     prev_s_month, prev_e_month = get_previous_month_period(start_month, end_month)
     prev_start_date, _ = get_month_boundaries(prev_s_month)

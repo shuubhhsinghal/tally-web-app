@@ -11,7 +11,6 @@ export default function SetupPage() {
   const router = useRouter();
   const { login } = useAuth();
   const [name, setName] = useState('');
-  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -19,8 +18,8 @@ export default function SetupPage() {
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
-    if (!username.trim() || !password) {
-      setError('Enter a username and password.');
+    if (!name.trim() || !password) {
+      setError('Enter your name and a password.');
       return;
     }
     if (password.length < 4) {
@@ -32,7 +31,7 @@ export default function SetupPage() {
       const res = await fetch('/api/auth/setup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: name.trim(), username: username.trim(), password }),
+        body: JSON.stringify({ name: name.trim(), password }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || 'Setup failed.');
@@ -54,7 +53,7 @@ export default function SetupPage() {
           </div>
           <h1 className="text-xl font-black text-gray-900 dark:text-white">Create your owner account</h1>
           <p className="text-sm text-gray-500 dark:text-gray-400 mt-1 text-center">
-            This is the first account on this app. It has access to every store and can add staff logins later.
+            This is the first account on this app. It has access to every store and can add team member logins later.
           </p>
         </div>
 
@@ -65,13 +64,6 @@ export default function SetupPage() {
             onChange={e => setName(e.target.value)}
             placeholder="e.g. Shubh"
             autoFocus
-          />
-          <Input
-            label="Username"
-            value={username}
-            onChange={e => setUsername(e.target.value)}
-            placeholder="pick a username"
-            autoCapitalize="none"
           />
           <Input
             label="Password"

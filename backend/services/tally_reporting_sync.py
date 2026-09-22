@@ -1,10 +1,8 @@
 import asyncio
-import requests
 import xml.etree.ElementTree as ET
 from datetime import datetime
 import re
 
-from backend.config import TALLY_URL
 from backend.connector.transport import tally_transport
 from backend.services.tally_sync_service import sanitize_tally_xml
 from backend.database import get_db
@@ -31,10 +29,7 @@ def _get_default_sync_end_date() -> str:
     fy_end_str = _get_current_fy_end()
     return min(today_str, fy_end_str)
 
-async def fetch_and_store_cost_centres(tally_url=TALLY_URL):
-    # tally_url is now vestigial (kept so no caller's signature needs to
-    # change) -- all Tally traffic goes through tally_transport, which has
-    # exactly one connector to talk to regardless of what's passed here.
+async def fetch_and_store_cost_centres():
     payload = """<ENVELOPE>
   <HEADER>
     <VERSION>1</VERSION>
@@ -106,7 +101,7 @@ def _parse_amount(amt_str: str) -> float:
     except ValueError:
         return 0.0
 
-async def fetch_and_store_vouchers(start_date: str, end_date: str, tally_url=TALLY_URL):
+async def fetch_and_store_vouchers(start_date: str, end_date: str):
     payload = f"""<ENVELOPE>
   <HEADER>
     <VERSION>1</VERSION>
@@ -297,7 +292,7 @@ async def fetch_and_store_vouchers(start_date: str, end_date: str, tally_url=TAL
 _live_purchase_history_cache = {}
 _LIVE_HISTORY_CACHE_TTL_SECONDS = 60
 
-async def fetch_live_purchase_history_from_tally(item_name: str, since_date: str, tally_url=TALLY_URL) -> list:
+async def fetch_live_purchase_history_from_tally(item_name: str, since_date: str) -> list:
     """On-demand, per-item purchase history straight from Tally (not the local
     reporting_vouchers cache) -- used as the primary source for the return-item
     rate-history picker when Tally is reachable. `since_date` is YYYYMMDD.
@@ -407,21 +402,21 @@ def _tally_date_to_iso_str(raw_date: str) -> str:
         return f"{raw_date[0:4]}-{raw_date[4:6]}-{raw_date[6:8]}"
     return raw_date or ""
 
-async def async_sync_cost_centres(tally_url=TALLY_URL):
-    return await fetch_and_store_cost_centres(tally_url)
+async def async_sync_cost_centres():
+    return await fetch_and_store_cost_centres()
 
 from backend.services.tally_reporting_stock_sync import async_sync_monthly_stock
 
-async def async_sync_vouchers(start_date: str = None, end_date: str = None, tally_url=TALLY_URL):
+async def async_sync_vouchers(start_date: str = None, end_date: str = None):
     if not start_date:
         start_date = _get_current_fy_start()
     if not end_date:
         end_date = _get_default_sync_end_date()
-        
-    vouchers_count = await fetch_and_store_vouchers(start_date, end_date, tally_url)
-    
+
+    vouchers_count = await fetch_and_store_vouchers(start_date, end_date)
+
     # Run the monthly stock sync
-    failed_months = await async_sync_monthly_stock(start_date, end_date, tally_url)
+    failed_months = await async_sync_monthly_stock(start_date, end_date)
     
     return {
         "vouchers_count": vouchers_count,

@@ -6,7 +6,7 @@ import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
 import { useUI } from '@/context/UIContext';
 import { useAuth } from '@/context/AuthContext';
-import { Settings as SettingsIcon, Save, Users, Trash2, UserPlus } from "lucide-react";
+import { Settings as SettingsIcon, Users, Trash2, UserPlus, KeyRound } from "lucide-react";
 
 function TeamSection() {
   const { showToast, showConfirmDialog } = useUI();
@@ -14,8 +14,11 @@ function TeamSection() {
   const [users, setUsers] = useState([]);
   const [stores, setStores] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [form, setForm] = useState({ name: "", username: "", password: "", store_name: "" });
+  const [form, setForm] = useState({ name: "", password: "", store_name: "", is_owner: false });
   const [creating, setCreating] = useState(false);
+  const [resettingId, setResettingId] = useState(null);
+  const [resetPassword, setResetPassword] = useState("");
+  const [resetting, setResetting] = useState(false);
 
   const loadUsers = () => {
     fetch("/api/auth/users")
@@ -34,7 +37,7 @@ function TeamSection() {
 
   const handleCreate = async (e) => {
     e.preventDefault();
-    if (!form.name.trim() || !form.username.trim() || !form.password || !form.store_name) {
+    if (!form.name.trim() || !form.password || (!form.is_owner && !form.store_name)) {
       showToast("Fill in every field", "error");
       return;
     }
@@ -48,12 +51,36 @@ function TeamSection() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "Failed to create account");
       showToast(`${data.name}'s account created`);
-      setForm({ name: "", username: "", password: "", store_name: "" });
+      setForm({ name: "", password: "", store_name: "", is_owner: false });
       loadUsers();
     } catch (err) {
       showToast(err.message, "error");
     } finally {
       setCreating(false);
+    }
+  };
+
+  const handleResetPassword = async (id) => {
+    if (!resetPassword || resetPassword.length < 4) {
+      showToast("Password must be at least 4 characters", "error");
+      return;
+    }
+    setResetting(true);
+    try {
+      const res = await fetch(`/api/auth/users/${id}/reset-password`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ new_password: resetPassword }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Failed to reset password");
+      showToast("Password reset -- they'll need to sign in again");
+      setResettingId(null);
+      setResetPassword("");
+    } catch (err) {
+      showToast(err.message, "error");
+    } finally {
+      setResetting(false);
     }
   };
 
@@ -82,7 +109,7 @@ function TeamSection() {
           <Users className="w-5 h-5 text-teal-600" /> Team
         </h2>
         <p className="text-sm text-gray-500 mt-1">
-          Staff accounts can only see and post to the store they're assigned to. Only your owner account can manage this list.
+          Team member accounts can only see and post to the store they're assigned to. An account with full access can do everything you can, including managing this list.
         </p>
       </div>
 
@@ -93,23 +120,48 @@ function TeamSection() {
       ) : (
         <div className="divide-y divide-gray-100 dark:divide-gray-800 -mx-4">
           {users.map(u => (
-            <div key={u.id} className="flex items-center justify-between px-4 py-3">
-              <div>
-                <p className="text-sm font-bold text-gray-900 dark:text-white">
-                  {u.name} {u.id === currentUser?.id && <span className="text-xs font-medium text-gray-400">(you)</span>}
-                </p>
-                <p className="text-xs text-gray-500">
-                  {u.username} &middot; {u.is_owner ? 'Owner, all stores' : u.store_name}
-                </p>
+            <div key={u.id} className="px-4 py-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-bold text-gray-900 dark:text-white">
+                    {u.name} {u.id === currentUser?.id && <span className="text-xs font-medium text-gray-400">(you)</span>}
+                  </p>
+                  <p className="text-xs text-gray-500">
+                    {u.is_owner ? 'Owner, all stores' : u.store_name}
+                  </p>
+                </div>
+                {u.id !== currentUser?.id && (
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => { setResettingId(resettingId === u.id ? null : u.id); setResetPassword(""); }}
+                      className="p-2 text-gray-400 hover:text-teal-600 dark:hover:text-teal-400 transition-colors"
+                      aria-label={`Reset ${u.name}'s password`}
+                    >
+                      <KeyRound className="w-4 h-4" />
+                    </button>
+                    <button
+                      onClick={() => handleRemove(u.id, u.name)}
+                      className="p-2 text-gray-400 hover:text-red-600 dark:hover:text-red-400 transition-colors"
+                      aria-label={`Remove ${u.name}`}
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                )}
               </div>
-              {!u.is_owner && (
-                <button
-                  onClick={() => handleRemove(u.id, u.name)}
-                  className="p-2 text-gray-400 hover:text-red-600 dark:hover:text-red-400 transition-colors"
-                  aria-label={`Remove ${u.name}`}
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
+              {resettingId === u.id && (
+                <div className="flex flex-col gap-2 mt-3">
+                  <Input
+                    label={`New password for ${u.name}`}
+                    type="password"
+                    value={resetPassword}
+                    onChange={e => setResetPassword(e.target.value)}
+                    placeholder="at least 4 characters"
+                  />
+                  <Button onClick={() => handleResetPassword(u.id)} disabled={resetting}>
+                    {resetting ? "Saving..." : "Save"}
+                  </Button>
+                </div>
               )}
             </div>
           ))}
@@ -118,15 +170,33 @@ function TeamSection() {
 
       <form onSubmit={handleCreate} className="flex flex-col gap-3 pt-4 border-t border-gray-100 dark:border-gray-800">
         <h3 className="text-sm font-bold text-gray-900 dark:text-white flex items-center gap-2">
-          <UserPlus className="w-4 h-4" /> Add a staff account
+          <UserPlus className="w-4 h-4" /> Add a team member
         </h3>
         <Input label="Name" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="e.g. Ravi" />
-        <Input label="Username" value={form.username} onChange={e => setForm({ ...form, username: e.target.value })} placeholder="pick a username" autoCapitalize="none" />
         <Input label="Password" type="password" value={form.password} onChange={e => setForm({ ...form, password: e.target.value })} placeholder="at least 4 characters" />
-        <Select label="Store" value={form.store_name} onChange={e => setForm({ ...form, store_name: e.target.value })}>
-          <option value="" disabled>Select store...</option>
-          {stores.map(s => <option key={s} value={s}>{s}</option>)}
-        </Select>
+
+        <label className="flex items-start gap-3 p-3 rounded-xl border border-gray-200 dark:border-gray-700 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={form.is_owner}
+            onChange={e => setForm({ ...form, is_owner: e.target.checked, store_name: "" })}
+            className="w-4 h-4 mt-0.5 text-teal-600 rounded focus:ring-teal-500"
+          />
+          <span>
+            <span className="block text-sm font-bold text-gray-900 dark:text-white">Give full access</span>
+            <span className="block text-xs text-gray-500 mt-0.5">
+              Same as your account &mdash; every store, plus the ability to add and remove other accounts. Otherwise they're limited to one store below.
+            </span>
+          </span>
+        </label>
+
+        {!form.is_owner && (
+          <Select label="Store" value={form.store_name} onChange={e => setForm({ ...form, store_name: e.target.value })}>
+            <option value="" disabled>Select store...</option>
+            {stores.map(s => <option key={s} value={s}>{s}</option>)}
+          </Select>
+        )}
+
         <Button type="submit" disabled={creating} className="mt-1">
           {creating ? "Creating..." : "Add account"}
         </Button>
@@ -135,46 +205,58 @@ function TeamSection() {
   );
 }
 
-export default function SettingsPage() {
+function ChangePasswordSection() {
   const { showToast } = useUI();
-  const { user } = useAuth();
-  const [method, setMethod] = useState("separate_ledger");
-  const [loading, setLoading] = useState(true);
+  const [form, setForm] = useState({ current_password: "", new_password: "", confirm_password: "" });
   const [saving, setSaving] = useState(false);
 
-  useEffect(() => {
-    fetch("/api/settings-proxy")
-      .then(res => res.json())
-      .then(data => {
-        if (data.gst_recording_method) {
-          setMethod(data.gst_recording_method);
-        }
-        setLoading(false);
-      })
-      .catch(err => {
-        console.error(err);
-        setLoading(false);
-      });
-  }, []);
-
-  const handleSave = async () => {
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!form.current_password || !form.new_password) {
+      showToast("Fill in every field", "error");
+      return;
+    }
+    if (form.new_password !== form.confirm_password) {
+      showToast("New passwords don't match", "error");
+      return;
+    }
     setSaving(true);
     try {
-      const res = await fetch("/api/settings-proxy", {
+      const res = await fetch("/api/auth/change-password", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key: "gst_recording_method", value: method })
+        body: JSON.stringify({ current_password: form.current_password, new_password: form.new_password }),
       });
-      if (!res.ok) throw new Error("Failed to save settings");
-      showToast("Settings saved successfully");
-    } catch (e) {
-      showToast(e.message, 'error');
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Failed to change password");
+      showToast("Password changed");
+      setForm({ current_password: "", new_password: "", confirm_password: "" });
+    } catch (err) {
+      showToast(err.message, "error");
     } finally {
       setSaving(false);
     }
   };
 
-  if (loading) return <div className="p-8 animate-pulse text-gray-500">Loading settings...</div>;
+  return (
+    <Card className="flex flex-col gap-4">
+      <h2 className="text-lg font-bold text-gray-900 dark:text-white flex items-center gap-2">
+        <KeyRound className="w-5 h-5 text-teal-600" /> Change Password
+      </h2>
+      <form onSubmit={handleSubmit} className="flex flex-col gap-3">
+        <Input label="Current password" type="password" value={form.current_password} onChange={e => setForm({ ...form, current_password: e.target.value })} />
+        <Input label="New password" type="password" value={form.new_password} onChange={e => setForm({ ...form, new_password: e.target.value })} placeholder="at least 4 characters" />
+        <Input label="Confirm new password" type="password" value={form.confirm_password} onChange={e => setForm({ ...form, confirm_password: e.target.value })} />
+        <Button type="submit" disabled={saving} className="mt-1">
+          {saving ? "Saving..." : "Change Password"}
+        </Button>
+      </form>
+    </Card>
+  );
+}
+
+export default function SettingsPage() {
+  const { user } = useAuth();
 
   return (
     <div className="max-w-2xl mx-auto space-y-6">
@@ -185,43 +267,7 @@ export default function SettingsPage() {
         <h1 className="text-2xl font-bold text-gray-900 dark:text-white">App Settings</h1>
       </div>
 
-      <Card className="flex flex-col gap-6">
-        <div>
-          <h2 className="text-lg font-bold text-gray-900 dark:text-white">GST Recording Method</h2>
-          <p className="text-sm text-gray-500 mt-1 mb-4">
-            How should GST be recorded when pushing purchase vouchers to Tally?
-          </p>
-
-          <div className="space-y-3">
-            <label className={`flex flex-col gap-1 p-4 border rounded-xl cursor-pointer transition-colors ${method === 'separate_ledger' ? 'border-teal-500 bg-teal-50/50 dark:bg-teal-900/10' : 'hover:bg-gray-50 dark:hover:bg-gray-800'}`}>
-              <div className="flex items-center gap-3">
-                <input type="radio" name="gst_recording" value="separate_ledger" checked={method === 'separate_ledger'} onChange={e => setMethod(e.target.value)} className="w-4 h-4 text-teal-600" />
-                <span className="font-bold text-gray-900 dark:text-white">Separate Ledger (Paths A/B)</span>
-              </div>
-              <p className="text-sm text-gray-600 dark:text-gray-400 pl-7">
-                Item amounts are posted exclusive of GST. GST amounts are posted to separate Input CGST/SGST/IGST ledgers. This is the default approach.
-              </p>
-            </label>
-
-            <label className={`flex flex-col gap-1 p-4 border rounded-xl cursor-pointer transition-colors ${method === 'included_in_rate' ? 'border-teal-500 bg-teal-50/50 dark:bg-teal-900/10' : 'hover:bg-gray-50 dark:hover:bg-gray-800'}`}>
-              <div className="flex items-center gap-3">
-                <input type="radio" name="gst_recording" value="included_in_rate" checked={method === 'included_in_rate'} onChange={e => setMethod(e.target.value)} className="w-4 h-4 text-teal-600" />
-                <span className="font-bold text-gray-900 dark:text-white">Included in Item Rate (Paths C/D)</span>
-              </div>
-              <p className="text-sm text-gray-600 dark:text-gray-400 pl-7">
-                GST is absorbed into the item's purchase cost. The item rate will be inclusive of GST. No separate GST ledgers will be hit.
-              </p>
-            </label>
-          </div>
-        </div>
-
-        <div className="flex justify-end pt-4 border-t border-gray-100 dark:border-gray-800">
-          <Button onClick={handleSave} disabled={saving} className="min-w-[120px]">
-            {saving ? "Saving..." : <><Save className="w-4 h-4 mr-2" /> Save Settings</>}
-          </Button>
-        </div>
-      </Card>
-
+      <ChangePasswordSection />
       {user?.is_owner && <TeamSection />}
     </div>
   );

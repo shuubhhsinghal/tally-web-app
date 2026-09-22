@@ -3,14 +3,18 @@ import { useState, useEffect } from "react";
 import TopBar from '@/components/layout/TopBar';
 import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
+import { SearchableSelect } from '@/components/ui/SearchableSelect';
 import { Button } from '@/components/ui/Button';
 import { TextArea } from '@/components/ui/TextArea';
 import { useUI } from '@/context/UIContext';
+import { useAuth } from '@/context/AuthContext';
 import { useRouter } from 'next/navigation';
 
 export default function PaymentVoucher() {
   const router = useRouter();
   const { showToast } = useUI();
+  const { user } = useAuth();
+  const lockedStore = user && !user.is_owner ? user.store_name : null;
 
   const [formData, setFormData] = useState({
     mode: "expenses", // 'expenses' or 'others'
@@ -52,17 +56,20 @@ export default function PaymentVoucher() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setFormData(prev => ({
       ...prev,
-      date: new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().split('T')[0]
+      date: new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().split('T')[0],
+      cost_center: (prev.mode === "expenses" && lockedStore) ? lockedStore : prev.cost_center,
     }));
     fetchMetadata();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lockedStore]);
 
   const handleChange = (e) => {
     setFormData({ ...formData, [e.target.name]: e.target.value });
   };
 
   const handleModeChange = (mode) => {
-    setFormData({ ...formData, mode, cost_center: mode === "others" ? "" : formData.cost_center, debit_ledger: "" });
+    const cost_center = mode === "others" ? "" : (lockedStore || formData.cost_center);
+    setFormData({ ...formData, mode, cost_center, debit_ledger: "" });
     setShowCreateAccount(false);
   };
 
@@ -99,7 +106,15 @@ export default function PaymentVoucher() {
 
   const handlePost = async (e) => {
     e.preventDefault();
-    
+
+    // debit_ledger no longer has native HTML5 "required" validation now that
+    // it's a SearchableSelect (a styled div, not a real <select>), so it
+    // needs an explicit check here instead.
+    if (!formData.debit_ledger) {
+      showToast("Select who this was paid to", "error");
+      return;
+    }
+
     // Safety check for pending debit ledger
     const activeList = formData.mode === 'expenses' ? meta.expense_paid_to : meta.party_paid_to;
     const selectedLedger = activeList.find(l => l.name === formData.debit_ledger);
@@ -193,22 +208,17 @@ export default function PaymentVoucher() {
           />
 
           <div className="space-y-2">
-            <Select 
+            <SearchableSelect
               label="Paid to"
-              name="debit_ledger"
               value={formData.debit_ledger}
-              onChange={handleChange}
-              required
-            >
-              <option value="">
-                {formData.mode === 'expenses' 
+              onChange={val => setFormData({ ...formData, debit_ledger: val })}
+              placeholder={
+                formData.mode === 'expenses'
                   ? (meta.expense_paid_to.length === 0 ? 'No eligible cost-centre ledgers found' : 'Select expense...')
-                  : (meta.party_paid_to.length === 0 ? 'No accounts found' : 'Select party/other...')}
-              </option>
-              {(formData.mode === 'expenses' ? meta.expense_paid_to : meta.party_paid_to).map(l => (
-                <option key={l.name} value={l.name}>{l.name} {l.is_pending ? '⏳ In Queue' : ''}</option>
-              ))}
-            </Select>
+                  : (meta.party_paid_to.length === 0 ? 'No accounts found' : 'Select party/other...')
+              }
+              options={(formData.mode === 'expenses' ? meta.expense_paid_to : meta.party_paid_to).map(l => l.name)}
+            />
             
             {formData.mode === "others" && !showCreateAccount && (
               <button 
@@ -252,12 +262,13 @@ export default function PaymentVoucher() {
           </div>
 
           {formData.mode === "expenses" && (
-            <Select 
+            <Select
               label="Store"
               name="cost_center"
               value={formData.cost_center}
               onChange={handleChange}
               required
+              disabled={!!lockedStore}
             >
               <option value="">Select store...</option>
               {meta.stores.map(s => (

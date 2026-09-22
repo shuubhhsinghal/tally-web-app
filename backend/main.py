@@ -10,7 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
-from backend.routers import stock_transfer, transfer, sales, payment, purchase, purchase_item, bank_statement, sync, dashboard, masters, settings, purchase_drafts, reporting, reporting_pl, repack, auth
+from backend.routers import stock_transfer, transfer, sales, payment, purchase, purchase_item, bank_statement, sync, dashboard, masters, settings, purchase_drafts, reporting, reporting_pl, repack, auth, loans
 from backend.database import init_db, get_user_by_session_token
 from backend.services.tally_sync_worker import sync_worker_loop
 from backend.connector.router import router as connector_router
@@ -55,13 +55,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Every /api/* route requires a valid session token except the handful
-# needed to get one in the first place (setup/login/needs-setup), and the
-# WhatsApp webhook, which Meta calls directly with its own signature check
-# (see routers/whatsapp.py) rather than a user session. The connector's own
-# /ws/connector WebSocket never reaches this middleware at all (Starlette's
-# HTTP middleware doesn't wrap websocket upgrades) and has its own bearer-
-# token check in connector/router.py.
+# Every route requires a valid session token except the handful needed to
+# get one in the first place (setup/login/needs-setup), the WhatsApp webhook
+# (Meta calls it directly with its own signature check -- see
+# routers/whatsapp.py -- rather than a user session), and uploaded file
+# storage. This deliberately also covers FastAPI's own /docs, /openapi.json
+# and /redoc -- those describe the entire API surface and aren't meant to be
+# public. The connector's own /ws/connector WebSocket never reaches this
+# middleware at all (Starlette's HTTP middleware doesn't wrap websocket
+# upgrades) and has its own bearer-token check in connector/router.py.
 _AUTH_EXEMPT_PATHS = {
     "/api/auth/setup",
     "/api/auth/login",
@@ -80,7 +82,7 @@ async def require_session(request: Request, call_next):
     # middleware answer them regardless of where it sits in the stack.
     if request.method == "OPTIONS":
         return await call_next(request)
-    if path in _AUTH_EXEMPT_PATHS or path.startswith(_AUTH_EXEMPT_PREFIXES) or not path.startswith("/api/"):
+    if path in _AUTH_EXEMPT_PATHS or path.startswith(_AUTH_EXEMPT_PREFIXES):
         return await call_next(request)
 
     token = request.headers.get("Authorization", "")
@@ -123,6 +125,7 @@ app.include_router(settings.router, prefix="/api/settings", tags=["Settings"])
 app.include_router(repack.router, prefix="/api/repack", tags=["Repack"])
 app.include_router(reporting.router, prefix="/api")
 app.include_router(reporting_pl.router)
+app.include_router(loans.router, prefix="/api/loans", tags=["Loans"])
 app.include_router(connector_router, tags=["Tally Connector"])
 
 from backend.routers import whatsapp

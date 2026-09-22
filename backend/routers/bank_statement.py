@@ -257,7 +257,8 @@ async def create_tally_ledger(payload: dict):
         except MasterFailedException as e:
             raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+            print(f"Unexpected error: {e}")
+            raise HTTPException(status_code=500, detail="Something went wrong. Please try again.")
             
         return {"status": "queued", "message": f"Ledger {name} saved to offline queue."}
     except HTTPException:
@@ -390,7 +391,8 @@ def upload_bank_statement(
         except HTTPException:
             raise
         except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+            print(f"Unexpected error: {e}")
+            raise HTTPException(status_code=500, detail="Something went wrong. Please try again.")
         finally:
             if os.path.exists(temp_path):
                 os.remove(temp_path)

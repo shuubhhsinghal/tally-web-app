@@ -2,15 +2,20 @@ import os
 import json
 from datetime import datetime
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 from backend.database import get_db
 from backend.connector.manager import connector_manager
+from backend.services.auth_helpers import resolve_view_store_filter
 
 router = APIRouter()
 
 @router.get("/stats")
-def get_dashboard_stats():
+def get_dashboard_stats(request: Request):
+    # A staff account only ever sees its own store's figures here -- the
+    # owner (store_filter stays None) sees everything, same as before.
+    store_filter = resolve_view_store_filter(request.state.user, None)
+
     queue_count = 0
     cache_count = 0
     failed_count = 0
@@ -19,7 +24,10 @@ def get_dashboard_stats():
     try:
         with get_db() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) as count FROM offline_queue WHERE status = 'PENDING'")
+            if store_filter:
+                cursor.execute(f"SELECT COUNT(*) as count FROM offline_queue WHERE status = 'PENDING' AND {STORE_MATCH_SQL}", (store_filter, store_filter, store_filter, store_filter))
+            else:
+                cursor.execute("SELECT COUNT(*) as count FROM offline_queue WHERE status = 'PENDING'")
             row = cursor.fetchone()
             if row:
                 queue_count = row['count']
@@ -30,7 +38,10 @@ def get_dashboard_stats():
                 cache_count = row['count']
 
             # True total, regardless of the 10-item activity feed cap or is_hidden state.
-            cursor.execute("SELECT COUNT(*) as count FROM offline_queue WHERE status = 'FAILED'")
+            if store_filter:
+                cursor.execute(f"SELECT COUNT(*) as count FROM offline_queue WHERE status = 'FAILED' AND {STORE_MATCH_SQL}", (store_filter, store_filter, store_filter, store_filter))
+            else:
+                cursor.execute("SELECT COUNT(*) as count FROM offline_queue WHERE status = 'FAILED'")
             row = cursor.fetchone()
             if row:
                 failed_count = row['count']
@@ -47,8 +58,8 @@ def get_dashboard_stats():
     try:
         from backend.services.reporting_sales_service import calculate_sales, get_unsynced_sales
         today_str = datetime.now().strftime("%Y%m%d")
-        confirmed = calculate_sales(today_str, today_str)
-        unsynced = get_unsynced_sales(today_str, today_str)
+        confirmed = calculate_sales(today_str, today_str, store_filter)
+        unsynced = get_unsynced_sales(today_str, today_str, store_filter)
         today_sales = round(confirmed + unsynced['pending_amount'], 2)
         today_sales_pending_count = unsynced['pending_count']
     except Exception as e:
@@ -71,10 +82,12 @@ def get_dashboard_stats():
 
 @router.get("/activity")
 def get_recent_activity(
+    request: Request,
     status: Optional[str] = Query(None, description="Filter by status, e.g. FAILED"),
     include_hidden: bool = Query(False, description="Include items hidden by 'Clear Finished'"),
     limit: int = Query(10, ge=1, le=500)
 ):
+    store_filter = resolve_view_store_filter(request.state.user, None)
     try:
         with get_db() as conn:
             cursor = conn.cursor()
@@ -85,6 +98,9 @@ def get_recent_activity(
             if status:
                 conditions.append("status = ?")
                 params.append(status)
+            if store_filter:
+                conditions.append(STORE_MATCH_SQL)
+                params += [store_filter, store_filter, store_filter, store_filter]
             where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
             params.append(limit)
             cursor.execute(
@@ -126,6 +142,33 @@ UNALLOCATED_MATCH_SQL = """(
     ))
 )"""
 
+def _require_item_store_access(item_id: int, current_user: dict):
+    """Single-item version of the STORE_MATCH_SQL filter above -- the list
+    endpoints already filter by store, but a staff account could still hit
+    a specific item's URL directly by guessing/incrementing its id, so each
+    single-item endpoint needs its own ownership check too."""
+    if current_user['is_owner']:
+        return
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT operation_type, payload FROM offline_queue WHERE id = ?", (item_id,))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Item not found")
+        try:
+            payload = json.loads(row['payload']) if row['payload'] else {}
+        except (json.JSONDecodeError, TypeError):
+            payload = {}
+        store = current_user['store_name']
+        if payload.get('cost_center') == store or payload.get('from_store') == store or payload.get('to_store') == store:
+            return
+        if row['operation_type'] == 'REPACK_VOUCHER' and payload.get('repack_id'):
+            cursor.execute("SELECT store_name FROM repack_operations WHERE id = ?", (payload['repack_id'],))
+            repack_row = cursor.fetchone()
+            if repack_row and repack_row['store_name'] == store:
+                return
+    raise HTTPException(status_code=404, detail="Item not found")
+
 # Almost every real voucher shares operation_type='POST_VOUCHER' (sales, purchase,
 # payment, transfer, stock transfer, bank statement all use it), so transaction TYPE
 # can only be told apart by the description prefix each router writes at queue time.
@@ -146,11 +189,15 @@ TYPE_FILTERS = {
     "REPACK": ("offline_queue.operation_type = ?", ["REPACK_VOUCHER"]),
 }
 
-def _build_queue_where(status: str, store: Optional[str], type: Optional[str]):
+def _build_queue_where(status: str, store: Optional[str], type: Optional[str], current_user: dict):
     if status not in QUEUE_STATUSES:
         raise HTTPException(status_code=400, detail=f"status must be one of {', '.join(QUEUE_STATUSES)}")
     if type is not None and type not in TYPE_FILTERS:
         raise HTTPException(status_code=400, detail=f"type must be one of {', '.join(TYPE_FILTERS.keys())}")
+
+    # A staff account can't widen this past their own store by editing the
+    # query param -- their store always wins, regardless of what was asked.
+    store = resolve_view_store_filter(current_user, store)
 
     where = "offline_queue.status = ?"
     params = [status]
@@ -167,13 +214,14 @@ def _build_queue_where(status: str, store: Optional[str], type: Optional[str]):
 
 @router.get("/queue")
 def get_queue_page(
+    request: Request,
     status: str = Query(..., description="One of PENDING, FAILED, SYNCED"),
     store: Optional[str] = Query(None, description="A store name, or 'Unallocated'; omit for all stores"),
     type: Optional[str] = Query(None, description=f"One of {', '.join(TYPE_FILTERS.keys())}; omit for all types"),
     page: int = Query(1, ge=1),
     limit: int = Query(10, ge=1, le=50),
 ):
-    where, params = _build_queue_where(status, store, type)
+    where, params = _build_queue_where(status, store, type, request.state.user)
 
     try:
         with get_db() as conn:
@@ -203,6 +251,7 @@ def get_queue_page(
 
 @router.post("/queue/clear-failed")
 def clear_failed_queue(
+    request: Request,
     store: Optional[str] = Query(None, description="A store name, or 'Unallocated'; omit for all stores"),
     type: Optional[str] = Query(None, description=f"One of {', '.join(TYPE_FILTERS.keys())}; omit for all types"),
 ):
@@ -214,7 +263,7 @@ def clear_failed_queue(
     unconfirmed (delivery_uncertain) is left alone rather than deleted,
     since it may already exist in Tally and needs a human to verify first."""
     from backend.database import delete_master_queue, cancel_pending_queue_item
-    where, params = _build_queue_where("FAILED", store, type)
+    where, params = _build_queue_where("FAILED", store, type, request.state.user)
     try:
         with get_db() as conn:
             cursor = conn.cursor()
@@ -237,10 +286,12 @@ def clear_failed_queue(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail="Something went wrong. Please try again.")
 
 @router.post("/queue/retry-failed")
 def retry_failed_queue(
+    request: Request,
     store: Optional[str] = Query(None, description="A store name, or 'Unallocated'; omit for all stores"),
     type: Optional[str] = Query(None, description=f"One of {', '.join(TYPE_FILTERS.keys())}; omit for all types"),
 ):
@@ -249,7 +300,7 @@ def retry_failed_queue(
     delivery to Tally is unconfirmed (delivery_uncertain) is left alone
     rather than blocking the whole batch, since retrying it risks a
     duplicate voucher and it needs a human to verify in Tally first."""
-    where, params = _build_queue_where("FAILED", store, type)
+    where, params = _build_queue_where("FAILED", store, type, request.state.user)
     try:
         with get_db() as conn:
             cursor = conn.cursor()
@@ -279,14 +330,16 @@ def retry_failed_queue(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail="Something went wrong. Please try again.")
 
 class QueueUpdatePayload(BaseModel):
     payload: str
     xml_data: str
 
 @router.get("/activity/{item_id}")
-def get_activity_detail(item_id: int):
+def get_activity_detail(item_id: int, request: Request):
+    _require_item_store_access(item_id, request.state.user)
     try:
         with get_db() as conn:
             cursor = conn.cursor()
@@ -298,10 +351,12 @@ def get_activity_detail(item_id: int):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail="Something went wrong. Please try again.")
 
 @router.put("/activity/{item_id}")
-def update_activity(item_id: int, data: QueueUpdatePayload):
+def update_activity(item_id: int, data: QueueUpdatePayload, request: Request):
+    _require_item_store_access(item_id, request.state.user)
     try:
         with get_db() as conn:
             cursor = conn.cursor()
@@ -319,10 +374,12 @@ def update_activity(item_id: int, data: QueueUpdatePayload):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail="Something went wrong. Please try again.")
 
 @router.delete("/activity/{item_id}")
-def delete_activity(item_id: int):
+def delete_activity(item_id: int, request: Request):
+    _require_item_store_access(item_id, request.state.user)
     try:
         from backend.database import delete_master_queue
         with get_db() as conn:
@@ -354,21 +411,28 @@ def delete_activity(item_id: int):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail="Something went wrong. Please try again.")
 
 @router.post("/activity/clear")
-def clear_finished_activity():
+def clear_finished_activity(request: Request):
+    store_filter = resolve_view_store_filter(request.state.user, None)
     try:
         with get_db() as conn:
             cursor = conn.cursor()
-            cursor.execute("UPDATE offline_queue SET is_hidden = 1 WHERE status IN ('SYNCED', 'FAILED')")
+            if store_filter:
+                cursor.execute(f"UPDATE offline_queue SET is_hidden = 1 WHERE status IN ('SYNCED', 'FAILED') AND {STORE_MATCH_SQL}", (store_filter, store_filter, store_filter, store_filter))
+            else:
+                cursor.execute("UPDATE offline_queue SET is_hidden = 1 WHERE status IN ('SYNCED', 'FAILED')")
             conn.commit()
             return {"message": "Finished activities cleared successfully"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail="Something went wrong. Please try again.")
 
 @router.post("/activity/{item_id}/retry")
-def retry_activity(item_id: int):
+def retry_activity(item_id: int, request: Request):
+    _require_item_store_access(item_id, request.state.user)
     try:
         from backend.database import retry_master
         with get_db() as conn:
@@ -398,20 +462,48 @@ def retry_activity(item_id: int):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail="Something went wrong. Please try again.")
+
+@router.post("/activity/{item_id}/confirm-not-delivered")
+def confirm_not_delivered(item_id: int, request: Request):
+    """Unlocks Delete/Retry/Edit again on an item whose delivery to Tally
+    was left unconfirmed (delivery_uncertain) -- e.g. the connector dropped
+    mid-request, or (historically) the bytes/JSON serialization bug from
+    early connector testing. We can't check Tally ourselves; this exists so
+    a human who HAS checked (and confirmed the voucher is NOT there) has a
+    way out, instead of the item being permanently stuck with no recovery
+    path. Does not retry or delete anything by itself -- just clears the
+    flag so the normal actions become available again."""
+    _require_item_store_access(item_id, request.state.user)
+    from backend.database import set_delivery_uncertain
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM offline_queue WHERE id = ?", (item_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Item not found")
+    set_delivery_uncertain(item_id, False)
+    return {"message": "Unlocked -- delivery marked as not confirmed in Tally"}
 
 
 class RebuildPayload(BaseModel):
     payload: dict
 
 @router.post("/activity/{item_id}/rebuild")
-def rebuild_activity_xml(item_id: int, data: RebuildPayload):
+def rebuild_activity_xml(item_id: int, data: RebuildPayload, request: Request):
     """
     Accepts an updated JSON payload dict, regenerates Tally XML from scratch,
     and updates both columns in the queue. Dispatches by payload shape: an
     'items' key means a purchase item invoice, a 'ledger'+'amount' shape means
     a sales entry.
     """
+    _require_item_store_access(item_id, request.state.user)
+    current_user = request.state.user
+    if not current_user['is_owner']:
+        new_store = data.payload.get('cost_center') or data.payload.get('store')
+        if new_store and new_store != current_user['store_name']:
+            raise HTTPException(status_code=403, detail=f"Your account can only edit entries for {current_user['store_name']}.")
+
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT payload FROM offline_queue WHERE id = ?", (item_id,))
@@ -620,7 +712,8 @@ def _rebuild_purchase_item_voucher(item_id: int, p: dict):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail="Something went wrong. Please try again.")
 
 def _rebuild_sales_voucher(item_id: int, p: dict):
     from xml.sax.saxutils import escape as _escape
@@ -700,5 +793,6 @@ def _rebuild_sales_voucher(item_id: int, p: dict):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail="Something went wrong. Please try again.")
 

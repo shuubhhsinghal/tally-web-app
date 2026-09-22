@@ -104,7 +104,7 @@ export default function FundTransfer() {
   if (preview) {
     return (
       <div className="min-h-screen bg-gray-50 dark:bg-gray-900 pb-20">
-        <TopBar title="Confirm Transfer" />
+        <TopBar title="Confirm" />
         <div className="max-w-md mx-auto p-4 space-y-6 mt-4">
           <Card className="flex flex-col gap-4">
             <div className="text-center">

@@ -4,6 +4,7 @@ import React, { useState, useEffect } from 'react';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { TrendingUp, TrendingDown, ChevronLeft, ArrowUpRight, ArrowDownRight, Store, Calendar, AlertTriangle } from 'lucide-react';
 import { useRouter } from 'next/navigation';
+import { useAuth } from '@/context/AuthContext';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 
@@ -100,6 +101,8 @@ const formatDateFull = (yyyymmdd) => {
 
 export default function SalesReport() {
     const router = useRouter();
+    const { user } = useAuth();
+    const lockedStore = user && !user.is_owner ? user.store_name : null;
     const [isMounted, setIsMounted] = useState(false);
     useEffect(() => setIsMounted(true), []);
 
@@ -109,7 +112,11 @@ export default function SalesReport() {
     const [preset, setPreset] = useState("month");
     const [dates, setDates] = useState(getPresetDates("month"));
     const [costCentres, setCostCentres] = useState([]);
-    const [selectedStore, setSelectedStore] = useState("");
+    const [selectedStore, setSelectedStore] = useState(lockedStore || "");
+
+    useEffect(() => {
+        if (lockedStore) setSelectedStore(lockedStore);
+    }, [lockedStore]);
 
     useEffect(() => {
         fetch(`${API_BASE}/api/reporting/inspect/cost-centres`)
@@ -215,7 +222,12 @@ export default function SalesReport() {
                     <div className="flex-1">
                         <label className="text-xs font-medium text-slate-500 mb-1.5 block">Store</label>
                         <div className="relative">
-                            <select 
+                            {lockedStore ? (
+                                <div className="w-full bg-[#1e293b] border border-slate-700/50 text-slate-200 text-sm py-3 pl-3 pr-8 rounded-xl truncate">
+                                    {lockedStore}
+                                </div>
+                            ) : (
+                            <select
                                 value={selectedStore}
                                 onChange={e => setSelectedStore(e.target.value)}
                                 className="w-full appearance-none bg-[#1e293b] border border-slate-700/50 text-slate-200 text-sm py-3 pl-3 pr-8 rounded-xl focus:outline-none focus:ring-2 focus:ring-cyan-500/50 truncate"
@@ -223,6 +235,7 @@ export default function SalesReport() {
                                 <option value="">Combined (All Stores)</option>
                                 {costCentres.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
                             </select>
+                            )}
                             <Store className="w-4 h-4 text-slate-500 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                         </div>
                     </div>

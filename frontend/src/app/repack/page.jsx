@@ -4,10 +4,13 @@ import { Input } from '@/components/ui/Input';
 import { Button } from '@/components/ui/Button';
 import { Select } from '@/components/ui/Select';
 import { useUI } from '@/context/UIContext';
+import { useAuth } from '@/context/AuthContext';
 import { Trash2, PlusCircle } from 'lucide-react';
 
 export default function RepackPage() {
   const { showToast } = useUI();
+  const { user } = useAuth();
+  const lockedStore = user && !user.is_owner ? user.store_name : null;
   const [loading, setLoading] = useState(false);
   const [stockItems, setStockItems] = useState([]);
   const [stores, setStores] = useState([]);
@@ -55,6 +58,13 @@ export default function RepackPage() {
 
     fetchConversions();
   }, []);
+
+  useEffect(() => {
+    if (lockedStore && formData.store_name !== lockedStore) {
+      setFormData(prev => ({ ...prev, store_name: lockedStore }));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lockedStore]);
 
   const handleComponentChange = (index, field, value) => {
     const newComps = [...components];
@@ -194,6 +204,7 @@ export default function RepackPage() {
               value={formData.store_name}
               onChange={(e) => setFormData({...formData, store_name: e.target.value})}
               className="w-full"
+              disabled={!!lockedStore}
             >
               <option value="">Select store...</option>
               {stores.map(s => (

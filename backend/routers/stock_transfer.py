@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from pydantic import BaseModel
 import json
 import os
@@ -7,6 +7,7 @@ from backend.database import get_all_stock_items, queue_operation, update_queue_
 import requests
 from backend.services.tally_response import parse_tally_response
 from backend.connector.transport import tally_transport
+from backend.services.auth_helpers import enforce_store_access_either
 
 router = APIRouter()
 
@@ -113,10 +114,13 @@ async def _attempt_post_voucher(queue_id: int, xml_payload: str) -> dict:
         return {"status": "failed", "message": str(e)}
 
 @router.post("/post")
-async def post_transfer(payload: PostRequest):
+async def post_transfer(payload: PostRequest, request: Request):
     from xml.sax.saxutils import escape
     from backend.services.tally_godown_stock import get_godown_stock, is_tally_reachable
     import uuid
+
+    current_user = request.state.user
+    enforce_store_access_either(current_user, payload.from_store, payload.to_store, "move stock for")
 
     safe_item = escape(str(payload.item_name))
     safe_from = escape(str(payload.from_store))
@@ -149,7 +153,8 @@ async def post_transfer(payload: PostRequest):
         except requests.exceptions.RequestException:
             pass  # Tally became unreachable between the ping and this call -- proceed without the check.
         except Exception as e:
-            raise HTTPException(status_code=400, detail=str(e))
+            print(f"Unexpected error: {e}")
+            raise HTTPException(status_code=400, detail="Something went wrong. Please try again.")
 
     amount_str = ""
     amount_str_pos = ""
@@ -277,8 +282,10 @@ async def post_transfer(payload: PostRequest):
 
     # Queue-First Architecture: both vouchers are durably saved before either
     # is ever attempted against Tally.
-    accounting_queue_id = queue_operation("POST_VOUCHER", accounting_xml, payload.model_dump(), f"Stock Transfer: {payload.qty} pcs of {safe_item} (Accounting)")
-    physical_queue_id = queue_operation("POST_VOUCHER", physical_xml, payload.model_dump(), f"Stock Transfer: {payload.qty} pcs of {safe_item} (Physical)")
+    queue_payload = payload.model_dump()
+    queue_payload['created_by'] = current_user['name']
+    accounting_queue_id = queue_operation("POST_VOUCHER", accounting_xml, queue_payload, f"Stock Transfer: {payload.qty} pcs of {safe_item} (Accounting)")
+    physical_queue_id = queue_operation("POST_VOUCHER", physical_xml, queue_payload, f"Stock Transfer: {payload.qty} pcs of {safe_item} (Physical)")
 
     accounting_result = await _attempt_post_voucher(accounting_queue_id, accounting_xml)
     physical_result = await _attempt_post_voucher(physical_queue_id, physical_xml)

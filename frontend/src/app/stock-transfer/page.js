@@ -7,12 +7,20 @@ import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { SearchableSelect } from '@/components/ui/SearchableSelect';
 import { useUI } from '@/context/UIContext';
+import { useAuth } from '@/context/AuthContext';
 import { useRouter } from 'next/navigation';
 
 export default function StockTransfer() {
   const router = useRouter();
   const { showToast } = useUI();
-  
+  const { user } = useAuth();
+  // Unlike the single-store forms, this isn't locked -- a transfer can
+  // legitimately go either direction (sending stock out or receiving it
+  // in), so a staff account just gets their store pre-filled as the
+  // likely "from" side, still free to change either field. The backend
+  // still rejects any transfer that doesn't involve their store at all.
+  const lockedStore = user && !user.is_owner ? user.store_name : null;
+
   const [formData, setFormData] = useState({
     item_name: "",
     qty: "",
@@ -32,7 +40,8 @@ export default function StockTransfer() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setFormData(prev => ({
       ...prev,
-      date: new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().split('T')[0]
+      date: new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().split('T')[0],
+      from_store: prev.from_store || lockedStore || "",
     }));
     
     // --- Stale-while-revalidate from localStorage ---
@@ -142,7 +151,7 @@ export default function StockTransfer() {
   if (preview) {
     return (
       <div className="min-h-screen bg-gray-50 dark:bg-gray-900 pb-20">
-        <TopBar title="Confirm Transfer" />
+        <TopBar title="Confirm" />
         <div className="max-w-md mx-auto p-4 space-y-6 mt-4">
           <Card className="flex flex-col gap-4">
             <div>

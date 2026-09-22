@@ -13,7 +13,8 @@ export function SearchableSelect({
   isLoading = false,
   className = '',
   onCreateNew = null,
-  rawItemName = ''
+  rawItemName = '',
+  createLabel = 'new Tally item'
 }) {
   const [isOpen, setIsOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -82,7 +83,7 @@ export function SearchableSelect({
               onClick={() => { onCreateNew((query.trim()) || rawItemName); setQuery(''); setIsOpen(false); }}
               className="px-4 py-3 text-sm cursor-pointer transition-colors border-b border-dashed border-teal-200 dark:border-teal-900/40 text-teal-700 dark:text-teal-400 font-bold bg-teal-50/60 dark:bg-teal-900/20 hover:bg-teal-100 dark:hover:bg-teal-900/40"
             >
-              + Create &quot;{query.trim() || rawItemName}&quot; as new Tally item
+              + Create &quot;{query.trim() || rawItemName}&quot; as {createLabel}
             </div>
           )}
           {isLoading ? (

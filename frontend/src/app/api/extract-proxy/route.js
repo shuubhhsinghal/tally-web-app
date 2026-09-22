@@ -8,10 +8,15 @@ export async function POST(req) {
     // Default to the localhost backend port if no environment variable is set
     const backendUrl = process.env.BACKEND_URL || 'http://127.0.0.1:8000';
     
-    // Use the native fetch API to bypass next-http-proxy-middleware 30s timeout
+    // Use the native fetch API to bypass next-http-proxy-middleware 30s timeout.
+    // This server-side call bypasses the browser's own fetch (and its
+    // auth-header wrapper from AuthContext), so the incoming request's
+    // Authorization header has to be forwarded by hand -- otherwise the
+    // backend's session middleware rejects it with 401.
     const response = await fetch(`${backendUrl}/api/purchase-item/extract`, {
       method: 'POST',
       body: formData,
+      headers: { 'Authorization': req.headers.get('authorization') || '' },
       // Node.js native fetch has no timeout by default
     });
     

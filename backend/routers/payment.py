@@ -1,6 +1,6 @@
 from typing import Optional, List
 from pydantic import BaseModel
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 import requests
 import os
 import json
@@ -8,6 +8,7 @@ from xml.sax.saxutils import escape
 from backend.database import get_all_ledgers, queue_master_operation, queue_operation, get_db, check_master_exists_locally, normalize_master_name, MasterConflictException, MasterFailedException, update_queue_status, set_delivery_uncertain, get_master_dependency_state, is_master_pending_sync
 from backend.services.tally_response import parse_tally_response
 from backend.connector.transport import tally_transport
+from backend.services.auth_helpers import enforce_store_access
 
 router = APIRouter()
 
@@ -151,10 +152,18 @@ async def create_payment_ledger(payload: CreateLedgerRequest):
     except MasterFailedException as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail="Something went wrong. Please try again.")
 
 @router.post("/post")
-async def post_payment(payload: PaymentRequest):
+async def post_payment(payload: PaymentRequest, request: Request):
+    current_user = request.state.user
+    # A payment tagged with a cost centre must match the caller's own store;
+    # a payment with no cost centre at all (e.g. paying off a loan) isn't
+    # tied to any store, so it's left open to any account.
+    if payload.mode == "expenses" and payload.cost_center:
+        enforce_store_access(current_user, payload.cost_center, "post expenses for")
+
     safe_debit = escape(str(payload.debit_ledger))
     safe_credit = escape(str(payload.credit_ledger))
     safe_nar = escape(str(payload.narration))
@@ -199,7 +208,9 @@ async def post_payment(payload: PaymentRequest):
 </ENVELOPE>"""
 
     # Queue-First Architecture: Always save transaction to DB before attempting to send
-    queue_id = queue_operation("POST_VOUCHER", xml_data, payload.model_dump(), f"Payment: {payload.amount} to {payload.debit_ledger}")
+    queue_payload = payload.model_dump()
+    queue_payload['created_by'] = current_user['name']
+    queue_id = queue_operation("POST_VOUCHER", xml_data, queue_payload, f"Payment: {payload.amount} to {payload.debit_ledger}")
 
     try:
         for role, ledger_name in (("debit", payload.debit_ledger), ("credit", payload.credit_ledger)):

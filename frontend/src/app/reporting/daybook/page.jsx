@@ -3,8 +3,9 @@
 import React, { useState, useEffect } from 'react';
 import { AlertCircle, RefreshCw, Store, ChevronLeft, ChevronRight, Search, ArrowUpDown, X, ExternalLink, Filter } from 'lucide-react';
 import ReportTabs from '@/components/layout/ReportTabs';
+import { useAuth } from '@/context/AuthContext';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 
 const PRESETS = [
     { label: "Today", value: "today" },
@@ -95,9 +96,16 @@ export default function DaybookReport() {
     const [preset, setPreset] = useState("month");
     const [dates, setDates] = useState(getPresetDates("month"));
     
+    const { user } = useAuth();
+    const lockedStore = user && !user.is_owner ? user.store_name : null;
+
     const [costCentres, setCostCentres] = useState([]);
-    const [selectedStore, setSelectedStore] = useState("");
-    
+    const [selectedStore, setSelectedStore] = useState(lockedStore || "");
+
+    useEffect(() => {
+        if (lockedStore) setSelectedStore(lockedStore);
+    }, [lockedStore]);
+
     const [page, setPage] = useState(1);
     const [limit, setLimit] = useState(50);
     const [searchInput, setSearchInput] = useState("");
@@ -369,8 +377,13 @@ export default function DaybookReport() {
                 <div className="flex flex-wrap items-center gap-3">
                     <div className="relative">
                         <Store className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-                        <select 
-                            value={selectedStore} 
+                        {lockedStore ? (
+                            <div className="pl-9 pr-4 py-2 border border-gray-300 dark:border-gray-700 rounded-xl bg-white dark:bg-gray-800 text-sm shadow-sm">
+                                {lockedStore}
+                            </div>
+                        ) : (
+                        <select
+                            value={selectedStore}
                             onChange={(e) => {setSelectedStore(e.target.value); setPage(1);}}
                             className="pl-9 pr-4 py-2 border border-gray-300 dark:border-gray-700 rounded-xl bg-white dark:bg-gray-800 text-sm focus:ring-2 focus:ring-blue-500 shadow-sm appearance-none cursor-pointer"
                         >
@@ -380,6 +393,7 @@ export default function DaybookReport() {
                                 <option key={c.name} value={c.name}>{c.name}</option>
                             ))}
                         </select>
+                        )}
                     </div>
                     
                     <div className="flex bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-xl p-1 shadow-sm">

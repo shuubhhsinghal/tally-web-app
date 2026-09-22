@@ -130,6 +130,28 @@ export const TransactionDetailView = ({ itemId, onBack, onMutated }) => {
     }
   };
 
+  const handleConfirmNotDelivered = () => {
+    showConfirmDialog({
+      title: "Confirm you've checked Tally",
+      message: "Delivery to Tally was left unconfirmed for this transaction — it may or may not have actually reached Tally. Only continue if you've opened Tally yourself and confirmed this voucher is NOT there. This unlocks Delete/Retry/Edit again; it doesn't retry or delete anything by itself.",
+      danger: true,
+      confirmText: "I've checked — unlock",
+      onConfirm: async () => {
+        try {
+          const res = await fetch(`/api/dashboard/activity/${item.id}/confirm-not-delivered`, { method: 'POST' });
+          const body = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(body.detail || "Failed to unlock");
+          showToast(body.message || "Unlocked");
+          // Re-fetch so isDeliveryUncertain flips and the normal actions reappear.
+          const res2 = await fetch(`/api/dashboard/activity/${item.id}`);
+          if (res2.ok) setItem(await res2.json());
+        } catch (err) {
+          showToast(err.message || "Failed to unlock", "error");
+        }
+      }
+    });
+  };
+
   const handleDeleteItem = async () => {
     showConfirmDialog({
       title: "Delete Item?",
@@ -363,7 +385,7 @@ export const TransactionDetailView = ({ itemId, onBack, onMutated }) => {
             </Button>
           )}
           {item.status === 'FAILED' && !isEditMode && isDeliveryUncertain && (
-            <Button variant="secondary" disabled className="flex-1 opacity-60 cursor-not-allowed">
+            <Button variant="secondary" onClick={handleConfirmNotDelivered} className="flex-1 border-amber-500 text-amber-600 hover:bg-amber-50">
               <AlertTriangle className="w-4 h-4 mr-2" /> Verify in Tally First
             </Button>
           )}
@@ -379,7 +401,15 @@ export const TransactionDetailView = ({ itemId, onBack, onMutated }) => {
             </Button>
           )}
           {item.status === 'PENDING' && viewMode === 'preview' && !isEditMode && isRebuildable && isDeliveryUncertain && (
-            <Button variant="secondary" disabled className="flex-1 opacity-60 cursor-not-allowed">
+            <Button variant="secondary" onClick={handleConfirmNotDelivered} className="flex-1 border-amber-500 text-amber-600 hover:bg-amber-50">
+              <AlertTriangle className="w-4 h-4 mr-2" /> Verify in Tally First
+            </Button>
+          )}
+          {/* A PENDING item with no edit form (e.g. stock transfer, repack)
+              still needs a way out of delivery_uncertain -- otherwise it's
+              stuck with zero available actions once Delete disappears above. */}
+          {item.status === 'PENDING' && !isEditMode && !isRebuildable && isDeliveryUncertain && (
+            <Button variant="secondary" onClick={handleConfirmNotDelivered} className="flex-1 border-amber-500 text-amber-600 hover:bg-amber-50">
               <AlertTriangle className="w-4 h-4 mr-2" /> Verify in Tally First
             </Button>
           )}

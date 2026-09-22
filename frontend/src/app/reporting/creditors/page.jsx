@@ -4,8 +4,9 @@ import React, { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { RefreshCw, Calendar, Search, ArrowUpDown } from 'lucide-react';
 import ReportTabs from '@/components/layout/ReportTabs';
+import { useAuth } from '@/context/AuthContext';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 
 const PRESETS = [
     { label: "This Week", value: "week" },
@@ -74,6 +75,8 @@ function getPresetDates(preset) {
 
 export default function CreditorsReport() {
     const router = useRouter();
+    const { user } = useAuth();
+    const isOwner = !user || user.is_owner;
     const [preset, setPreset] = useState("month");
     const [dateRange, setDateRange] = useState(getPresetDates("month"));
     const [data, setData] = useState([]);
@@ -115,10 +118,10 @@ export default function CreditorsReport() {
     };
 
     useEffect(() => {
-        if (dateRange.start && dateRange.end) {
+        if (isOwner && dateRange.start && dateRange.end) {
             fetchData();
         }
-    }, [dateRange.start, dateRange.end]);
+    }, [isOwner, dateRange.start, dateRange.end]);
 
     const handleSort = (key) => {
         let direction = 'asc';
@@ -146,6 +149,19 @@ export default function CreditorsReport() {
         if (sortConfig.key !== columnKey) return <ArrowUpDown className="h-4 w-4 text-gray-400 ml-1" />;
         return <ArrowUpDown className={`h-4 w-4 ml-1 ${sortConfig.direction === 'asc' ? 'text-blue-500' : 'text-blue-500 rotate-180'}`} />;
     };
+
+    if (!isOwner) {
+        return (
+            <div className="w-full flex flex-col min-h-screen pb-20">
+                <ReportTabs />
+                <div className="p-6 max-w-7xl mx-auto w-full flex-1">
+                    <div className="bg-yellow-50 dark:bg-yellow-900/20 text-yellow-700 dark:text-yellow-400 p-4 rounded-xl text-sm border border-yellow-100 dark:border-yellow-900/30">
+                        The creditors report is only available to store owners.
+                    </div>
+                </div>
+            </div>
+        );
+    }
 
     return (
         <div className="w-full flex flex-col min-h-screen pb-20">

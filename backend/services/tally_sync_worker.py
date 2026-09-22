@@ -15,8 +15,8 @@ from backend.database import (
     cleanup_purchase_rate_pending_entries
 )
 
-from backend.config import TALLY_URL
 from backend.services.tally_reporting_sync import async_sync_cost_centres, async_sync_vouchers, _get_current_fy_start
+from backend.services.loan_interest_accrual import post_pending_interest_accruals
 from backend.connector.manager import connector_manager
 from backend.connector.transport import tally_transport
 
@@ -503,6 +503,7 @@ async def sync_worker_loop():
     last_master_sync = 0
     last_reporting_sync = 0
     last_history_backfill = 0
+    last_loan_interest_accrual = 0
 
     while True:
         try:
@@ -569,6 +570,21 @@ async def sync_worker_loop():
                         last_history_backfill = time.time()
                     except Exception as e:
                         print(f"History backfill failed, will retry next loop iteration: {e}")
+
+                # 6. Loan interest accrual (once/day): posts each loan's
+                # known-fixed interest as it's earned, one voucher per
+                # completed calendar month, entirely automatically -- see
+                # backend/services/loan_interest_accrual.py. A daily check is
+                # plenty since a new period only ever becomes due once a
+                # calendar month actually finishes.
+                if time.time() - last_loan_interest_accrual > 86400:
+                    try:
+                        posted = post_pending_interest_accruals()
+                        if posted:
+                            print(f"Posted {posted} loan interest accrual(s).")
+                        last_loan_interest_accrual = time.time()
+                    except Exception as e:
+                        print(f"Loan interest accrual failed, will retry next loop iteration: {e}")
 
         except Exception as e:
             print(f"Error in sync worker loop: {e}")

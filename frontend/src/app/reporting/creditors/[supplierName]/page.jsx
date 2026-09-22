@@ -4,8 +4,9 @@ import React, { useState, useEffect } from 'react';
 import { useRouter, useParams, useSearchParams } from 'next/navigation';
 import { ArrowLeft, RefreshCw, Eye } from 'lucide-react';
 import ReportTabs from '@/components/layout/ReportTabs';
+import { useAuth } from '@/context/AuthContext';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 
 function formatCurrency(val) {
     if (val === undefined || val === null) return "₹0.00";
@@ -34,7 +35,9 @@ export default function SupplierLedgerPage() {
     const router = useRouter();
     const params = useParams();
     const searchParams = useSearchParams();
-    
+    const { user } = useAuth();
+    const isOwner = !user || user.is_owner;
+
     const supplierName = decodeURIComponent(params.supplierName);
     const startDate = searchParams.get('start_date');
     const endDate = searchParams.get('end_date');
@@ -48,10 +51,10 @@ export default function SupplierLedgerPage() {
     const [voucherLoading, setVoucherLoading] = useState(false);
 
     useEffect(() => {
-        if (supplierName && startDate && endDate) {
+        if (isOwner && supplierName && startDate && endDate) {
             fetchLedger();
         }
-    }, [supplierName, startDate, endDate]);
+    }, [isOwner, supplierName, startDate, endDate]);
 
     const fetchLedger = async () => {
         try {
@@ -227,6 +230,19 @@ export default function SupplierLedgerPage() {
             </div>
         );
     };
+
+    if (!isOwner) {
+        return (
+            <div className="w-full flex flex-col min-h-screen pb-20">
+                <ReportTabs />
+                <div className="p-6 max-w-5xl mx-auto w-full flex-1">
+                    <div className="bg-yellow-50 dark:bg-yellow-900/20 text-yellow-700 dark:text-yellow-400 p-4 rounded-xl text-sm border border-yellow-100 dark:border-yellow-900/30">
+                        The creditors report is only available to store owners.
+                    </div>
+                </div>
+            </div>
+        );
+    }
 
     if (loading && !data) {
         return (

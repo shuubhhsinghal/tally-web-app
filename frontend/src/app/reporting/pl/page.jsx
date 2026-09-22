@@ -3,8 +3,9 @@
 import React, { useState, useEffect } from 'react';
 import { AlertCircle, TrendingUp, TrendingDown, RefreshCw, Calendar, Store, Info, ChevronLeft, ChevronRight, ArrowLeft } from 'lucide-react';
 import ReportTabs from '@/components/layout/ReportTabs';
+import { useAuth } from '@/context/AuthContext';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 
 const PRESETS = [
     { label: "This Month", value: "month" },
@@ -53,15 +54,21 @@ function getPresetMonths(preset) {
 }
 
 export default function PLReport() {
+    const { user } = useAuth();
+    const lockedStore = user && !user.is_owner ? user.store_name : null;
     const [loading, setLoading] = useState(false);
     const [data, setData] = useState(null);
     const [error, setError] = useState(null);
-    
+
     const [preset, setPreset] = useState("fy"); // Default FY
     const [months, setMonths] = useState(getPresetMonths("fy"));
-    
+
     const [costCentres, setCostCentres] = useState([]);
-    const [selectedStore, setSelectedStore] = useState("Combined");
+    const [selectedStore, setSelectedStore] = useState(lockedStore || "Combined");
+
+    useEffect(() => {
+        if (lockedStore) setSelectedStore(lockedStore);
+    }, [lockedStore]);
 
     useEffect(() => {
         fetchCostCentres();
@@ -113,8 +120,13 @@ export default function PLReport() {
         setMonths(prev => ({ ...prev, [type]: val }));
     };
 
+    // A staff account's response is already scoped to one store server-side
+    // (a different, single-store shape -- {current, previous} -- with no
+    // stores/combined/unallocated keys at all), so it skips the
+    // Combined/Unallocated/per-store branching entirely.
     const getActiveData = () => {
         if (!data) return null;
+        if (lockedStore) return data.current;
         if (selectedStore === "Combined") return data.combined;
         if (selectedStore === "Unallocated") return data.unallocated;
         return data.stores.find(s => s.store === selectedStore);
@@ -122,6 +134,7 @@ export default function PLReport() {
 
     const getActivePreviousData = () => {
         if (!data || !data.previous_period.is_data_complete) return null;
+        if (lockedStore) return data.previous;
         if (selectedStore === "Combined") return data.combined_previous;
         if (selectedStore === "Unallocated") return data.unallocated_previous;
         return data.stores_previous.find(s => s.store === selectedStore);
@@ -189,8 +202,13 @@ export default function PLReport() {
                     <div className="flex flex-wrap items-center gap-3">
                         <div className="relative">
                             <Store className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-                            <select 
-                                value={selectedStore} 
+                            {lockedStore ? (
+                                <div className="pl-9 pr-4 py-2 border border-gray-300 dark:border-gray-700 rounded-xl bg-white dark:bg-gray-800 text-sm shadow-sm">
+                                    {lockedStore}
+                                </div>
+                            ) : (
+                            <select
+                                value={selectedStore}
                                 onChange={(e) => setSelectedStore(e.target.value)}
                                 className="pl-9 pr-4 py-2 border border-gray-300 dark:border-gray-700 rounded-xl bg-white dark:bg-gray-800 text-sm focus:ring-2 focus:ring-blue-500 shadow-sm appearance-none cursor-pointer"
                             >
@@ -200,6 +218,7 @@ export default function PLReport() {
                                     <option key={c.name} value={c.name}>{c.name}</option>
                                 ))}
                             </select>
+                            )}
                         </div>
                         
                         <div className="flex bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-xl p-1 shadow-sm overflow-x-auto max-w-[calc(100vw-3rem)]">

@@ -219,3 +219,44 @@ def test_activity_with_include_hidden_and_status_filter_returns_all_failed():
     assert len(data) == 13
     assert all(a["status"] == "FAILED" for a in data)
     assert hidden_id in [a["id"] for a in data]
+
+
+# --- Recovering a delivery_uncertain item that has no other way out ---
+
+def test_confirm_not_delivered_clears_the_flag():
+    item_id = _insert_queue_row("POST_VOUCHER", "FAILED", payload={"delivery_uncertain": True})
+
+    res = client.post(f"/api/dashboard/activity/{item_id}/confirm-not-delivered")
+    assert res.status_code == 200
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT payload FROM offline_queue WHERE id = ?", (item_id,))
+        payload = json.loads(cursor.fetchone()["payload"])
+    assert "delivery_uncertain" not in payload
+
+
+def test_retry_works_again_after_confirm_not_delivered():
+    item_id = _insert_queue_row("POST_VOUCHER", "FAILED", payload={"delivery_uncertain": True})
+
+    client.post(f"/api/dashboard/activity/{item_id}/confirm-not-delivered")
+    res = client.post(f"/api/dashboard/activity/{item_id}/retry")
+    assert res.status_code == 200
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT status FROM offline_queue WHERE id = ?", (item_id,))
+        assert cursor.fetchone()["status"] == "PENDING"
+
+
+def test_delete_works_again_after_confirm_not_delivered():
+    item_id = _insert_queue_row("POST_VOUCHER", "FAILED", payload={"delivery_uncertain": True})
+
+    client.post(f"/api/dashboard/activity/{item_id}/confirm-not-delivered")
+    res = client.delete(f"/api/dashboard/activity/{item_id}")
+    assert res.status_code == 200
+
+
+def test_confirm_not_delivered_404s_for_missing_item():
+    res = client.post("/api/dashboard/activity/999999/confirm-not-delivered")
+    assert res.status_code == 404

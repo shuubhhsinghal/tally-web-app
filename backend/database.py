@@ -1,9 +1,11 @@
 import sqlite3
 import json
+import math
 import os
 import re
 import time
-from datetime import datetime
+import calendar
+from datetime import datetime, timedelta
 from contextlib import contextmanager
 from typing import Optional, List
 
@@ -125,6 +127,57 @@ def init_db():
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions (user_id)")
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS loans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                lender_name TEXT NOT NULL,
+                ledger_name TEXT NOT NULL,
+                principal_amount REAL NOT NULL,
+                total_repayment_amount REAL NOT NULL,
+                daily_amount REAL NOT NULL,
+                start_date TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_by TEXT,
+                created_at TEXT NOT NULL
+            )
+        """)
+        # total_repayment_amount is principal + total interest, fixed and
+        # known upfront (how this style of flat-rate daily loan is quoted).
+        # interest_ratio is derived (1 - principal/total_repayment), never
+        # stored, so it can't drift out of sync with the two amounts.
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS loan_payments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                loan_id INTEGER NOT NULL REFERENCES loans(id) ON DELETE CASCADE,
+                date TEXT NOT NULL,
+                amount REAL NOT NULL,
+                principal_portion REAL NOT NULL,
+                interest_portion REAL NOT NULL,
+                queue_id INTEGER REFERENCES offline_queue(id),
+                created_by TEXT,
+                created_at TEXT NOT NULL
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_loan_payments_loan_id ON loan_payments (loan_id)")
+
+        # Interest is no longer split out of each payment -- it accrues on its
+        # own schedule (one row per calendar month a loan runs through), so a
+        # repayment can be a plain "reduce the balance by what I actually
+        # paid" entry regardless of how irregular the payment history is.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS loan_interest_accruals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                loan_id INTEGER NOT NULL REFERENCES loans(id) ON DELETE CASCADE,
+                period_start TEXT NOT NULL,
+                period_end TEXT NOT NULL,
+                amount REAL NOT NULL,
+                queue_id INTEGER REFERENCES offline_queue(id),
+                created_at TEXT NOT NULL
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_loan_interest_accruals_loan_id ON loan_interest_accruals (loan_id)")
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS purchase_rates (
@@ -378,6 +431,11 @@ def init_db():
 
         try:
             cursor.execute("ALTER TABLE ledgers ADD COLUMN opening_balance REAL DEFAULT 0.0")
+        except sqlite3.OperationalError:
+            pass # Column exists
+
+        try:
+            cursor.execute("ALTER TABLE loans ADD COLUMN interest_accrued_through TEXT")
         except sqlite3.OperationalError:
             pass # Column exists
             
@@ -877,6 +935,39 @@ def queue_master_operation(entity_type: str, name: str, operation_type: str, xml
                 raise
     raise Exception("Failed to queue master operation after retries due to database locks.")
 
+def queue_ledger_creation_with_opening_balance(name: str, parent: str, opening_balance: Optional[float] = None):
+    """Same idempotent create-a-ledger flow as payment.py's create_payment_ledger,
+    with one addition: an optional opening balance. Used for loan liability
+    ledgers (principal owed from day one) and shared between the loans router
+    and the interest-accrual background job, so both use one definition."""
+    from xml.sax.saxutils import escape
+    ob_xml = f"<OPENINGBALANCE>{opening_balance}</OPENINGBALANCE>" if opening_balance else ""
+    xml_data = f"""<ENVELOPE>
+  <HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+  <BODY>
+    <IMPORTDATA>
+      <REQUESTDESC><REPORTNAME>All Masters</REPORTNAME></REQUESTDESC>
+      <REQUESTDATA>
+        <TALLYMESSAGE xmlns:UDF="TallyUDF">
+          <LEDGER ACTION="Create" NAME="{escape(name)}">
+            <NAME.LIST><NAME>{escape(name)}</NAME></NAME.LIST>
+            <PARENT>{escape(parent)}</PARENT>{ob_xml}
+          </LEDGER>
+        </TALLYMESSAGE>
+      </REQUESTDATA>
+    </IMPORTDATA>
+  </BODY>
+</ENVELOPE>"""
+
+    norm, _ = normalize_master_name(name)
+    if check_master_exists_locally('LEDGER', norm, {"parent": parent}):
+        return
+
+    queue_payload = {"name": name, "parent": parent}
+    if opening_balance:
+        queue_payload["opening_balance"] = opening_balance
+    queue_master_operation("LEDGER", name, "CREATE_LEDGER", xml_data, queue_payload)
+
 def mark_master_synced(queue_id: int):
     with get_db() as conn:
         cursor = conn.cursor()
@@ -1279,53 +1370,56 @@ def get_store_mapping(store_name):
         return dict(row) if row else None
 
 def clear_and_bulk_insert_ledgers(ledgers: list):
-    if not ledgers:
-        return
+    # No early return on an empty list -- a real, successful fetch from
+    # Tally that legitimately comes back empty (everything was deleted
+    # there) must still clear the local cache, or deleted masters keep
+    # showing as "In Tally" here forever. Only the exceptions raised before
+    # this is called (a failed request, malformed XML) should leave the
+    # existing cache untouched -- see the callers in tally_sync_worker.py.
     with get_db() as conn:
         cursor = conn.cursor()
-        
+
         # Preserve existing opening balances in case of missing XML data
         cursor.execute("SELECT name, opening_balance FROM ledgers")
         existing = {r['name']: r['opening_balance'] for r in cursor.fetchall()}
-        
+
         cursor.execute("DELETE FROM ledgers")
-        
-        insert_data = []
-        for l in ledgers:
-            new_ob = l.get('opening_balance')
-            if new_ob is None:
-                # Missing/invalid from Tally XML, preserve existing or default to 0.0 for brand new ledgers
-                final_ob = existing.get(l['name'], 0.0)
-            else:
-                final_ob = float(new_ob)
-                
-            insert_data.append((l['name'], l.get('parent'), l.get('cost_centre', False), final_ob))
-            
-        cursor.executemany("""
-            INSERT INTO ledgers (name, parent, cost_centre, opening_balance)
-            VALUES (?, ?, ?, ?)
-        """, insert_data)
+
+        if ledgers:
+            insert_data = []
+            for l in ledgers:
+                new_ob = l.get('opening_balance')
+                if new_ob is None:
+                    # Missing/invalid from Tally XML, preserve existing or default to 0.0 for brand new ledgers
+                    final_ob = existing.get(l['name'], 0.0)
+                else:
+                    final_ob = float(new_ob)
+
+                insert_data.append((l['name'], l.get('parent'), l.get('cost_centre', False), final_ob))
+
+            cursor.executemany("""
+                INSERT INTO ledgers (name, parent, cost_centre, opening_balance)
+                VALUES (?, ?, ?, ?)
+            """, insert_data)
         conn.commit()
 
 def clear_and_bulk_insert_stock_items(items: list):
-    if not items:
-        return
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM stock_items")
-        cursor.executemany("""
-            INSERT INTO stock_items (name, unit, last_purchase_rate, last_purchase_date)
-            VALUES (?, ?, ?, ?)
-        """, [(i['name'], i.get('unit'), i.get('last_purchase_rate', 0.0), i.get('last_purchase_date', '')) for i in items])
+        if items:
+            cursor.executemany("""
+                INSERT INTO stock_items (name, unit, last_purchase_rate, last_purchase_date)
+                VALUES (?, ?, ?, ?)
+            """, [(i['name'], i.get('unit'), i.get('last_purchase_rate', 0.0), i.get('last_purchase_date', '')) for i in items])
         conn.commit()
 
 def clear_and_bulk_insert_uoms(uoms: list):
-    if not uoms:
-        return
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM uoms")
-        cursor.executemany("INSERT INTO uoms (name) VALUES (?)", [(u,) for u in uoms])
+        if uoms:
+            cursor.executemany("INSERT INTO uoms (name) VALUES (?)", [(u,) for u in uoms])
         conn.commit()
 
 # --- Helper Functions for Bank Mappings ---
@@ -2027,13 +2121,39 @@ def get_user_by_id(user_id: int) -> Optional[dict]:
 def list_users() -> list:
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id, name, username, store_name, is_owner, active, created_at FROM users ORDER BY is_owner DESC, name ASC")
+        cursor.execute("SELECT id, name, username, store_name, is_owner, active, created_at FROM users WHERE active = 1 ORDER BY is_owner DESC, name ASC")
         return [dict(row) for row in cursor.fetchall()]
 
 def deactivate_user(user_id: int):
+    # Frees up the name for reuse -- username is UNIQUE regardless of
+    # active status, so without this a removed account's name could never
+    # be given to a new one. The mangled value is never shown anywhere
+    # (the Team list already only shows active=1 rows); `name` itself is
+    # left alone since it's just a display label with no uniqueness rule.
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("UPDATE users SET active = 0 WHERE id = ?", (user_id,))
+        cursor.execute("UPDATE users SET active = 0, username = username || '#removed#' || id WHERE id = ?", (user_id,))
+        cursor.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+        conn.commit()
+
+def set_user_password(user_id: int, new_password: str):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE users SET password_hash = ? WHERE id = ?", (hash_password(new_password), user_id))
+        conn.commit()
+
+def delete_other_sessions(user_id: int, keep_token: str):
+    """Kicks out every other device/browser signed in as this user, leaving
+    only the session that just requested the password change -- the usual
+    reason to change a password is that someone else might have it."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM sessions WHERE user_id = ? AND token != ?", (user_id, keep_token))
+        conn.commit()
+
+def delete_sessions_for_user(user_id: int):
+    with get_db() as conn:
+        cursor = conn.cursor()
         cursor.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
         conn.commit()
 
@@ -2066,3 +2186,212 @@ def delete_session(token: str):
         cursor = conn.cursor()
         cursor.execute("DELETE FROM sessions WHERE token = ?", (token,))
         conn.commit()
+
+# --- Loans ---
+
+def create_loan(lender_name: str, ledger_name: str, principal_amount: float,
+                 total_repayment_amount: float, daily_amount: float,
+                 start_date: str, created_by: str) -> dict:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO loans (lender_name, ledger_name, principal_amount, total_repayment_amount,
+                                daily_amount, start_date, status, created_by, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)
+        """, (lender_name, ledger_name, principal_amount, total_repayment_amount,
+              daily_amount, start_date, created_by, datetime.now().isoformat()))
+        conn.commit()
+        return get_loan_by_id(cursor.lastrowid)
+
+def get_loan_by_id(loan_id: int) -> Optional[dict]:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM loans WHERE id = ?", (loan_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+def loan_ledger_name_exists(ledger_name: str) -> bool:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM loans WHERE ledger_name = ?", (ledger_name,))
+        return cursor.fetchone() is not None
+
+def get_active_loans_by_lender(lender_name: str) -> list:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM loans WHERE lender_name = ? AND status = 'active'", (lender_name,))
+        return [dict(row) for row in cursor.fetchall()]
+
+def _with_loan_computed_fields(loan: dict, payments: list, accruals: list) -> dict:
+    total = loan['total_repayment_amount']
+    paid_to_date = round(sum(p['amount'] for p in payments), 2)
+    accrued_interest_to_date = round(sum(a['amount'] for a in accruals), 2)
+    days_elapsed = max(0, (datetime.now().date() - datetime.strptime(loan['start_date'], "%Y-%m-%d").date()).days + 1)
+    expected_by_today = min(days_elapsed * loan['daily_amount'], total)
+    # What's actually owed right now: principal, plus whatever interest has
+    # accrued so far (see compute_pending_interest_accruals), minus whatever
+    # cash has actually been handed over -- independent of the fixed
+    # 'total_repayment_amount' schedule, so it stays correct however
+    # irregular the real payments are.
+    balance = round(loan['principal_amount'] + accrued_interest_to_date - paid_to_date, 2)
+
+    this_month = datetime.now().strftime("%Y-%m")
+    interest_accrued_this_month = round(sum(a['amount'] for a in accruals if a['period_end'].startswith(this_month)), 2)
+    paid_this_month = round(sum(p['amount'] for p in payments if p['date'].startswith(this_month)), 2)
+
+    # At the current daily rate, how many more days until this loan is paid
+    # off -- adapts to reality (more days if behind, fewer if ahead), unlike
+    # a fixed tenure countdown that ignores what's actually been paid.
+    days_left = math.ceil(balance / loan['daily_amount']) if loan['status'] == 'active' and loan['daily_amount'] > 0 else 0
+
+    return {
+        **loan,
+        'paid_to_date': paid_to_date,
+        'accrued_interest_to_date': accrued_interest_to_date,
+        'balance': balance,
+        'days_elapsed': days_elapsed,
+        'days_left': days_left,
+        'expected_by_today': round(expected_by_today, 2),
+        # Display-only: how far behind (positive) or ahead (negative) of the
+        # daily target this loan is. Never stored, never used in posting --
+        # purely a read-time comparison for the owner's own awareness.
+        'behind_by': round(expected_by_today - paid_to_date, 2),
+        'interest_accrued_this_month': interest_accrued_this_month,
+        'paid_this_month': paid_this_month,
+    }
+
+def list_loans() -> list:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM loans ORDER BY status ASC, created_at DESC")
+        loans = [dict(row) for row in cursor.fetchall()]
+        cursor.execute("SELECT * FROM loan_payments")
+        payments_by_loan = {}
+        for row in cursor.fetchall():
+            payments_by_loan.setdefault(row['loan_id'], []).append(dict(row))
+        cursor.execute("SELECT * FROM loan_interest_accruals")
+        accruals_by_loan = {}
+        for row in cursor.fetchall():
+            accruals_by_loan.setdefault(row['loan_id'], []).append(dict(row))
+    return [
+        _with_loan_computed_fields(loan, payments_by_loan.get(loan['id'], []), accruals_by_loan.get(loan['id'], []))
+        for loan in loans
+    ]
+
+def get_loan_detail(loan_id: int) -> Optional[dict]:
+    loan = get_loan_by_id(loan_id)
+    if not loan:
+        return None
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # delivery_uncertain lives inside offline_queue.payload (JSON), not as
+        # its own column -- the existing Queue/Dashboard pages already surface
+        # it there, so this just needs the plain sync status.
+        cursor.execute("""
+            SELECT lp.*, oq.status as sync_status
+            FROM loan_payments lp
+            LEFT JOIN offline_queue oq ON oq.id = lp.queue_id
+            WHERE lp.loan_id = ?
+            ORDER BY lp.date DESC, lp.id DESC
+        """, (loan_id,))
+        payments = [dict(row) for row in cursor.fetchall()]
+        cursor.execute("SELECT * FROM loan_interest_accruals WHERE loan_id = ? ORDER BY period_end DESC", (loan_id,))
+        accruals = [dict(row) for row in cursor.fetchall()]
+    return {**_with_loan_computed_fields(loan, payments, accruals), 'payments': payments, 'interest_accruals': accruals}
+
+def get_todays_total_loan_due() -> float:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COALESCE(SUM(daily_amount), 0) as total FROM loans WHERE status = 'active'")
+        return cursor.fetchone()['total']
+
+def record_loan_payment(loan_id: int, payment_date: str, amount: float,
+                         queue_id: int, created_by: str) -> int:
+    """Repayments are no longer split -- the full amount you actually paid
+    just reduces the loan's balance. Interest is recognized separately, on
+    its own monthly schedule (see compute_pending_interest_accruals), so this
+    works the same whether you pay on time, late, short, or extra."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO loan_payments (loan_id, date, amount, principal_portion, interest_portion,
+                                        queue_id, created_by, created_at)
+            VALUES (?, ?, ?, ?, 0, ?, ?, ?)
+        """, (loan_id, payment_date, amount, amount, queue_id, created_by, datetime.now().isoformat()))
+        conn.commit()
+
+        cursor.execute("SELECT COALESCE(SUM(amount), 0) as paid FROM loan_payments WHERE loan_id = ?", (loan_id,))
+        paid_to_date = cursor.fetchone()['paid']
+        cursor.execute("SELECT total_repayment_amount FROM loans WHERE id = ?", (loan_id,))
+        total = cursor.fetchone()['total_repayment_amount']
+        if paid_to_date >= total:
+            cursor.execute("UPDATE loans SET status = 'closed' WHERE id = ?", (loan_id,))
+            conn.commit()
+
+        return cursor.lastrowid
+
+def _month_end(d) -> "datetime.date":
+    last_day = calendar.monthrange(d.year, d.month)[1]
+    return d.replace(day=last_day)
+
+def compute_pending_interest_accruals(loan: dict, as_of) -> list:
+    """Works out which fully-completed calendar months of this loan's life
+    haven't had interest posted yet, and how much interest each one is worth
+    -- the known total interest (total_repayment - principal) spread evenly
+    over the loan's tenure in days, then sliced at calendar-month boundaries.
+    Only ever looks at completed months (never the one 'today' falls in), so
+    each amount is exact and never has to be corrected later. Returns
+    [{period_start, period_end, amount}, ...] in chronological order; empty
+    if nothing new has finished since the last accrual, or this loan has no
+    interest to track (a legacy balance entered without a known split)."""
+    total_interest = loan['total_repayment_amount'] - loan['principal_amount']
+    if total_interest <= 0 or loan['daily_amount'] <= 0:
+        return []
+    total_tenure_days = round(loan['total_repayment_amount'] / loan['daily_amount'])
+    if total_tenure_days <= 0:
+        return []
+    daily_interest_rate = total_interest / total_tenure_days
+    start_date = datetime.strptime(loan['start_date'], "%Y-%m-%d").date()
+    loan_end_date = start_date + timedelta(days=total_tenure_days - 1)
+
+    if loan.get('interest_accrued_through'):
+        accrual_start = datetime.strptime(loan['interest_accrued_through'], "%Y-%m-%d").date() + timedelta(days=1)
+    else:
+        accrual_start = start_date
+
+    this_month_start = as_of.replace(day=1)
+    cutoff = min(loan_end_date, this_month_start - timedelta(days=1))
+
+    periods = []
+    cursor = accrual_start
+    while cursor <= cutoff:
+        period_end = min(_month_end(cursor), cutoff)
+        days = (period_end - cursor).days + 1
+        amount = round(daily_interest_rate * days, 2)
+        if amount > 0:
+            periods.append({"period_start": cursor.isoformat(), "period_end": period_end.isoformat(), "amount": amount})
+        cursor = period_end + timedelta(days=1)
+    return periods
+
+def record_interest_accrual(loan_id: int, period_start: str, period_end: str, amount: float, queue_id: int) -> int:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO loan_interest_accruals (loan_id, period_start, period_end, amount, queue_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (loan_id, period_start, period_end, amount, queue_id, datetime.now().isoformat()))
+        cursor.execute("UPDATE loans SET interest_accrued_through = ? WHERE id = ?", (period_end, loan_id))
+        conn.commit()
+        return cursor.lastrowid
+
+def get_active_loans_for_interest_accrual() -> list:
+    """Active loans that have a known interest amount to accrue -- excludes
+    legacy balances entered without a known principal/interest split
+    (total_repayment_amount == principal_amount there, so nothing to do)."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT * FROM loans
+            WHERE status = 'active' AND total_repayment_amount > principal_amount
+        """)
+        return [dict(row) for row in cursor.fetchall()]

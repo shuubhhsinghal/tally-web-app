@@ -1,10 +1,11 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from typing import Optional
 from backend.services.tally_reporting_sync import async_sync_cost_centres, async_sync_vouchers
 from backend.services.reporting_sales_service import calculate_sales, get_sales_trend, get_store_comparisons, get_unsynced_sales, get_pending_sales_trend
 from backend.services.reporting_purchase_service import calculate_purchases, get_purchases_trend, get_store_comparisons as get_purchase_store_comparisons, get_item_purchase_analysis, get_unsynced_purchases, get_pending_purchases_trend
 from backend.utils.reporting_utils import check_data_completeness, get_previous_period, merge_trend_rows, merge_pending_into_store_comparison
 from backend.database import get_db
+from backend.services.auth_helpers import resolve_view_store_filter, enforce_report_row_store_access
 
 router = APIRouter(prefix="/reporting", tags=["Reporting"])
 
@@ -14,7 +15,8 @@ async def sync_cost_centres():
         count = await async_sync_cost_centres()
         return {"status": "success", "count": count, "message": f"Successfully synced {count} cost centres"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail="Something went wrong. Please try again.")
 
 @router.post("/sync/vouchers")
 async def sync_vouchers(start_date: Optional[str] = Query(None, description="Format: YYYYMMDD"), end_date: Optional[str] = Query(None, description="Format: YYYYMMDD")):
@@ -34,7 +36,8 @@ async def sync_vouchers(start_date: Optional[str] = Query(None, description="For
             "message": msg
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail="Something went wrong. Please try again.")
 
 @router.get("/inspect/cost-centres")
 async def inspect_cost_centres():
@@ -44,7 +47,8 @@ async def inspect_cost_centres():
             cursor.execute("SELECT * FROM cost_centres")
             return [dict(row) for row in cursor.fetchall()]
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail="Something went wrong. Please try again.")
 
 @router.get("/inspect/vouchers")
 async def inspect_vouchers(limit: int = 100, offset: int = 0):
@@ -69,7 +73,8 @@ async def inspect_vouchers(limit: int = 100, offset: int = 0):
                 
             return vouchers
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail="Something went wrong. Please try again.")
 
 @router.get("/inspect/counts")
 async def inspect_counts():
@@ -92,14 +97,19 @@ async def inspect_counts():
                 "inventory_entries": inv_count
             }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail="Something went wrong. Please try again.")
 
 @router.get("/sales")
 async def get_sales_report(
+    request: Request,
     start_date: str = Query(..., description="Format: YYYYMMDD"),
     end_date: str = Query(..., description="Format: YYYYMMDD"),
     cost_centre: Optional[str] = Query(None, description="Filter by cost centre name or 'Unallocated', or None for Combined")
 ):
+    # A staff account is always forced to their own store's numbers here,
+    # regardless of what was requested -- an owner's request passes through.
+    cost_centre = resolve_view_store_filter(request.state.user, cost_centre)
     try:
         is_complete = check_data_completeness(start_date, end_date)
 
@@ -135,6 +145,10 @@ async def get_sales_report(
             get_store_comparisons(start_date, end_date),
             get_pending_sales_trend(start_date, end_date)  # unfiltered, matching get_store_comparisons' own scope
         )
+        if cost_centre:
+            # Cross-store breakdown is meaningless (and a data leak) once
+            # the caller is locked to one store -- only their own row applies.
+            store_comparison = [row for row in store_comparison if row.get('store_name') == cost_centre]
         unsynced_sales = get_unsynced_sales(start_date, end_date, cost_centre)
 
         return {
@@ -154,10 +168,12 @@ async def get_sales_report(
             "unsynced_sales": unsynced_sales
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail="Something went wrong. Please try again.")
 
 @router.get("/purchases")
-def get_purchases_report(start_date: str = Query(...), end_date: str = Query(...), cost_centre: Optional[str] = None, page: int = Query(1), limit: int = Query(50), search: str = Query(""), sort_by: str = Query("value_desc")):
+def get_purchases_report(request: Request, start_date: str = Query(...), end_date: str = Query(...), cost_centre: Optional[str] = None, page: int = Query(1), limit: int = Query(50), search: str = Query(""), sort_by: str = Query("value_desc")):
+    cost_centre = resolve_view_store_filter(request.state.user, cost_centre)
     try:
         is_complete = check_data_completeness(start_date, end_date)
 
@@ -190,6 +206,8 @@ def get_purchases_report(start_date: str = Query(...), end_date: str = Query(...
             get_purchase_store_comparisons(start_date, end_date),
             get_pending_purchases_trend(start_date, end_date)  # unfiltered, matching get_purchase_store_comparisons' own scope
         )
+        if cost_centre:
+            store_comparison = [row for row in store_comparison if row.get('store_name') == cost_centre]
         unsynced_purchases = get_unsynced_purchases(start_date, end_date, cost_centre)
 
         return {
@@ -209,10 +227,12 @@ def get_purchases_report(start_date: str = Query(...), end_date: str = Query(...
             "unsynced_purchases": unsynced_purchases
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Unexpected error: {e}")
+        raise HTTPException(status_code=500, detail="Something went wrong. Please try again.")
 
 @router.get("/purchases/suppliers")
 def get_purchase_suppliers_report(
+    request: Request,
     start_date: str = Query(...),
     end_date: str = Query(...),
     cost_centre: str = Query(None),
@@ -221,11 +241,13 @@ def get_purchase_suppliers_report(
     search: str = Query(""),
     sort_by: str = Query("value_desc")
 ):
+    cost_centre = resolve_view_store_filter(request.state.user, cost_centre)
     from backend.services.reporting_purchase_service import get_supplier_purchase_analysis
     return get_supplier_purchase_analysis(start_date, end_date, page, limit, search, sort_by, cost_centre)
 
 @router.get("/purchases/bills")
 def get_purchase_bills_report(
+    request: Request,
     start_date: str = Query(...),
     end_date: str = Query(...),
     cost_centre: str = Query(None),
@@ -234,20 +256,23 @@ def get_purchase_bills_report(
     limit: int = Query(50),
     sort_by: str = Query("date_desc")
 ):
+    cost_centre = resolve_view_store_filter(request.state.user, cost_centre)
     from backend.services.reporting_purchase_service import get_purchase_bills
     return get_purchase_bills(start_date, end_date, cost_centre, supplier_name, page, limit, sort_by)
 
 @router.get("/purchases/bills/{voucher_id}")
-def get_purchase_bill_details_report(voucher_id: int):
+def get_purchase_bill_details_report(voucher_id: int, request: Request):
     from backend.services.reporting_purchase_service import get_bill_details
     from fastapi import HTTPException
     res = get_bill_details(voucher_id)
     if not res:
         raise HTTPException(404, "Bill not found")
+    enforce_report_row_store_access(request.state.user, res.get('store_name', ''))
     return res
 
 @router.get("/sales/bills")
 def get_sales_bills_report(
+    request: Request,
     start_date: str = Query(...),
     end_date: str = Query(...),
     cost_centre: str = Query(None),
@@ -255,23 +280,31 @@ def get_sales_bills_report(
     limit: int = Query(50),
     sort_by: str = Query("date_desc")
 ):
+    cost_centre = resolve_view_store_filter(request.state.user, cost_centre)
     from backend.services.reporting_sales_service import get_sales_bills
     return get_sales_bills(start_date, end_date, cost_centre, page, limit, sort_by)
 
 @router.get("/sales/bills/{voucher_id}")
-def get_sales_bill_details_report(voucher_id: int):
+def get_sales_bill_details_report(voucher_id: int, request: Request):
     from backend.services.reporting_sales_service import get_sales_bill_details
     from fastapi import HTTPException
     res = get_sales_bill_details(voucher_id)
     if not res:
         raise HTTPException(404, "Bill not found")
+    enforce_report_row_store_access(request.state.user, res.get('store_name', ''))
     return res
 
 @router.get("/creditors")
 def get_creditors_report(
+    request: Request,
     start_date: str = Query(...),
     end_date: str = Query(...)
 ):
+    # A creditor (supplier) isn't owned by one store -- there's no dimension
+    # to filter this report down to a staff account's own store, so unlike
+    # every other report here it's owner-only rather than store-scoped.
+    if not request.state.user['is_owner']:
+        raise HTTPException(status_code=403, detail="Only the owner account can view creditor reports.")
     from backend.services.reporting_creditors_service import get_all_creditors_overview
     return {
         "is_data_complete": check_data_completeness(start_date, end_date),
@@ -281,25 +314,40 @@ def get_creditors_report(
 @router.get("/creditors/{supplier_name}")
 def get_creditor_ledger_report(
     supplier_name: str,
+    request: Request,
     start_date: str = Query(...),
     end_date: str = Query(...)
 ):
+    if not request.state.user['is_owner']:
+        raise HTTPException(status_code=403, detail="Only the owner account can view creditor reports.")
     from backend.services.reporting_creditors_service import get_creditor_ledger_movements
     result = get_creditor_ledger_movements(supplier_name, start_date, end_date)
     result["is_data_complete"] = check_data_completeness(start_date, end_date)
     return result
 
 @router.get("/vouchers/{voucher_id}")
-def get_generic_voucher_details(voucher_id: int):
+def get_generic_voucher_details(voucher_id: int, request: Request):
     from backend.services.reporting_vouchers_service import get_voucher_details
     from fastapi import HTTPException
     res = get_voucher_details(voucher_id)
     if not res:
         raise HTTPException(404, "Voucher not found")
+    if not request.state.user['is_owner']:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT DISTINCT rca.cost_centre_name
+                FROM reporting_ledger_entries rle
+                JOIN reporting_cost_centre_allocations rca ON rle.id = rca.ledger_entry_id
+                WHERE rle.voucher_id = ?
+            """, (voucher_id,))
+            stores_on_row = [r['cost_centre_name'] for r in cursor.fetchall()]
+        enforce_report_row_store_access(request.state.user, ", ".join(stores_on_row))
     return res
 
 @router.get("/daybook")
 def get_daybook_report(
+    request: Request,
     start_date: str = Query(...),
     end_date: str = Query(...),
     cost_centre: Optional[str] = Query(None),
@@ -308,5 +356,6 @@ def get_daybook_report(
     search: str = Query(""),
     sort_by: str = Query("date_desc")
 ):
+    cost_centre = resolve_view_store_filter(request.state.user, cost_centre)
     from backend.services.reporting_daybook_service import get_daybook
     return get_daybook(start_date, end_date, cost_centre, page, limit, search, sort_by)

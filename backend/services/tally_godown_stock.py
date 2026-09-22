@@ -1,7 +1,6 @@
 import requests
 import xml.etree.ElementTree as ET
 import re
-from backend.config import TALLY_URL
 from backend.connector.manager import connector_manager
 from backend.connector.transport import tally_transport
 import logging

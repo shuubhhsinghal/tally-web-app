@@ -6,8 +6,9 @@ import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
 import { SearchableSelect } from '@/components/ui/SearchableSelect';
 import { useUI } from '@/context/UIContext';
+import { useAuth } from '@/context/AuthContext';
 import { useSearchParams, useRouter } from 'next/navigation';
-import { UploadCloud, Image as ImageIcon, AlertCircle, CheckCircle2, ChevronDown, ChevronRight, PlusCircle, Trash2, Edit3, Camera, History, X } from "lucide-react";
+import { UploadCloud, Image as ImageIcon, AlertCircle, ChevronDown, ChevronRight, PlusCircle, Trash2, Edit3, Camera, History, X } from "lucide-react";
 import { calculateAndReconcileV4 } from './utils/reconciliation';
 import { CameraCapture } from './CameraCapture';
 
@@ -256,6 +257,8 @@ function MasterAutocomplete({ value, onChange, placeholder, confirmed = [], mast
 
 export function ItemWiseMode({ onPostSuccess }) {
   const { showToast, showConfirmDialog } = useUI();
+  const { user } = useAuth();
+  const lockedStore = user && !user.is_owner ? user.store_name : null;
 
   const [meta, setMeta] = useState({ suppliers: [], stock_items: [], uoms: [], stores: ["Mahagun", "Vvip", "Gulshan"] });
   const [itemCache, setItemCache] = useState({});
@@ -360,6 +363,20 @@ export function ItemWiseMode({ onPostSuccess }) {
       loadDraft(draftIdParam);
     }
   }, [draftIdParam]);
+
+  // A staff account is locked to its own store regardless of how/when the
+  // invoice object gets (re)created (extraction, manual entry, draft load).
+  useEffect(() => {
+    if (lockedStore && invoice && invoice.cost_center !== lockedStore) {
+      setInvoice(prev => ({ ...prev, cost_center: lockedStore }));
+    }
+  }, [lockedStore, invoice]);
+
+  useEffect(() => {
+    if (lockedStore && adjustment.store !== lockedStore) {
+      setAdjustment(prev => ({ ...prev, store: lockedStore }));
+    }
+  }, [lockedStore, adjustment.store]);
 
 
 
@@ -1380,26 +1397,6 @@ export function ItemWiseMode({ onPostSuccess }) {
         </Card>
       )}
 
-      {v4Data?.reconciliation_data && (
-        <Card className={`flex flex-col gap-3 ${v4Data.reconciliation_data.confidence === "REVIEW_REQUIRED" ? 'border-amber-300 bg-amber-50 dark:bg-amber-900/10' : 'border-green-300 bg-green-50 dark:bg-green-900/10'}`}>
-          <div className="flex items-center gap-2">
-            {v4Data.reconciliation_data.confidence === "REVIEW_REQUIRED" ? (
-              <AlertCircle className="w-5 h-5 text-amber-600" />
-            ) : (
-              <CheckCircle2 className="w-5 h-5 text-green-600" />
-            )}
-            <h3 className="font-bold text-lg">
-              {v4Data.reconciliation_data.confidence === "REVIEW_REQUIRED" ? "Review Required" : "High Confidence Match"}
-            </h3>
-          </div>
-          {v4Data.reconciliation_data.messages.length > 0 && (
-            <ul className="text-sm list-disc pl-5 text-gray-700 dark:text-gray-300 space-y-1">
-              {v4Data.reconciliation_data.messages.map((m, i) => <li key={i}>{m}</li>)}
-            </ul>
-          )}
-        </Card>
-      )}
-
       <Card className="flex flex-col gap-4">
         <div className="flex gap-4">
           <Input
@@ -1446,6 +1443,7 @@ export function ItemWiseMode({ onPostSuccess }) {
           label="Store"
           value={invoice?.cost_center || ""}
           onChange={e => setInvoice({ ...invoice, cost_center: e.target.value })}
+          disabled={!!lockedStore}
         >
           <option value="" disabled>Select Store...</option>
           {meta.stores.map(s => <option key={s} value={s}>{s}</option>)}
@@ -1652,10 +1650,11 @@ export function ItemWiseMode({ onPostSuccess }) {
                         {!forceManual && (
                           <div className="space-y-1.5">
                             <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Item Name (from invoice)</label>
-                            <input
+                            <textarea
                               value={item.name}
                               onChange={e => updateItemVal(idx, 'name', e.target.value)}
-                              className="w-full p-2 text-sm rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 outline-none focus:border-teal-500"
+                              rows={2}
+                              className="w-full p-2 text-sm rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 outline-none focus:border-teal-500 resize-none"
                             />
                           </div>
                         )}
@@ -1898,7 +1897,7 @@ export function ItemWiseMode({ onPostSuccess }) {
                 <div className="grid grid-cols-2 gap-3">
                   <div className="space-y-1.5">
                     <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Return Cost Centre <span className="text-red-500">*</span></label>
-                    <select value={adjustment.store} onChange={e => setAdjustment({ ...adjustment, store: e.target.value })} className={`w-full p-2 text-sm rounded border bg-white dark:bg-gray-800 outline-none focus:border-teal-500 ${!adjustment.store && adjustment.items.length > 0 ? 'border-red-500' : 'border-gray-200 dark:border-gray-700'}`}>
+                    <select value={adjustment.store} onChange={e => setAdjustment({ ...adjustment, store: e.target.value })} disabled={!!lockedStore} className={`w-full p-2 text-sm rounded border bg-white dark:bg-gray-800 outline-none focus:border-teal-500 ${!adjustment.store && adjustment.items.length > 0 ? 'border-red-500' : 'border-gray-200 dark:border-gray-700'}`}>
                       <option value="" disabled>Select Store...</option>
                       {meta.stores.map(s => <option key={s} value={s}>{s}</option>)}
                     </select>

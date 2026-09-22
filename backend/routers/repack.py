@@ -1,4 +1,5 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
+from backend.services.auth_helpers import enforce_store_access
 from pydantic import BaseModel
 from xml.sax.saxutils import escape
 
@@ -77,7 +78,8 @@ async def create_repack_product(payload: RepackProductRequest):
         if check_master_exists_locally('UOM', norm_uom, {}):
             uom_state = "CONFIRMED"
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        print(f"Unexpected error: {e}")
+        raise HTTPException(status_code=400, detail="Something went wrong. Please try again.")
         
     if uom_state == "NEW":
         try:
@@ -89,7 +91,8 @@ async def create_repack_product(payload: RepackProductRequest):
         except MasterFailedException:
             raise HTTPException(status_code=400, detail="UOM creation previously failed. Resolution required in Dashboard.")
         except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+            print(f"Unexpected error: {e}")
+            raise HTTPException(status_code=500, detail="Something went wrong. Please try again.")
 
     # --- ITEM PHASE ---
     try:
@@ -99,7 +102,8 @@ async def create_repack_product(payload: RepackProductRequest):
     except MasterConflictException as e:
         raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        print(f"Unexpected error: {e}")
+        raise HTTPException(status_code=400, detail="Something went wrong. Please try again.")
 
     try:
         res = queue_master_operation("ITEM", payload.new_product_name, "CREATE_ITEM", item_xml, {"name": payload.new_product_name, "uom": payload.output_unit, "parent": parent_group})
@@ -144,7 +148,10 @@ class RepackExecuteRequest(BaseModel):
     dest_qty: float
 
 @router.post("/execute")
-async def execute_repack(payload: RepackExecuteRequest):
+async def execute_repack(payload: RepackExecuteRequest, request: Request):
+    current_user = request.state.user
+    enforce_store_access(current_user, payload.store_name, "repack stock for")
+
     if payload.dest_qty <= 0:
         raise HTTPException(status_code=400, detail="Quantity must be positive.")
 
@@ -224,7 +231,8 @@ async def execute_repack(payload: RepackExecuteRequest):
         except requests.exceptions.RequestException:
             pass  # Tally unreachable -- proceed without the stock-sufficiency check.
         except Exception as e:
-            raise HTTPException(status_code=400, detail=str(e))
+            print(f"Unexpected error: {e}")
+            raise HTTPException(status_code=400, detail="Something went wrong. Please try again.")
 
         comp_amount = qty_required * comp_rate
         total_source_amount += comp_amount
@@ -333,7 +341,7 @@ async def execute_repack(payload: RepackExecuteRequest):
         conn.commit()
         
     # 8. Queue voucher operation (has its own DB connection)
-    queue_payload = {"repack_id": repack_id}
+    queue_payload = {"repack_id": repack_id, "created_by": current_user['name']}
     queue_id = queue_operation(
         operation_type="REPACK_VOUCHER",
         xml_data=xml_data,

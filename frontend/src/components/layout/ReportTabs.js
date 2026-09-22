@@ -3,14 +3,17 @@
 import React from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { useAuth } from '@/context/AuthContext';
 
 export default function ReportTabs() {
   const pathname = usePathname();
+  const { user } = useAuth();
+  const isOwner = !user || user.is_owner;
 
   const tabs = [
     { name: 'Sales', href: '/reporting/sales' },
     { name: 'Purchases', href: '/reporting/purchases' },
-    { name: 'Creditors', href: '/reporting/creditors' },
+    ...(isOwner ? [{ name: 'Creditors', href: '/reporting/creditors' }] : []),
     { name: 'Daybook', href: '/reporting/daybook' },
     { name: 'P&L', href: '/reporting/pl' },
   ];

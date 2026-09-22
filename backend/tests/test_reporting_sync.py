@@ -95,7 +95,7 @@ async def test_sync_cost_centres(mock_post):
     mock_resp.raise_for_status = MagicMock()
     mock_post.return_value = mock_resp
 
-    count = await fetch_and_store_cost_centres("http://localhost:9000")
+    count = await fetch_and_store_cost_centres()
     assert count == 2
 
     with get_db() as conn:
@@ -114,7 +114,7 @@ async def test_sync_vouchers(mock_post):
     mock_resp.raise_for_status = MagicMock()
     mock_post.return_value = mock_resp
 
-    count = await fetch_and_store_vouchers("20230401", "20230430", "http://localhost:9000")
+    count = await fetch_and_store_vouchers("20230401", "20230430")
     assert count == 1
 
     with get_db() as conn:
@@ -146,7 +146,7 @@ async def test_sync_vouchers(mock_post):
         assert inv[0]['amount'] == -100.0
 
     # Test Idempotency (Syncing the same XML again)
-    count2 = await fetch_and_store_vouchers("20230401", "20230430", "http://localhost:9000")
+    count2 = await fetch_and_store_vouchers("20230401", "20230430")
     assert count2 == 1
 
     with get_db() as conn:
@@ -183,7 +183,7 @@ def test_async_sync_vouchers_default_end_date_is_today():
 
         asyncio.run(async_sync_vouchers())
 
-        called_start, called_end, _tally_url = mock_fetch.call_args[0]
+        called_start, called_end = mock_fetch.call_args[0]
         assert called_end == datetime.now().strftime("%Y%m%d")
 
 
@@ -198,6 +198,6 @@ def test_async_sync_vouchers_explicit_end_date_not_capped():
         future_end = "20270331"
         asyncio.run(async_sync_vouchers(start_date="20260401", end_date=future_end))
 
-        called_start, called_end, _tally_url = mock_fetch.call_args[0]
+        called_start, called_end = mock_fetch.call_args[0]
         assert called_start == "20260401"
         assert called_end == future_end

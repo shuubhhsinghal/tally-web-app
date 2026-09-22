@@ -60,8 +60,11 @@ export default function TopBar({ title, showBack = false, onBack }) {
     <div className="sticky top-0 z-30 bg-white/80 dark:bg-gray-900/80 backdrop-blur-md border-b border-gray-100 dark:border-gray-800">
       <div className="flex items-center justify-between h-14 px-4 max-w-md mx-auto">
         
-        {/* Left Section */}
-        <div className="flex-1 flex items-center justify-start">
+        {/* Left Section -- sized to its own content (a lone back button is
+            much narrower than the status block shown when there's no back
+            button) rather than flex-1, so it doesn't claim a full third of
+            the header and starve the title next to it. */}
+        <div className="flex items-center justify-start">
           {showBack ? (
             <button 
               onClick={() => onBack ? onBack() : router.back()} 
@@ -91,8 +94,8 @@ export default function TopBar({ title, showBack = false, onBack }) {
           {title}
         </h1>
 
-        {/* Right Section */}
-        <div className="flex-1 flex items-center justify-end gap-1">
+        {/* Right Section -- same reasoning as the left one above. */}
+        <div className="flex items-center justify-end gap-1">
           <button
             onClick={handleManualSync}
             disabled={isSyncing}

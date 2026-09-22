@@ -10,7 +10,7 @@ import { Lock } from 'lucide-react';
 export default function LoginPage() {
   const router = useRouter();
   const { login } = useAuth();
-  const [username, setUsername] = useState('');
+  const [name, setName] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -18,8 +18,8 @@ export default function LoginPage() {
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
-    if (!username.trim() || !password) {
-      setError('Enter a username and password.');
+    if (!name.trim() || !password) {
+      setError('Enter your name and password.');
       return;
     }
     setLoading(true);
@@ -27,7 +27,7 @@ export default function LoginPage() {
       const res = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: username.trim(), password }),
+        body: JSON.stringify({ name: name.trim(), password }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || 'Login failed.');
@@ -53,12 +53,11 @@ export default function LoginPage() {
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <Input
-            label="Username"
-            value={username}
-            onChange={e => setUsername(e.target.value)}
-            placeholder="your username"
+            label="Your name"
+            value={name}
+            onChange={e => setName(e.target.value)}
+            placeholder="e.g. Shubh"
             autoFocus
-            autoCapitalize="none"
           />
           <Input
             label="Password"
