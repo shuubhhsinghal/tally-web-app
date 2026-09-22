@@ -156,6 +156,19 @@ export function CameraCapture({ onCapture, onClose, initialPhotoFile, onRetake }
           }
         }
 
+        // Some Android devices/browsers don't report imageWidth/imageHeight
+        // capabilities at all (the block above then leaves photoSettings
+        // empty), silently taking whatever low-ish resolution the browser
+        // defaults a still photo to instead of the sensor's real max. Ask
+        // explicitly for a high resolution in that case -- takePhoto()
+        // rejects on unsupported settings the same way it would on an
+        // empty object, which the surrounding try/catch already falls back
+        // to canvas capture for, so this can only help, never regress.
+        if (!photoSettings.imageWidth && !photoSettings.imageHeight) {
+          console.log(`[CAMERA SESSION ${sessionRef.current}] No reported photo capabilities -- requesting a high resolution explicitly.`);
+          photoSettings = { imageWidth: 4032, imageHeight: 3024 };
+        }
+
         console.log(`[CAMERA SESSION ${sessionRef.current}] Calling takePhoto with settings:`, photoSettings);
         const blob = await imageCapture.takePhoto(photoSettings);
         console.log(`[CAMERA SESSION ${sessionRef.current}] takePhoto SUCCESS. Blob size:`, blob.size);
