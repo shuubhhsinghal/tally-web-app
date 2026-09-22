@@ -329,6 +329,18 @@ def test_compute_current_month_pending_interest_none_for_no_interest_loan():
     assert compute_current_month_pending_interest(loan_dict, as_of=date(2026, 10, 15)) is None
 
 
+def test_compute_current_month_pending_interest_previews_a_future_dated_loans_own_first_month():
+    # Added today (Sept 22) for a loan that only starts Oct 1 -- "this
+    # month" (September) has no relevant days for it at all, so the preview
+    # should show October's full figure instead of nothing.
+    loan_dict = {
+        "principal_amount": 100000.0, "total_repayment_amount": 120000.0,
+        "daily_amount": 1200.0, "start_date": "2026-10-01", "interest_accrued_through": None,
+    }
+    preview = compute_current_month_pending_interest(loan_dict, as_of=date(2026, 9, 22))
+    assert preview == {"period_start": "2026-10-01", "period_end": "2026-10-31", "amount": 6200.0}
+
+
 @patch('backend.services.loan_interest_accrual.queue_operation')
 def test_post_pending_interest_accruals_shares_the_lender_ledger(mock_queue_operation):
     mock_queue_operation.side_effect = lambda *a, **k: 999

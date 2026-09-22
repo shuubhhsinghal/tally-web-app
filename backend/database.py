@@ -2442,23 +2442,31 @@ def compute_pending_interest_accruals(loan: dict, as_of) -> list:
     return periods
 
 def compute_current_month_pending_interest(loan: dict, as_of=None) -> Optional[dict]:
-    """The interest this loan will post once the CURRENT, still-in-progress
-    calendar month closes -- a preview of the next monthly accrual, using the
-    same fixed daily rate as compute_pending_interest_accruals, just for the
-    one period that function deliberately excludes (the month 'today' falls
-    in, since it isn't finished yet). Always computable in advance since a
-    loan's terms are fixed at creation. Returns {period_start, period_end,
-    amount}, or None if there's nothing to accrue this month (no known
-    interest, or the loan's tenure already finished before this month
-    started)."""
+    """The interest this loan will post once its next relevant calendar
+    month closes -- a preview of the next monthly accrual, using the same
+    fixed daily rate as compute_pending_interest_accruals, just for the one
+    period that function deliberately excludes (a month not yet finished).
+    Always computable in advance since a loan's terms are fixed at creation.
+
+    Normally that's the CURRENT month (today's). But a loan can be added for
+    a start date that hasn't arrived yet -- entering it ahead of time, e.g.
+    on the day you agree to it rather than the day it starts -- in which
+    case "today's month" has no relevant days at all (the loan doesn't exist
+    yet). Anchoring to whichever is later, today or the loan's own start,
+    previews that loan's actual first month (e.g. October) right away
+    instead of showing nothing until the calendar catches up to it.
+
+    Returns {period_start, period_end, amount}, or None if there's nothing
+    to accrue (no known interest, or the loan's tenure already finished)."""
     as_of = as_of or datetime.now().date()
     schedule = _loan_interest_schedule(loan)
     if schedule is None:
         return None
     daily_interest_rate, accrual_start, loan_end_date = schedule
 
-    period_start = max(accrual_start, as_of.replace(day=1))
-    period_end = min(_month_end(as_of), loan_end_date)
+    preview_anchor = max(as_of, accrual_start)
+    period_start = max(accrual_start, preview_anchor.replace(day=1))
+    period_end = min(_month_end(preview_anchor), loan_end_date)
     if period_start > period_end:
         return None
     days = (period_end - period_start).days + 1
