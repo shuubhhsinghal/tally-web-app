@@ -2,6 +2,7 @@ import os
 import tempfile
 import re
 import datetime
+from concurrent.futures import ThreadPoolExecutor
 from google import genai
 from google.genai import types
 from json_repair import repair_json
@@ -13,7 +14,11 @@ def call_metadata_extraction_v4(images: list[bytes], is_retry: bool = False) -> 
     if not api_key:
         raise ValueError("GEMINI_API_KEY not configured")
         
-    client = genai.Client(api_key=api_key)
+    # Explicit timeout -- without one, a stalled request (e.g. after Gemini's
+    # own retry-worthy 503) can hang the background extraction thread
+    # indefinitely instead of failing so the retry/FAILED-status path can
+    # take over.
+    client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=60000))
     
     uploaded_files = []
     tmp_paths = []
@@ -23,9 +28,13 @@ def call_metadata_extraction_v4(images: list[bytes], is_retry: bool = False) -> 
             tmp_paths.append(tmp.name)
             
     try:
-        for tmp_path in tmp_paths:
-            uploaded_files.append(client.files.upload(file=tmp_path))
-        
+        # Upload pages concurrently -- these are independent network round
+        # trips to the Gemini File API, so a multi-page invoice no longer
+        # pays for them one at a time. ThreadPoolExecutor.map preserves
+        # input order in its results, so page order is unaffected.
+        with ThreadPoolExecutor(max_workers=max(1, len(tmp_paths))) as pool:
+            uploaded_files = list(pool.map(lambda p: client.files.upload(file=p), tmp_paths))
+
         today = datetime.datetime.now().strftime("%d-%m-%Y")
         year = datetime.datetime.now().year
         
@@ -89,7 +98,10 @@ def call_metadata_extraction_v4(images: list[bytes], is_retry: bool = False) -> 
             contents=uploaded_files + [base_prompt],
             config=types.GenerateContentConfig(response_mime_type="application/json"),
         ))
-        
+        u = response.usage_metadata
+        if u:
+            print(f"[GEMINI TOKENS] metadata extraction: prompt={u.prompt_token_count} output={u.candidates_token_count} total={u.total_token_count}", flush=True)
+
         for uf in uploaded_files:
             client.files.delete(name=uf.name)
         for p in tmp_paths:

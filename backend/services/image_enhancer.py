@@ -233,12 +233,19 @@ def apply_manual_perspective_crop(image_bytes: bytes, points: list) -> bytes:
         print(f"[IMAGE ENHANCER] Manual perspective crop failed, falling back to original: {e}", flush=True)
         return image_bytes
 
-def enhance_document_image(image_bytes: bytes) -> bytes:
+def enhance_document_image(image_bytes: bytes, skip_perspective_detection: bool = False) -> bytes:
     """
     Takes raw image bytes, applies the scanner-like visual enhancement pipeline,
     and returns enhanced JPEG bytes.
     If the bytes cannot be read by OpenCV (e.g., they are a PDF or corrupted),
     the original bytes are safely returned unmodified.
+
+    skip_perspective_detection: pass True when the caller already warped the
+    image to a user-marked quadrilateral (apply_manual_perspective_crop). At
+    that point the frame IS the document -- re-running auto boundary
+    detection on it has no real edge left to find, so it just risks a second,
+    unnecessary warp that softens the image or clips content (e.g. the
+    rightmost column) for no benefit.
     """
     image = _decode_image(image_bytes)
     if image is None:
@@ -248,7 +255,8 @@ def enhance_document_image(image_bytes: bytes) -> bytes:
         # 2. Pipeline Execution
         img = auto_orient(image)
         img = deskew(img)
-        img = perspective_correction_optional(img)
+        if not skip_perspective_detection:
+            img = perspective_correction_optional(img)
         img = correct_illumination(img)
         img = upscale_if_needed(img)
 

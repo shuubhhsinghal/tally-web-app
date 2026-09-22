@@ -67,6 +67,9 @@ def _call_gemini_bank_extraction(client, pdf_path: str, is_retry: bool = False) 
                 response_schema=BankStatementExtractionResponseV1,
             ),
         )
+        u = response.usage_metadata
+        if u:
+            print(f"[GEMINI TOKENS] bank statement extraction: prompt={u.prompt_token_count} output={u.candidates_token_count} total={u.total_token_count}", flush=True)
 
         res_text = response.text.strip()
         if res_text.startswith("```json"):
@@ -380,7 +383,9 @@ def upload_bank_statement(
                 writer.write(f)
                 
             api_key = os.environ.get("GEMINI_API_KEY")
-            client = genai.Client(api_key=api_key)
+            # Explicit timeout -- without one, a stalled request can hang the
+            # background extraction thread indefinitely instead of failing.
+            client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=60000))
 
             json_txns = _call_gemini_bank_extraction(client, unlocked_pdf_path, is_retry=False)
             if not json_txns:

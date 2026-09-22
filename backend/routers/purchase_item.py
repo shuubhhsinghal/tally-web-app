@@ -80,10 +80,19 @@ def get_item_cache():
 
 @router.get("/metadata")
 async def get_metadata():
-    ledgers = get_all_ledgers()
-    stock_items = get_all_stock_items()
-    uoms = get_all_uoms()
-    aliases = get_all_aliases()
+    from backend.database import get_master_states, get_active_stores
+
+    # Share one connection across these reads instead of each helper
+    # opening/closing its own -- this endpoint is called on essentially
+    # every purchase-item page load, so 6 separate connections per request
+    # added up to real, avoidable overhead.
+    with get_db() as conn:
+        ledgers = get_all_ledgers(conn)
+        stock_items = get_all_stock_items(conn)
+        uoms = get_all_uoms(conn)
+        aliases = get_all_aliases(conn)
+        master_states = get_master_states(conn)
+        active_stores = get_active_stores(conn)
 
     suppliers = []
     for l in ledgers:
@@ -94,10 +103,6 @@ async def get_metadata():
     stock_item_names = [i['name'] for i in stock_items]
     stock_item_units = {i['name']: (i.get('unit') or 'PCS') for i in stock_items}
 
-    from backend.database import get_master_states, get_active_stores
-    master_states = get_master_states()
-
-    active_stores = get_active_stores()
     store_names = [s['store_name'] for s in active_stores]
 
     return {

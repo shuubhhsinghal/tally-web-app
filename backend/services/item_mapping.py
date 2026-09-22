@@ -20,6 +20,12 @@ def _item_ai_matching_enabled() -> bool:
     # the AI step has nothing useful to match against yet (it can only ever
     # return "no match"), so it's pure cost with zero benefit until you've
     # built up a real list of items via the app's own create-item flow.
+    # The owner can flip this live from Settings (stored in app_settings);
+    # the env var only supplies the default before it's ever been set there.
+    from backend.database import get_app_setting
+    stored = get_app_setting("item_matching_ai_enabled")
+    if stored is not None:
+        return stored.strip().lower() not in ("false", "0", "no")
     return os.getenv("ITEM_MATCHING_AI_ENABLED", "true").strip().lower() not in ("false", "0", "no")
 
 
@@ -132,7 +138,9 @@ def map_items_to_tally(raw_items: list) -> list:
     if unmapped_raw_items and _item_ai_matching_enabled():
         api_key = os.getenv("GEMINI_API_KEY")
         if api_key:
-            client = genai.Client(api_key=api_key)
+            # Explicit timeout -- without one, a stalled request can hang the
+            # background extraction thread indefinitely instead of failing.
+            client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=60000))
             tally_item_names = [i['name'] for i in stock_items]
             seen_tally_names = set(normalize_item_name(n) for n in tally_item_names)
             for name in pending_item_names:
@@ -191,6 +199,9 @@ def map_items_to_tally(raw_items: list) -> list:
                     contents=[map_prompt],
                     config=types.GenerateContentConfig(response_mime_type="application/json"),
                 )
+                u = map_response.usage_metadata
+                if u:
+                    print(f"[GEMINI TOKENS] item name matching: prompt={u.prompt_token_count} output={u.candidates_token_count} total={u.total_token_count}", flush=True)
                 map_text = map_response.text.strip()
                 map_text = re.sub(r'^```json\s*', '', map_text)
                 map_text = re.sub(r'\s*```$', '', map_text)

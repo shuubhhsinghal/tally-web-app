@@ -22,6 +22,17 @@ def get_db():
     finally:
         conn.close()
 
+@contextmanager
+def _db_or(conn):
+    """Reuse an already-open connection when the caller passed one (so
+    several reads can share a single connection instead of opening one
+    each), otherwise open/close a fresh one exactly like get_db()."""
+    if conn is not None:
+        yield conn
+    else:
+        with get_db() as new_conn:
+            yield new_conn
+
 def init_db():
     with get_db() as conn:
         cursor = conn.cursor()
@@ -766,7 +777,7 @@ def check_master_exists_locally(entity_type: str, normalized_name: str, new_payl
             
         return False
 
-def get_master_states() -> dict:
+def get_master_states(conn=None) -> dict:
     """
     Returns a dictionary grouped by entity type (ledgers, stock_items, uoms)
     containing objects for masters that are pending, syncing, or failed.
@@ -776,9 +787,9 @@ def get_master_states() -> dict:
         "stock_items": [],
         "uoms": []
     }
-    
-    with get_db() as conn:
-        cursor = conn.cursor()
+
+    with _db_or(conn) as c:
+        cursor = c.cursor()
         cursor.execute("SELECT entity_type, normalized_name, original_name, status, error_message FROM pending_masters")
         rows = cursor.fetchall()
         for row in rows:
@@ -1088,27 +1099,27 @@ def run_migration_preflight():
             raise Exception(f"Migration preflight failed: Found {len(rows)} unlinked legacy master queue rows (IDs: {[r['id'] for r in rows]}). These must be resolved before startup.")
 
 # --- Helper Functions for Masters ---
-def get_all_ledgers():
-    with get_db() as conn:
-        cursor = conn.cursor()
+def get_all_ledgers(conn=None):
+    with _db_or(conn) as c:
+        cursor = c.cursor()
         cursor.execute("SELECT * FROM ledgers")
         return [dict(row) for row in cursor.fetchall()]
 
-def get_all_stock_items():
-    with get_db() as conn:
-        cursor = conn.cursor()
+def get_all_stock_items(conn=None):
+    with _db_or(conn) as c:
+        cursor = c.cursor()
         cursor.execute("SELECT * FROM stock_items")
         return [dict(row) for row in cursor.fetchall()]
 
-def get_all_uoms():
-    with get_db() as conn:
-        cursor = conn.cursor()
+def get_all_uoms(conn=None):
+    with _db_or(conn) as c:
+        cursor = c.cursor()
         cursor.execute("SELECT * FROM uoms")
         return [row['name'] for row in cursor.fetchall()]
 
-def get_all_aliases():
-    with get_db() as conn:
-        cursor = conn.cursor()
+def get_all_aliases(conn=None):
+    with _db_or(conn) as c:
+        cursor = c.cursor()
         cursor.execute("SELECT * FROM item_aliases")
         return {row['original_name']: row['mapped_name'] for row in cursor.fetchall()}
 
@@ -1352,8 +1363,8 @@ def clear_and_bulk_insert_godowns(godowns_data):
             )
         db.commit()
 
-def get_active_stores():
-    with get_db() as db:
+def get_active_stores(conn=None):
+    with _db_or(conn) as db:
         cursor = db.cursor()
         cursor.execute("SELECT store_name, cost_center_name, godown_name FROM stores WHERE active = 1")
         return [dict(r) for r in cursor.fetchall()]

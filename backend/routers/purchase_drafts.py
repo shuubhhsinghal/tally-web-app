@@ -147,7 +147,7 @@ def enqueue_draft_extraction(background_tasks: BackgroundTasks, files_data: list
         if first_crop_points:
             first_file_bytes = apply_manual_perspective_crop(first_file_bytes, first_crop_points)
             _debug_log_crop(draft_id, 0, first_crop_points, first_file_bytes)
-        first_file_bytes = enhance_document_image(first_file_bytes)
+        first_file_bytes = enhance_document_image(first_file_bytes, skip_perspective_detection=bool(first_crop_points))
 
     # Update the files_data with normalized bytes for the first file
     files_data[0] = (first_file_bytes, first_filename, first_content_type)
@@ -169,7 +169,7 @@ def enqueue_draft_extraction(background_tasks: BackgroundTasks, files_data: list
                         if crop_points:
                             norm_bytes = apply_manual_perspective_crop(norm_bytes, crop_points)
                             _debug_log_crop(draft_id, i, crop_points, norm_bytes)
-                        norm_bytes = enhance_document_image(norm_bytes)
+                        norm_bytes = enhance_document_image(norm_bytes, skip_perspective_detection=bool(crop_points))
                     files_data[i] = (norm_bytes, f_name, f_type)
                 else:
                     norm_bytes = first_file_bytes
@@ -357,12 +357,14 @@ async def update_purchase_draft(draft_id: str, draft_data: str = Form(...)):
     except Exception as e:
         raise HTTPException(status_code=400, detail="Invalid JSON in draft_data")
 
-    # Extract summary info
-    invoice_data = data.get("invoice", {})
+    # Extract summary info. `.get(key, default)` only falls back for a
+    # *missing* key -- a failed/incomplete draft can have "invoice"/"items"
+    # present but explicitly null, so `or` is needed too.
+    invoice_data = data.get("invoice") or {}
     supplier_name = invoice_data.get("supplier", "Unknown Supplier")
     invoice_number = invoice_data.get("invoice_number", "")
     invoice_date = invoice_data.get("date", "")
-    items = data.get("items", [])
+    items = data.get("items") or []
     item_count = len(items)
 
     item_subtotal = sum((item.get("final_amount") if item.get("final_amount") is not None else item.get("amount", 0)) for item in items)

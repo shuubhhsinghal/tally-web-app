@@ -708,7 +708,7 @@ export function ItemWiseMode({ onPostSuccess }) {
       
       showToast("Invoice parsing started. Check Review Inbox in a few minutes.", "success");
       setIsExtracting(false);
-      window.location.href = '/review';
+      router.push('/review');
       
     } catch (error) {
       showToast(error.message, 'error');
@@ -1248,7 +1248,7 @@ export function ItemWiseMode({ onPostSuccess }) {
           if (!res.ok) throw new Error("Failed to delete draft");
           
           showToast("Invoice discarded successfully.", "success");
-          window.location.href = '/review';
+          router.push('/review');
         } catch (err) {
           showToast(err.message || "Failed to reject invoice", "error");
           setIsRejecting(false);

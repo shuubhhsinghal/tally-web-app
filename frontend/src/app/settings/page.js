@@ -6,7 +6,79 @@ import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
 import { useUI } from '@/context/UIContext';
 import { useAuth } from '@/context/AuthContext';
-import { Settings as SettingsIcon, Users, Trash2, UserPlus, KeyRound } from "lucide-react";
+import { Settings as SettingsIcon, Users, Trash2, UserPlus, KeyRound, Sparkles } from "lucide-react";
+
+function ItemMatchingAiSection() {
+  const { showToast } = useUI();
+  const [enabled, setEnabled] = useState(true);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/settings/item-matching-ai")
+      .then(res => res.json())
+      .then(data => setEnabled(!!data.enabled))
+      .catch(() => { })
+      .finally(() => setLoading(false));
+  }, []);
+
+  const handleToggle = async () => {
+    const next = !enabled;
+    setEnabled(next);
+    setSaving(true);
+    try {
+      const res = await fetch("/api/settings/item-matching-ai", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: next }),
+      });
+      if (!res.ok) throw new Error("Failed to save setting");
+      showToast(next ? "AI item matching turned on" : "AI item matching turned off");
+    } catch (err) {
+      setEnabled(!next);
+      showToast(err.message, "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Card className="flex flex-col gap-4">
+      <div>
+        <h2 className="text-lg font-bold text-gray-900 dark:text-white flex items-center gap-2">
+          <Sparkles className="w-5 h-5 text-teal-600" /> AI Item Matching
+        </h2>
+        <p className="text-sm text-gray-500 mt-1">
+          When an item extracted from an invoice doesn't exactly match anything in your Tally stock list, Gemini is asked to find the closest match. Turn this off to leave unmatched items for manual selection instead.
+        </p>
+      </div>
+
+      {loading ? (
+        <p className="text-sm text-gray-400">Loading...</p>
+      ) : (
+        <div className="flex items-center justify-between">
+          <span className="text-sm font-bold text-gray-900 dark:text-white">
+            {enabled ? "On" : "Off"}
+          </span>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={enabled}
+            disabled={saving}
+            onClick={handleToggle}
+            className={`relative inline-flex h-7 w-12 items-center rounded-full transition-colors disabled:opacity-50 ${enabled ? "bg-teal-600" : "bg-gray-300 dark:bg-gray-700"
+              }`}
+          >
+            <span
+              className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${enabled ? "translate-x-6" : "translate-x-1"
+                }`}
+            />
+          </button>
+        </div>
+      )}
+    </Card>
+  );
+}
 
 function TeamSection() {
   const { showToast, showConfirmDialog } = useUI();
@@ -268,6 +340,7 @@ export default function SettingsPage() {
       </div>
 
       <ChangePasswordSection />
+      {user?.is_owner && <ItemMatchingAiSection />}
       {user?.is_owner && <TeamSection />}
     </div>
   );

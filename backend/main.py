@@ -10,6 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 from backend.routers import stock_transfer, transfer, sales, payment, purchase, purchase_item, bank_statement, sync, dashboard, masters, settings, purchase_drafts, reporting, reporting_pl, repack, auth, loans
 from backend.database import init_db, get_user_by_session_token
 from backend.services.tally_sync_worker import sync_worker_loop
@@ -102,7 +103,11 @@ async def require_session(request: Request, call_next):
     if not token.startswith("Bearer "):
         return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
 
-    user = get_user_by_session_token(token[7:])
+    # Off the event loop: this does blocking sqlite3 I/O (a read plus a
+    # last-seen-at write+commit) on every single authenticated request --
+    # running it inline here would freeze the whole async server for that
+    # duration, serializing requests that the frontend fires in parallel.
+    user = await run_in_threadpool(get_user_by_session_token, token[7:])
     if not user:
         return JSONResponse(status_code=401, content={"detail": "Session expired or invalid"})
 

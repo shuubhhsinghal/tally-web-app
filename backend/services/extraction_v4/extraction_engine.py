@@ -5,6 +5,7 @@ import numpy as np
 import tempfile
 import datetime
 import json
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, List
 from pydantic import BaseModel, Field
 from google import genai
@@ -50,7 +51,11 @@ def call_gemini_extraction_v4(images: list[bytes], is_retry: bool = False) -> di
     if not api_key:
         raise ValueError("GEMINI_API_KEY not configured")
 
-    client = genai.Client(api_key=api_key)
+    # Explicit timeout -- without one, a stalled request (e.g. after Gemini's
+    # own retry-worthy 503) can hang the background extraction thread
+    # indefinitely instead of failing so the retry/FAILED-status path can
+    # take over.
+    client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=60000))
 
     uploaded_files = []
     tmp_paths = []
@@ -60,8 +65,9 @@ def call_gemini_extraction_v4(images: list[bytes], is_retry: bool = False) -> di
             tmp_paths.append(tmp.name)
 
     try:
-        for tmp_path in tmp_paths:
-            uploaded_files.append(client.files.upload(file=tmp_path))
+        # Upload pages concurrently -- see metadata_extractor.py for why.
+        with ThreadPoolExecutor(max_workers=max(1, len(tmp_paths))) as pool:
+            uploaded_files = list(pool.map(lambda p: client.files.upload(file=p), tmp_paths))
 
         today = datetime.datetime.now().strftime("%d-%m-%Y")
 
@@ -126,6 +132,9 @@ def call_gemini_extraction_v4(images: list[bytes], is_retry: bool = False) -> di
                 response_schema=PrintTranscriptionResponseV4,
             ),
         ))
+        u = response.usage_metadata
+        if u:
+            print(f"[GEMINI TOKENS] item table extraction: prompt={u.prompt_token_count} output={u.candidates_token_count} total={u.total_token_count}", flush=True)
 
         for uf in uploaded_files:
             client.files.delete(name=uf.name)
@@ -157,18 +166,23 @@ def process_invoice_v4(images: list[bytes]) -> dict:
     # V4 utilizes V3's safe image processing
     flattened_images = [flatten_document(img) for img in images]
 
-    # 1. Metadata Extraction
-    print("--- [EXTRACTION V4] Step 1: Metadata Extraction ---", flush=True)
-    metadata = call_metadata_extraction_v4(flattened_images)
-
-    gst_rate_pct = float(metadata.get("gst_rate") or 0)
-
-    # 2. Crop Image
+    # Crop Image -- local/OCR-only, needed before item extraction can start.
     cropped_images = [crop_item_table(flattened_images[0])] + flattened_images[1:]
 
-    # 3. Item Extraction
-    print("--- [EXTRACTION V4] Step 2: Item Extraction ---", flush=True)
-    item_data = call_gemini_extraction_v4(cropped_images, is_retry=False)
+    # Metadata extraction (reads the un-cropped pages) and item extraction
+    # (reads the cropped table) are independent Gemini calls -- neither
+    # depends on the other's output, only the row-count-mismatch retry
+    # below does. Running them concurrently instead of back-to-back roughly
+    # halves the dominant cost of the pipeline (two ~model-latency network
+    # round trips).
+    print("--- [EXTRACTION V4] Step 1+2: Metadata + Item Extraction (parallel) ---", flush=True)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        metadata_future = pool.submit(call_metadata_extraction_v4, flattened_images)
+        items_future = pool.submit(call_gemini_extraction_v4, cropped_images, False)
+        metadata = metadata_future.result()
+        item_data = items_future.result()
+
+    gst_rate_pct = float(metadata.get("gst_rate") or 0)
     raw_items = item_data.get("items", [])
     detected_headers = item_data.get("detected_headers", [])
 

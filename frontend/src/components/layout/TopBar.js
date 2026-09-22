@@ -6,51 +6,25 @@ import { useRouter } from 'next/navigation';
 import { Moon, Sun, ArrowLeft, Wifi, WifiOff, RefreshCw, LogOut } from 'lucide-react';
 import { useUI } from '@/context/UIContext';
 import { useAuth } from '@/context/AuthContext';
-import { fetchWithTimeout } from '@/utils/fetchWithTimeout';
+import { useSyncStatus } from '@/context/SyncStatusContext';
 
 export default function TopBar({ title, showBack = false, onBack }) {
   const { theme, setTheme } = useTheme();
   const router = useRouter();
   const { showToast, showConfirmDialog } = useUI();
   const { user, logout } = useAuth();
+  const { isOnline, isSyncing, triggerManualSync } = useSyncStatus();
   const [mounted, setMounted] = useState(false);
-  const [isOnline, setIsOnline] = useState(null);
-  const [isSyncing, setIsSyncing] = useState(false);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setMounted(true);
-    // Simple mock ping to check Tally sync status based on user instruction
-    const checkSync = async () => {
-      try {
-        // Short timeout -- this reruns every 10s anyway (see the interval
-        // below), so there's no point letting one attempt hang longer than
-        // that before showing "offline" and letting the next tick retry.
-        const res = await fetchWithTimeout('/api/sync/status', {}, 8000);
-        if (res.ok) {
-          const data = await res.json();
-          setIsOnline(data.online !== false);
-        } else {
-          setIsOnline(false);
-        }
-      } catch {
-        setIsOnline(false);
-      }
-    };
-    checkSync();
-    const interval = setInterval(checkSync, 10000);
-    return () => clearInterval(interval);
   }, []);
 
   const handleManualSync = async () => {
-    setIsSyncing(true);
     try {
-      // More generous timeout than the status check -- this one actually
-      // does real Tally I/O (posting queued vouchers, pulling reporting
-      // data), which can legitimately take a while.
-      const res = await fetchWithTimeout('/api/sync/sync-queue', { method: 'POST' }, 30000);
-      if (res.ok) {
-        const data = await res.json();
+      const data = await triggerManualSync();
+      if (data) {
         const hasIssue = data.status !== 'success' || (data.failed_months && data.failed_months.length > 0);
         showToast(data.message || 'Manual sync triggered', hasIssue ? 'error' : 'success');
       } else {
@@ -58,8 +32,6 @@ export default function TopBar({ title, showBack = false, onBack }) {
       }
     } catch (e) {
       showToast(e.message || 'Error triggering sync', 'error');
-    } finally {
-      setIsSyncing(false);
     }
   };
 

@@ -5,6 +5,7 @@ import { usePathname, useRouter } from 'next/navigation';
 import { ThemeProvider } from 'next-themes';
 import { UIProvider } from '@/context/UIContext';
 import { AuthProvider, useAuth } from '@/context/AuthContext';
+import { SyncStatusProvider } from '@/context/SyncStatusContext';
 import BottomNav from '@/components/layout/BottomNav';
 
 const CHROMELESS_PATHS = ['/login', '/setup'];
@@ -47,7 +48,9 @@ export function Providers({ children }) {
     <ThemeProvider attribute="class" defaultTheme="light" enableSystem={false}>
       <UIProvider>
         <AuthProvider>
-          <AuthGate>{children}</AuthGate>
+          <SyncStatusProvider>
+            <AuthGate>{children}</AuthGate>
+          </SyncStatusProvider>
         </AuthProvider>
       </UIProvider>
     </ThemeProvider>
