@@ -438,6 +438,11 @@ def init_db():
             cursor.execute("ALTER TABLE loans ADD COLUMN interest_accrued_through TEXT")
         except sqlite3.OperationalError:
             pass # Column exists
+
+        try:
+            cursor.execute("ALTER TABLE loans ADD COLUMN received_into_ledger TEXT")
+        except sqlite3.OperationalError:
+            pass # Column exists
             
         try:
             cursor.execute("ALTER TABLE reporting_vouchers ADD COLUMN reference TEXT")
@@ -2191,15 +2196,15 @@ def delete_session(token: str):
 
 def create_loan(lender_name: str, ledger_name: str, principal_amount: float,
                  total_repayment_amount: float, daily_amount: float,
-                 start_date: str, created_by: str) -> dict:
+                 start_date: str, received_into_ledger: str, created_by: str) -> dict:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO loans (lender_name, ledger_name, principal_amount, total_repayment_amount,
-                                daily_amount, start_date, status, created_by, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)
+                                daily_amount, start_date, received_into_ledger, created_by, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (lender_name, ledger_name, principal_amount, total_repayment_amount,
-              daily_amount, start_date, created_by, datetime.now().isoformat()))
+              daily_amount, start_date, received_into_ledger, created_by, datetime.now().isoformat()))
         conn.commit()
         return get_loan_by_id(cursor.lastrowid)
 
@@ -2210,129 +2215,167 @@ def get_loan_by_id(loan_id: int) -> Optional[dict]:
         row = cursor.fetchone()
         return dict(row) if row else None
 
-def loan_ledger_name_exists(ledger_name: str) -> bool:
+_PENDING_LEDGER_MOVEMENT_DESCRIPTION_PATTERNS = ("Loan Received:%", "Loan Interest:%", "Payment:%", "Bank Stmt:%")
+
+def _fetch_pending_ledger_movement(ledger_name: str) -> float:
+    """Not-yet-synced offline_queue entries that would move this ledger's
+    balance once Tally confirms them -- so a lender's total reflects a new
+    loan, an accrued interest entry, or a repayment the moment it's recorded
+    here, not only once the separate reporting sync has caught up with
+    Tally. Same idea as reporting_creditors_service's own pending-queue
+    reconciliation (_fetch_pending_supplier_movements), just generalized to
+    loan vouchers plus the two generic ones (Payment, a matched Bank
+    Statement line) that already carry debit_ledger/amount."""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT 1 FROM loans WHERE ledger_name = ?", (ledger_name,))
-        return cursor.fetchone() is not None
+        placeholders = " OR ".join(["description LIKE ?"] * len(_PENDING_LEDGER_MOVEMENT_DESCRIPTION_PATTERNS))
+        cursor.execute(f"""
+            SELECT payload, description FROM offline_queue
+            WHERE operation_type = 'POST_VOUCHER' AND status = 'PENDING' AND ({placeholders})
+        """, list(_PENDING_LEDGER_MOVEMENT_DESCRIPTION_PATTERNS))
+        rows = cursor.fetchall()
 
-def get_active_loans_by_lender(lender_name: str) -> list:
+    total = 0.0
+    for row in rows:
+        try:
+            payload = json.loads(row['payload']) if row['payload'] else {}
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if payload.get('delivery_uncertain') is True:
+            continue
+
+        description = row['description']
+        if description.startswith("Loan Received:"):
+            if payload.get('ledger_name') == ledger_name:
+                total += float(payload.get('principal_amount') or 0)
+        elif description.startswith("Loan Interest:"):
+            if payload.get('ledger_name') == ledger_name:
+                total += float(payload.get('amount') or 0)
+        elif description.startswith("Payment:") or description.startswith("Bank Stmt:"):
+            # The lender's ledger only ever appears as the debited side for
+            # these two (a repayment reducing what's owed) -- never credited,
+            # since a fresh disbursement always goes through Add a Loan instead.
+            if payload.get('debit_ledger') == ledger_name:
+                total -= float(payload.get('amount') or 0)
+    return total
+
+def get_ledger_current_balance(ledger_name: str) -> float:
+    """A ledger's live balance: its Tally opening balance (which itself
+    already reflects this financial year's opening position, set either by
+    Tally directly or by this app's own <OPENINGBALANCE> at ledger creation)
+    plus every confirmed voucher line posted against it since -- the same
+    two-part computation the Creditors report already uses
+    (reporting_creditors_service.get_creditor_ledger_movements), just without
+    the period-scoping since a loan balance isn't reset each financial year
+    the way a P&L-style report resets -- plus whatever's still sitting in the
+    offline queue, not yet confirmed by Tally (see _fetch_pending_ledger_movement)."""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM loans WHERE lender_name = ? AND status = 'active'", (lender_name,))
-        return [dict(row) for row in cursor.fetchall()]
+        cursor.execute("SELECT opening_balance FROM ledgers WHERE name = ?", (ledger_name,))
+        row = cursor.fetchone()
+        opening_balance = row['opening_balance'] if row else 0.0
 
-def _with_loan_computed_fields(loan: dict, payments: list, accruals: list) -> dict:
-    total = loan['total_repayment_amount']
-    paid_to_date = round(sum(p['amount'] for p in payments), 2)
-    accrued_interest_to_date = round(sum(a['amount'] for a in accruals), 2)
-    days_elapsed = max(0, (datetime.now().date() - datetime.strptime(loan['start_date'], "%Y-%m-%d").date()).days + 1)
-    expected_by_today = min(days_elapsed * loan['daily_amount'], total)
-    # What's actually owed right now: principal, plus whatever interest has
-    # accrued so far (see compute_pending_interest_accruals), minus whatever
-    # cash has actually been handed over -- independent of the fixed
-    # 'total_repayment_amount' schedule, so it stays correct however
-    # irregular the real payments are.
-    balance = round(loan['principal_amount'] + accrued_interest_to_date - paid_to_date, 2)
+        cursor.execute("""
+            SELECT COALESCE(SUM(rle.amount), 0) as movement
+            FROM reporting_ledger_entries rle
+            WHERE rle.ledger_name = ?
+        """, (ledger_name,))
+        movement = cursor.fetchone()['movement']
 
-    this_month = datetime.now().strftime("%Y-%m")
-    interest_accrued_this_month = round(sum(a['amount'] for a in accruals if a['period_end'].startswith(this_month)), 2)
-    paid_this_month = round(sum(p['amount'] for p in payments if p['date'].startswith(this_month)), 2)
-
-    # At the current daily rate, how many more days until this loan is paid
-    # off -- adapts to reality (more days if behind, fewer if ahead), unlike
-    # a fixed tenure countdown that ignores what's actually been paid.
-    days_left = math.ceil(balance / loan['daily_amount']) if loan['status'] == 'active' and loan['daily_amount'] > 0 else 0
-
-    return {
-        **loan,
-        'paid_to_date': paid_to_date,
-        'accrued_interest_to_date': accrued_interest_to_date,
-        'balance': balance,
-        'days_elapsed': days_elapsed,
-        'days_left': days_left,
-        'expected_by_today': round(expected_by_today, 2),
-        # Display-only: how far behind (positive) or ahead (negative) of the
-        # daily target this loan is. Never stored, never used in posting --
-        # purely a read-time comparison for the owner's own awareness.
-        'behind_by': round(expected_by_today - paid_to_date, 2),
-        'interest_accrued_this_month': interest_accrued_this_month,
-        'paid_this_month': paid_this_month,
-    }
+    pending = _fetch_pending_ledger_movement(ledger_name)
+    return round(opening_balance + movement + pending, 2)
 
 def list_loans() -> list:
+    """Grouped by lender: each lender's live ledger balance (the single
+    source of truth for what's owed, however it moved -- an opening balance
+    set directly in Tally, a new loan taken through this app, interest
+    accrued, or a repayment recorded via Payment/Bank Statement) plus the
+    plain details of whichever loans were actually taken through this app
+    (used only to know each one's own interest schedule -- not a live
+    per-loan balance, which no longer exists)."""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM loans ORDER BY status ASC, created_at DESC")
+        cursor.execute("SELECT * FROM loans ORDER BY lender_name ASC, created_at DESC")
         loans = [dict(row) for row in cursor.fetchall()]
-        cursor.execute("SELECT * FROM loan_payments")
-        payments_by_loan = {}
-        for row in cursor.fetchall():
-            payments_by_loan.setdefault(row['loan_id'], []).append(dict(row))
         cursor.execute("SELECT * FROM loan_interest_accruals")
         accruals_by_loan = {}
         for row in cursor.fetchall():
             accruals_by_loan.setdefault(row['loan_id'], []).append(dict(row))
+
+    lenders = {}
+    for loan in loans:
+        lender = lenders.setdefault(loan['lender_name'], {
+            "lender_name": loan['lender_name'],
+            "ledger_name": loan['ledger_name'],
+            "loans": [],
+        })
+        accruals = accruals_by_loan.get(loan['id'], [])
+        total_interest = loan['total_repayment_amount'] - loan['principal_amount']
+        this_month_pending = compute_current_month_pending_interest(loan)
+        lender['loans'].append({
+            **loan,
+            'total_interest': round(total_interest, 2),
+            'number_of_days': round(loan['total_repayment_amount'] / loan['daily_amount']) if loan['daily_amount'] else 0,
+            'accrued_interest_to_date': round(sum(a['amount'] for a in accruals), 2),
+            # What this loan will add to the lender's ledger once the
+            # current calendar month closes -- see
+            # compute_current_month_pending_interest for the math. None if
+            # there's nothing pending (no known interest, or tenure already
+            # finished before this month).
+            'this_month_interest_pending': this_month_pending['amount'] if this_month_pending else 0,
+            'this_month_interest_posts_on': this_month_pending['period_end'] if this_month_pending else None,
+        })
+
     return [
-        _with_loan_computed_fields(loan, payments_by_loan.get(loan['id'], []), accruals_by_loan.get(loan['id'], []))
-        for loan in loans
+        {**lender, 'total_outstanding': get_ledger_current_balance(lender['ledger_name'])}
+        for lender in lenders.values()
     ]
 
-def get_loan_detail(loan_id: int) -> Optional[dict]:
-    loan = get_loan_by_id(loan_id)
-    if not loan:
-        return None
-    with get_db() as conn:
-        cursor = conn.cursor()
-        # delivery_uncertain lives inside offline_queue.payload (JSON), not as
-        # its own column -- the existing Queue/Dashboard pages already surface
-        # it there, so this just needs the plain sync status.
-        cursor.execute("""
-            SELECT lp.*, oq.status as sync_status
-            FROM loan_payments lp
-            LEFT JOIN offline_queue oq ON oq.id = lp.queue_id
-            WHERE lp.loan_id = ?
-            ORDER BY lp.date DESC, lp.id DESC
-        """, (loan_id,))
-        payments = [dict(row) for row in cursor.fetchall()]
-        cursor.execute("SELECT * FROM loan_interest_accruals WHERE loan_id = ? ORDER BY period_end DESC", (loan_id,))
-        accruals = [dict(row) for row in cursor.fetchall()]
-    return {**_with_loan_computed_fields(loan, payments, accruals), 'payments': payments, 'interest_accruals': accruals}
-
 def get_todays_total_loan_due() -> float:
+    """Sum of daily installments for every loan still inside its own tenure
+    window today -- purely informational (see LoanCard), not tied to any
+    balance or closing logic."""
+    today = datetime.now().date()
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT COALESCE(SUM(daily_amount), 0) as total FROM loans WHERE status = 'active'")
-        return cursor.fetchone()['total']
-
-def record_loan_payment(loan_id: int, payment_date: str, amount: float,
-                         queue_id: int, created_by: str) -> int:
-    """Repayments are no longer split -- the full amount you actually paid
-    just reduces the loan's balance. Interest is recognized separately, on
-    its own monthly schedule (see compute_pending_interest_accruals), so this
-    works the same whether you pay on time, late, short, or extra."""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO loan_payments (loan_id, date, amount, principal_portion, interest_portion,
-                                        queue_id, created_by, created_at)
-            VALUES (?, ?, ?, ?, 0, ?, ?, ?)
-        """, (loan_id, payment_date, amount, amount, queue_id, created_by, datetime.now().isoformat()))
-        conn.commit()
-
-        cursor.execute("SELECT COALESCE(SUM(amount), 0) as paid FROM loan_payments WHERE loan_id = ?", (loan_id,))
-        paid_to_date = cursor.fetchone()['paid']
-        cursor.execute("SELECT total_repayment_amount FROM loans WHERE id = ?", (loan_id,))
-        total = cursor.fetchone()['total_repayment_amount']
-        if paid_to_date >= total:
-            cursor.execute("UPDATE loans SET status = 'closed' WHERE id = ?", (loan_id,))
-            conn.commit()
-
-        return cursor.lastrowid
+        cursor.execute("SELECT daily_amount, start_date, total_repayment_amount FROM loans")
+        rows = cursor.fetchall()
+    total = 0.0
+    for r in rows:
+        if r['daily_amount'] <= 0:
+            continue
+        tenure_days = round(r['total_repayment_amount'] / r['daily_amount'])
+        start = datetime.strptime(r['start_date'], "%Y-%m-%d").date()
+        if start <= today <= start + timedelta(days=tenure_days - 1):
+            total += r['daily_amount']
+    return round(total, 2)
 
 def _month_end(d) -> "datetime.date":
     last_day = calendar.monthrange(d.year, d.month)[1]
     return d.replace(day=last_day)
+
+def _loan_interest_schedule(loan: dict):
+    """Returns (daily_interest_rate, accrual_start, loan_end_date) for a loan
+    with known interest, or None if it has none to track (a legacy balance
+    entered without a known split). Shared by compute_pending_interest_accruals
+    and compute_current_month_pending_interest so both use the exact same
+    fixed daily rate and starting point."""
+    total_interest = loan['total_repayment_amount'] - loan['principal_amount']
+    if total_interest <= 0 or loan['daily_amount'] <= 0:
+        return None
+    total_tenure_days = round(loan['total_repayment_amount'] / loan['daily_amount'])
+    if total_tenure_days <= 0:
+        return None
+    daily_interest_rate = total_interest / total_tenure_days
+    start_date = datetime.strptime(loan['start_date'], "%Y-%m-%d").date()
+    loan_end_date = start_date + timedelta(days=total_tenure_days - 1)
+
+    if loan.get('interest_accrued_through'):
+        accrual_start = datetime.strptime(loan['interest_accrued_through'], "%Y-%m-%d").date() + timedelta(days=1)
+    else:
+        accrual_start = start_date
+
+    return daily_interest_rate, accrual_start, loan_end_date
 
 def compute_pending_interest_accruals(loan: dict, as_of) -> list:
     """Works out which fully-completed calendar months of this loan's life
@@ -2343,21 +2386,11 @@ def compute_pending_interest_accruals(loan: dict, as_of) -> list:
     each amount is exact and never has to be corrected later. Returns
     [{period_start, period_end, amount}, ...] in chronological order; empty
     if nothing new has finished since the last accrual, or this loan has no
-    interest to track (a legacy balance entered without a known split)."""
-    total_interest = loan['total_repayment_amount'] - loan['principal_amount']
-    if total_interest <= 0 or loan['daily_amount'] <= 0:
+    interest to track."""
+    schedule = _loan_interest_schedule(loan)
+    if schedule is None:
         return []
-    total_tenure_days = round(loan['total_repayment_amount'] / loan['daily_amount'])
-    if total_tenure_days <= 0:
-        return []
-    daily_interest_rate = total_interest / total_tenure_days
-    start_date = datetime.strptime(loan['start_date'], "%Y-%m-%d").date()
-    loan_end_date = start_date + timedelta(days=total_tenure_days - 1)
-
-    if loan.get('interest_accrued_through'):
-        accrual_start = datetime.strptime(loan['interest_accrued_through'], "%Y-%m-%d").date() + timedelta(days=1)
-    else:
-        accrual_start = start_date
+    daily_interest_rate, accrual_start, loan_end_date = schedule
 
     this_month_start = as_of.replace(day=1)
     cutoff = min(loan_end_date, this_month_start - timedelta(days=1))
@@ -2373,6 +2406,32 @@ def compute_pending_interest_accruals(loan: dict, as_of) -> list:
         cursor = period_end + timedelta(days=1)
     return periods
 
+def compute_current_month_pending_interest(loan: dict, as_of=None) -> Optional[dict]:
+    """The interest this loan will post once the CURRENT, still-in-progress
+    calendar month closes -- a preview of the next monthly accrual, using the
+    same fixed daily rate as compute_pending_interest_accruals, just for the
+    one period that function deliberately excludes (the month 'today' falls
+    in, since it isn't finished yet). Always computable in advance since a
+    loan's terms are fixed at creation. Returns {period_start, period_end,
+    amount}, or None if there's nothing to accrue this month (no known
+    interest, or the loan's tenure already finished before this month
+    started)."""
+    as_of = as_of or datetime.now().date()
+    schedule = _loan_interest_schedule(loan)
+    if schedule is None:
+        return None
+    daily_interest_rate, accrual_start, loan_end_date = schedule
+
+    period_start = max(accrual_start, as_of.replace(day=1))
+    period_end = min(_month_end(as_of), loan_end_date)
+    if period_start > period_end:
+        return None
+    days = (period_end - period_start).days + 1
+    amount = round(daily_interest_rate * days, 2)
+    if amount <= 0:
+        return None
+    return {"period_start": period_start.isoformat(), "period_end": period_end.isoformat(), "amount": amount}
+
 def record_interest_accrual(loan_id: int, period_start: str, period_end: str, amount: float, queue_id: int) -> int:
     with get_db() as conn:
         cursor = conn.cursor()
@@ -2385,13 +2444,10 @@ def record_interest_accrual(loan_id: int, period_start: str, period_end: str, am
         return cursor.lastrowid
 
 def get_active_loans_for_interest_accrual() -> list:
-    """Active loans that have a known interest amount to accrue -- excludes
-    legacy balances entered without a known principal/interest split
-    (total_repayment_amount == principal_amount there, so nothing to do)."""
+    """Loans that have a known interest amount to accrue. No status filter --
+    compute_pending_interest_accruals already returns [] on its own once a
+    loan's full tenure has been accrued, so this can just always look, cheaply."""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("""
-            SELECT * FROM loans
-            WHERE status = 'active' AND total_repayment_amount > principal_amount
-        """)
+        cursor.execute("SELECT * FROM loans WHERE total_repayment_amount > principal_amount")
         return [dict(row) for row in cursor.fetchall()]

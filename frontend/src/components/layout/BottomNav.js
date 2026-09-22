@@ -30,9 +30,9 @@ export default function BottomNav() {
         { label: 'Record a payment', icon: <CreditCard className="w-5 h-5" />, colorClass: 'bg-orange-100 text-orange-600 dark:bg-orange-900/30 dark:text-orange-400', onClick: () => router.push('/payment') },
         { label: 'Move money between accounts', icon: <ArrowRightLeft className="w-5 h-5" />, colorClass: 'bg-green-100 text-green-600 dark:bg-green-900/30 dark:text-green-400', onClick: () => router.push('/transfer') },
         { label: 'Move stock between stores', icon: <ArrowRight className="w-5 h-5" />, colorClass: 'bg-indigo-100 text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400', onClick: () => router.push('/stock-transfer') },
-        ...(user?.is_owner ? [
-          { label: 'Loans', icon: <Landmark className="w-5 h-5" />, colorClass: 'bg-teal-100 text-teal-600 dark:bg-teal-900/30 dark:text-teal-400', onClick: () => router.push('/loans') },
-        ] : []),
+        // Loans entry point removed while the feature is being redesigned --
+        // the route/code/data are all still intact, just not reachable from
+        // the UI. See /loans directly to still access the old build.
       ]
     });
   };

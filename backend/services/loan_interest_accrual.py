@@ -70,7 +70,7 @@ def post_pending_interest_accruals(as_of: date = None) -> int:
             xml_data = _build_accrual_voucher_xml(loan, period['period_end'], period['amount'])
             queue_id = queue_operation(
                 "POST_VOUCHER", xml_data,
-                {"loan_id": loan['id'], **period},
+                {"loan_id": loan['id'], "ledger_name": loan['ledger_name'], **period},
                 f"Loan Interest: {period['amount']} for {loan['lender_name']} ({period['period_start']} to {period['period_end']})",
             )
             record_interest_accrual(loan['id'], period['period_start'], period['period_end'], period['amount'], queue_id)
