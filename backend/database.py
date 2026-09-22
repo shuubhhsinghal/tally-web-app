@@ -2215,24 +2215,59 @@ def get_loan_by_id(loan_id: int) -> Optional[dict]:
         row = cursor.fetchone()
         return dict(row) if row else None
 
-_PENDING_LEDGER_MOVEMENT_DESCRIPTION_PATTERNS = ("Loan Received:%", "Loan Interest:%", "Payment:%", "Bank Stmt:%")
-
-def _fetch_pending_ledger_movement(ledger_name: str) -> float:
-    """Not-yet-synced offline_queue entries that would move this ledger's
-    balance once Tally confirms them -- so a lender's total reflects a new
-    loan, an accrued interest entry, or a repayment the moment it's recorded
-    here, not only once the separate reporting sync has caught up with
-    Tally. Same idea as reporting_creditors_service's own pending-queue
-    reconciliation (_fetch_pending_supplier_movements), just generalized to
-    loan vouchers plus the two generic ones (Payment, a matched Bank
-    Statement line) that already carry debit_ledger/amount."""
+def _fetch_loan_movement(ledger_name: str) -> float:
+    """Every loan-received and interest-accrual amount this app itself has
+    ever posted against this ledger, straight from offline_queue -- counted
+    the moment Tally confirms the voucher (status SYNCED), not only once the
+    *separate* 30-minute reporting sync has re-pulled it into
+    reporting_ledger_entries. That reporting-sync lag used to leave a fresh
+    loan invisible in the total for up to half an hour; since we author these
+    two voucher types ourselves and know their exact ledger/amount, there's
+    no need to wait on a second system to confirm what we already know.
+    get_ledger_current_balance's own confirmed-movement query deliberately
+    excludes these same voucher types (VCHTYPE Receipt, and the specifically-
+    narrated interest Journal) so this never double-counts once the reporting
+    sync does eventually catch up."""
     with get_db() as conn:
         cursor = conn.cursor()
-        placeholders = " OR ".join(["description LIKE ?"] * len(_PENDING_LEDGER_MOVEMENT_DESCRIPTION_PATTERNS))
-        cursor.execute(f"""
+        cursor.execute("""
             SELECT payload, description FROM offline_queue
-            WHERE operation_type = 'POST_VOUCHER' AND status = 'PENDING' AND ({placeholders})
-        """, list(_PENDING_LEDGER_MOVEMENT_DESCRIPTION_PATTERNS))
+            WHERE operation_type = 'POST_VOUCHER' AND status IN ('PENDING', 'SYNCED')
+              AND (description LIKE 'Loan Received:%' OR description LIKE 'Loan Interest:%')
+        """)
+        rows = cursor.fetchall()
+
+    total = 0.0
+    for row in rows:
+        try:
+            payload = json.loads(row['payload']) if row['payload'] else {}
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if payload.get('ledger_name') != ledger_name:
+            continue
+        description = row['description']
+        if description.startswith("Loan Received:"):
+            total += float(payload.get('principal_amount') or 0)
+        elif description.startswith("Loan Interest:"):
+            total += float(payload.get('amount') or 0)
+    return total
+
+def _fetch_pending_repayment_movement(ledger_name: str) -> float:
+    """Not-yet-synced repayments (Payment page or a matched Bank Statement
+    line) that would reduce this ledger's balance once Tally confirms them.
+    Unlike loan/interest vouchers above, these aren't authored by this
+    feature, so there's no reliable voucher-type marker to permanently own
+    them by -- once synced, they're only counted via the confirmed
+    reporting_ledger_entries path, same as reporting_creditors_service's own
+    pending-queue reconciliation (_fetch_pending_supplier_movements), which
+    this mirrors."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT payload, description FROM offline_queue
+            WHERE operation_type = 'POST_VOUCHER' AND status = 'PENDING'
+              AND (description LIKE 'Payment:%' OR description LIKE 'Bank Stmt:%')
+        """)
         rows = cursor.fetchall()
 
     total = 0.0
@@ -2243,20 +2278,11 @@ def _fetch_pending_ledger_movement(ledger_name: str) -> float:
             continue
         if payload.get('delivery_uncertain') is True:
             continue
-
-        description = row['description']
-        if description.startswith("Loan Received:"):
-            if payload.get('ledger_name') == ledger_name:
-                total += float(payload.get('principal_amount') or 0)
-        elif description.startswith("Loan Interest:"):
-            if payload.get('ledger_name') == ledger_name:
-                total += float(payload.get('amount') or 0)
-        elif description.startswith("Payment:") or description.startswith("Bank Stmt:"):
-            # The lender's ledger only ever appears as the debited side for
-            # these two (a repayment reducing what's owed) -- never credited,
-            # since a fresh disbursement always goes through Add a Loan instead.
-            if payload.get('debit_ledger') == ledger_name:
-                total -= float(payload.get('amount') or 0)
+        # The lender's ledger only ever appears as the debited side for
+        # these two (a repayment reducing what's owed) -- never credited,
+        # since a fresh disbursement always goes through Add a Loan instead.
+        if payload.get('debit_ledger') == ledger_name:
+            total -= float(payload.get('amount') or 0)
     return total
 
 def get_ledger_current_balance(ledger_name: str) -> float:
@@ -2268,7 +2294,12 @@ def get_ledger_current_balance(ledger_name: str) -> float:
     (reporting_creditors_service.get_creditor_ledger_movements), just without
     the period-scoping since a loan balance isn't reset each financial year
     the way a P&L-style report resets -- plus whatever's still sitting in the
-    offline queue, not yet confirmed by Tally (see _fetch_pending_ledger_movement)."""
+    offline queue, not yet confirmed by Tally. Loan/interest vouchers are
+    excluded from the confirmed-movement query and counted permanently from
+    the queue instead (see _fetch_loan_movement) to avoid the reporting
+    sync's own lag; a repayment recorded elsewhere (Payment/Bank Statement)
+    is only counted from the queue while still PENDING (see
+    _fetch_pending_repayment_movement)."""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT opening_balance FROM ledgers WHERE name = ?", (ledger_name,))
@@ -2278,12 +2309,16 @@ def get_ledger_current_balance(ledger_name: str) -> float:
         cursor.execute("""
             SELECT COALESCE(SUM(rle.amount), 0) as movement
             FROM reporting_ledger_entries rle
+            JOIN reporting_vouchers rv ON rle.voucher_id = rv.id
             WHERE rle.ledger_name = ?
+              AND rv.voucher_type != 'Receipt'
+              AND NOT (rv.voucher_type = 'Journal' AND rv.narration LIKE 'Interest accrued to%')
         """, (ledger_name,))
         movement = cursor.fetchone()['movement']
 
-    pending = _fetch_pending_ledger_movement(ledger_name)
-    return round(opening_balance + movement + pending, 2)
+    loan_movement = _fetch_loan_movement(ledger_name)
+    pending_repayment = _fetch_pending_repayment_movement(ledger_name)
+    return round(opening_balance + movement + loan_movement + pending_repayment, 2)
 
 def list_loans() -> list:
     """Grouped by lender: each lender's live ledger balance (the single

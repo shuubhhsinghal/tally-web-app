@@ -217,14 +217,11 @@ def test_lender_total_outstanding_reflects_live_ledger_balance():
         mock_post.return_value.status_code = 200
         _create_loan(lender_name="Legacy Lender", principal=100000.0, daily_amount=1200.0, number_of_days=100)
 
-    # No new voucher has synced into reporting_ledger_entries in this test
-    # (that's a separate sync job), so the balance is still just the opening
-    # figure -- confirms it's read from the ledger master, not recomputed
-    # from this app's own loan rows. (The loan's own voucher delivered
-    # successfully here -- status SYNCED, not PENDING -- so it also doesn't
-    # show up via the pending-queue path either; see the dedicated test
-    # below for that case.)
-    assert get_ledger_current_balance("Loan - Legacy Lender") == 500000.0
+    # The loan's own voucher delivered successfully (status SYNCED), but the
+    # *separate* reporting sync hasn't re-pulled it from Tally yet -- counted
+    # anyway, straight from the queue, so there's no window where a
+    # successfully-posted loan is invisible in the total.
+    assert get_ledger_current_balance("Loan - Legacy Lender") == 600000.0
 
 
 def test_lender_total_outstanding_includes_not_yet_synced_loans():
@@ -234,6 +231,30 @@ def test_lender_total_outstanding_includes_not_yet_synced_loans():
     # future sync catches up.
     _create_loan(lender_name="Fresh Lender", principal=100000.0, daily_amount=1200.0, number_of_days=100)
     assert get_ledger_current_balance("Loan - Fresh Lender") == 100000.0
+
+
+@patch('backend.routers.loans.tally_transport.post', new_callable=AsyncMock)
+def test_lender_total_outstanding_does_not_double_count_once_reporting_sync_catches_up(mock_post):
+    # Once the separate reporting sync eventually re-pulls the same Receipt
+    # voucher from Tally into reporting_ledger_entries, the loan's amount
+    # must not be added a second time on top of the queue-based count.
+    mock_post.return_value.text = "<ENVELOPE><BODY><DATA><IMPORTRESULT><CREATED>1</CREATED><ALTERED>0</ALTERED><ERRORS>0</ERRORS></IMPORTRESULT></DATA></BODY></ENVELOPE>"
+    mock_post.return_value.status_code = 200
+    _create_loan(lender_name="Synced Lender", principal=100000.0, daily_amount=1200.0, number_of_days=100)
+
+    with get_db() as conn:
+        conn.execute("""
+            INSERT INTO reporting_vouchers (tally_guid, date, voucher_type, narration)
+            VALUES ('guid-1', '20260922', 'Receipt', 'Loan received from Synced Lender')
+        """)
+        voucher_id = conn.execute("SELECT id FROM reporting_vouchers WHERE tally_guid = 'guid-1'").fetchone()[0]
+        conn.execute(
+            "INSERT INTO reporting_ledger_entries (voucher_id, ledger_name, amount, is_deemed_positive) VALUES (?, ?, ?, ?)",
+            (voucher_id, "Loan - Synced Lender", 100000.0, 0),
+        )
+        conn.commit()
+
+    assert get_ledger_current_balance("Loan - Synced Lender") == 100000.0
 
 
 # --- Timeout / connectivity safety ---
