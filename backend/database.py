@@ -1469,46 +1469,11 @@ def delete_bank_mapping(mapping_id: int):
         return cursor.rowcount > 0
 
 
-# --- Helper Functions for Supplier Column Mappings ---
-def _normalize_supplier_key(name: str) -> str:
-    # lowercase, trim spaces, collapse repeated spaces, remove obvious punctuation
-    name = (name or "").lower()
-    name = re.sub(r'[^a-z0-9\s]', '', name)
-    name = re.sub(r'\s+', ' ', name).strip()
-    return name
-
-def get_supplier_column_mapping(supplier_name: str) -> Optional[dict]:
-    supplier_key = _normalize_supplier_key(supplier_name)
-    if not supplier_key:
-        return None
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT mapping_json FROM supplier_column_mappings WHERE supplier_key = ?", (supplier_key,))
-        row = cursor.fetchone()
-        if row:
-            try:
-                return json.loads(row['mapping_json'])
-            except json.JSONDecodeError:
-                pass
-    return None
-
-def save_supplier_column_mapping(supplier_name: str, mapping: dict):
-    supplier_key = _normalize_supplier_key(supplier_name)
-    if not supplier_key:
-        return
-    now = datetime.now().isoformat()
-    mapping_str = json.dumps(mapping)
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO supplier_column_mappings (supplier_key, supplier_name, mapping_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(supplier_key) DO UPDATE SET 
-                supplier_name=excluded.supplier_name,
-                mapping_json=excluded.mapping_json,
-                updated_at=excluded.updated_at
-        """, (supplier_key, supplier_name, mapping_str, now, now))
-        conn.commit()
+# Note: supplier_column_mappings table (below in the schema) is no longer
+# written to -- it backed the old (now removed) column-mapping-correction
+# flow for the legacy, non-v4 item-wise extraction engine. Left in place
+# rather than dropped, since removing a table is unnecessary schema churn
+# for something this harmless to leave empty.
 
 
 # --- Helper Functions for App Settings ---

@@ -289,23 +289,11 @@ export function ItemWiseMode({ onPostSuccess }) {
   const [filesToCrop, setFilesToCrop] = useState([]);
   const croppedBatchRef = useRef([]);
 
-  const [validationStatus, setValidationStatus] = useState("matched"); // "matched", "needs_mapping", "unverified"
-  const [mappingFailed, setMappingFailed] = useState(false);
-  const [detectedHeaders, setDetectedHeaders] = useState([]);
+  const [validationStatus, setValidationStatus] = useState("matched"); // "matched", "unverified"
   const [totals, setTotals] = useState({ printed: 0, calculated: 0, diff: 0 });
   const [nativePhotoFile, setNativePhotoFile] = useState(null);
   const nativeCameraInputRef = useRef(null);
   const isAndroid = typeof navigator !== 'undefined' && /Android/i.test(navigator.userAgent);
-  const [colMapping, setColMapping] = useState({
-    qty_header: "",
-    rate_header: "",
-    rate_includes_gst: false,
-    discount_header: "",
-    discount_treatment: "ignore",
-    amount_header: "",
-    amount_includes_gst: false,
-    uom_header: ""
-  });
   const [forceManual, setForceManual] = useState(false);
 
   // V4 Additions
@@ -1043,58 +1031,6 @@ export function ItemWiseMode({ onPostSuccess }) {
     }
   };
 
-  const handleApplyMapping = async () => {
-    setIsExtracting(true);
-    const fd = new FormData();
-    stagedFiles.forEach(sf => {
-      fd.append("files", sf.file);
-    });
-
-    const payload = { ...colMapping };
-    if (!payload.discount_header) {
-      payload.discount_treatment = "ignore";
-    }
-
-    fd.append("column_mapping", JSON.stringify(payload));
-    try {
-      const res = await fetch("/api/extract-proxy", { method: "POST", body: fd });
-      if (!res.ok) {
-        const errorData = await res.json();
-        const errorMessage = Array.isArray(errorData.detail)
-          ? JSON.stringify(errorData.detail)
-          : errorData.detail;
-        throw new Error(errorMessage || "Extraction failed");
-      }
-      const data = await res.json();
-
-      setInvoice({
-        supplier: data.supplier,
-        invoice_number: data.invoice_number,
-        date: data.date,
-        cost_center: "",
-        cgst: data.cgst,
-        sgst: data.sgst,
-        igst: data.igst,
-        rounding_off: data.rounding_off,
-        gst_rate: data.gst_rate !== undefined ? data.gst_rate : 0,
-        tax_type: data.tax_type || "local"
-      });
-      setItems(data.items);
-      setValidationStatus(data.validation_status || "matched");
-      setMappingFailed(data.mapping_attempt_failed || false);
-      setDetectedHeaders(data.detected_headers || []);
-      setTotals({
-        printed: data.printed_grand_total || 0,
-        calculated: data.calculated_grand_total || 0,
-        diff: data.total_difference || 0
-      });
-    } catch (error) {
-      showToast(error.message, 'error');
-    } finally {
-      setIsExtracting(false);
-    }
-  };
-
   const initializeManualDraft = () => {
     const today = new Date();
     const yyyy = today.getFullYear();
@@ -1472,80 +1408,6 @@ export function ItemWiseMode({ onPostSuccess }) {
         )}
       </Card>
 
-      {validationStatus === "needs_mapping" && !forceManual ? (
-        <Card className="flex flex-col gap-4 border-amber-200 bg-amber-50 dark:bg-amber-900/10">
-          <div className="flex items-center gap-2 text-amber-800 dark:text-amber-200">
-            <AlertCircle className="w-5 h-5" />
-            <h3 className="font-bold text-lg">Invoice total doesn&apos;t match</h3>
-          </div>
-
-          <div className="grid grid-cols-3 gap-2 text-sm bg-white dark:bg-gray-800 p-3 rounded-lg border border-amber-100 dark:border-gray-700">
-            <div><span className="text-gray-500">Printed:</span> <span className="font-bold">₹{totals.printed.toFixed(2)}</span></div>
-            <div><span className="text-gray-500">Extracted:</span> <span className="font-bold">₹{totals.calculated.toFixed(2)}</span></div>
-            <div><span className="text-gray-500">Difference:</span> <span className="font-bold text-red-500">₹{totals.diff.toFixed(2)}</span></div>
-          </div>
-
-          {mappingFailed && (
-            <p className="text-sm text-red-600 font-medium bg-red-50 dark:bg-red-900/20 p-2 rounded">
-              The selected columns still don&apos;t match the invoice total. Check the selections or continue and edit the items manually.
-            </p>
-          )}
-
-          <p className="text-sm font-medium text-amber-900 dark:text-amber-100 pt-2">Please identify these invoice columns:</p>
-
-          <div className="grid grid-cols-2 gap-4">
-            <Select label="Quantity" value={colMapping.qty_header} onChange={e => setColMapping({ ...colMapping, qty_header: e.target.value })}>
-              <option value="" disabled>Select column...</option>
-              {detectedHeaders.map(h => <option key={h} value={h}>{h}</option>)}
-            </Select>
-            <Select label="UOM" value={colMapping.uom_header} onChange={e => setColMapping({ ...colMapping, uom_header: e.target.value })}>
-              <option value="">Not present</option>
-              {detectedHeaders.map(h => <option key={h} value={h}>{h}</option>)}
-            </Select>
-
-            <Select label="Rate" value={colMapping.rate_header} onChange={e => setColMapping({ ...colMapping, rate_header: e.target.value })}>
-              <option value="" disabled>Select column...</option>
-              {detectedHeaders.map(h => <option key={h} value={h}>{h}</option>)}
-            </Select>
-            <Select label="Rate is" value={colMapping.rate_includes_gst ? "true" : "false"} onChange={e => setColMapping({ ...colMapping, rate_includes_gst: e.target.value === "true" })}>
-              <option value="false">Excluding GST</option>
-              <option value="true">Including GST</option>
-            </Select>
-
-            <Select label="Discount" value={colMapping.discount_header} onChange={e => setColMapping({ ...colMapping, discount_header: e.target.value })}>
-              <option value="">Not present</option>
-              {detectedHeaders.map(h => <option key={h} value={h}>{h}</option>)}
-            </Select>
-            {colMapping.discount_header && (
-              <Select label="Discount is" value={colMapping.discount_treatment} onChange={e => setColMapping({ ...colMapping, discount_treatment: e.target.value })}>
-                <option value="already_in_rate">Already deducted in Rate</option>
-                <option value="apply_to_rate">Apply Discount to Rate</option>
-                <option value="ignore">Ignore Discount</option>
-              </Select>
-            )}
-
-            <Select label="Amount" value={colMapping.amount_header} onChange={e => setColMapping({ ...colMapping, amount_header: e.target.value })}>
-              <option value="" disabled>Select column...</option>
-              {detectedHeaders.map(h => <option key={h} value={h}>{h}</option>)}
-            </Select>
-            <Select label="Amount is" value={colMapping.amount_includes_gst ? "true" : "false"} onChange={e => setColMapping({ ...colMapping, amount_includes_gst: e.target.value === "true" })}>
-              <option value="false">Excluding GST / Taxable</option>
-              <option value="true">Including GST</option>
-            </Select>
-          </div>
-
-          <div className="flex gap-3 pt-2">
-            <Button onClick={handleApplyMapping} className="flex-1 bg-amber-600 hover:bg-amber-700 text-white" disabled={isExtracting}>
-              {isExtracting ? "Processing..." : mappingFailed ? "Try Mapping Again" : "Use These Columns"}
-            </Button>
-            {mappingFailed && (
-              <Button onClick={() => setForceManual(true)} variant="secondary" className="flex-1">
-                Continue to Manual Review
-              </Button>
-            )}
-          </div>
-        </Card>
-      ) : (
         <>
           <div className="space-y-3">
             <h3 className="text-sm font-bold text-gray-900 dark:text-white uppercase px-1">{items.length} items</h3>
@@ -1937,7 +1799,6 @@ export function ItemWiseMode({ onPostSuccess }) {
             </div>
           )}
         </>
-      )}
 
       {historyPicker.open && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4" onClick={closeHistoryPicker}>

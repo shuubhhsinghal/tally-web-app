@@ -1,9 +1,5 @@
-import os
-import json
-import re
 import datetime
 import traceback
-import tempfile
 from xml.sax.saxutils import escape
 from typing import List, Optional, Dict, Any
 
@@ -12,11 +8,6 @@ from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 import requests
 
-from json_repair import repair_json
-from google import genai
-from google.genai import types
-import sqlite3
-
 from backend.database import (
     get_all_ledgers, get_all_stock_items, get_all_uoms, get_all_aliases,
     save_alias as db_save_alias, queue_operation, record_purchase_rate, get_purchase_rates,
@@ -24,14 +15,13 @@ from backend.database import (
     record_pending_purchase_rate_entry, get_local_purchase_rate_history
 )
 from backend.services.tally_response import parse_tally_response
-from backend.utils.math_reconciler import reconcile_full_invoice
 from backend.services.auth_helpers import enforce_store_access
 
 router = APIRouter()
 
 from backend.connector.transport import tally_transport
 from backend.services.image_normalizer import normalize_uploaded_invoice
-from backend.services.item_mapping import normalize_item_name, map_items_to_tally, map_supplier_to_tally
+from backend.services.item_mapping import normalize_item_name
 
 # Models
 class NewSupplierRequest(BaseModel):
@@ -180,257 +170,6 @@ async def get_return_item_history(item_name: str = Query(...)):
         raise HTTPException(status_code=502, detail="Received a malformed response from Tally while fetching purchase history.")
 
     return {"source": source, "entries": entries}
-
-@router.post("/extract")
-async def extract_invoice(
-    files: List[UploadFile] = File(...),
-    column_mapping: Optional[str] = Form(None)
-):
-    print(f"--- [PURCHASE-ITEM EXTRACT] Received {len(files)} files ---", flush=True)
-    try:
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            raise ValueError("GEMINI_API_KEY not configured")
-
-        client = genai.Client(api_key=api_key)
-
-        file_bytes_list = []
-        for file in files:
-            f_bytes = await file.read()
-            f_bytes = normalize_uploaded_invoice(f_bytes, file.filename, file.content_type)
-            file_bytes_list.append(f_bytes)
-            
-        print(f"--- [PURCHASE-ITEM EXTRACT] Read {len(file_bytes_list)} files. Calling Hybrid V2 Engine... ---", flush=True)
-
-        parsed_mapping = None
-        if column_mapping:
-            try:
-                parsed_mapping = json.loads(column_mapping)
-                print(f"--- [PURCHASE-ITEM EXTRACT] Using user-provided column mapping ---", flush=True)
-            except json.JSONDecodeError:
-                pass
-
-        from backend.services.extraction_engine import process_invoice
-        data = await run_in_threadpool(process_invoice, file_bytes_list, parsed_mapping)
-
-        if not isinstance(data, dict):
-            data = {}
-
-        raw_items = data.get("items", [])
-        if not isinstance(raw_items, list):
-            raw_items = []
-        detected_headers = data.get("detected_headers", [])
-        supplier_name = data.get("supplier_name", "")
-
-        print(f"--- [PURCHASE-ITEM EXTRACT] Vision extraction complete. Got {len(raw_items)} items. ---", flush=True)
-
-        # Step 1.5: Algebraic Math Reconciliation
-        gst_rate = float(data.get("gst_rate") or 0.0)
-        # Build raw printed_* versions of the items for the reconciler
-        raw_printed_items = []
-        for it in raw_items:
-            raw_printed_items.append({
-                "name": it.get("name", ""),
-                "reasoning": it.get("reasoning", ""),
-                "printed_qty": it.get("printed_qty", it.get("qty")),
-                "printed_uom": it.get("printed_uom", it.get("uom")),
-                "printed_rate": it.get("printed_rate", it.get("rate")),
-                "printed_discount_pct": it.get("printed_discount_pct", it.get("discount")),
-                "printed_gst_pct": it.get("printed_gst_pct"),
-                "printed_amount": it.get("printed_amount", it.get("amount")),
-            })
-
-        if gst_rate == 0.0:
-            gst_rates = [float(it.get("printed_gst_pct")) for it in raw_printed_items if it.get("printed_gst_pct") is not None and float(it.get("printed_gst_pct")) > 0]
-            if gst_rates:
-                from collections import Counter
-                most_common = Counter(gst_rates).most_common(1)[0][0]
-                gst_rate = float(most_common)
-                
-        if gst_rate in [2.5, 6.0, 9.0, 14.0, 20.0]:
-            gst_rate *= 2.0
-            
-        data["gst_rate"] = gst_rate
-
-        reconciled_items = reconcile_full_invoice(raw_printed_items, data, column_mapping=parsed_mapping)
-
-        # Validation Logic
-        def calculate_grand_total(reconciled, inv_data):
-            calc_sub = sum(r["amount"] for r in reconciled)
-            tx = inv_data.get("taxes") or {}
-            c = float(tx.get("cgst", inv_data.get("cgst", 0.0)))
-            s = float(tx.get("sgst", inv_data.get("sgst", 0.0)))
-            i = float(tx.get("igst", inv_data.get("igst", 0.0)))
-            r = float(inv_data.get("rounding_off", 0.0))
-            return calc_sub + c + s + i + r
-
-        calc_sub = sum(r["amount"] for r in reconciled_items)
-        if data.get("cgst", 0.0) == 0.0 and data.get("sgst", 0.0) == 0.0 and data.get("igst", 0.0) == 0.0 and gst_rate > 0.0:
-            total_tax = calc_sub * (gst_rate / 100.0)
-            data["cgst"] = round(total_tax / 2, 2)
-            data["sgst"] = round(total_tax / 2, 2)
-
-        calculated_grand_total = calculate_grand_total(reconciled_items, data)
-        printed_grand_total = data.get("printed_grand_total")
-        total_difference = 0.0
-        
-        validation_status = "unverified"
-        mapping_source = None
-        mapping_attempt_failed = False
-
-        if printed_grand_total is not None:
-            printed_grand_total = float(printed_grand_total)
-            total_difference = abs(calculated_grand_total - printed_grand_total)
-            is_match = total_difference <= 1.00
-            
-            if is_match:
-                validation_status = "matched"
-                if parsed_mapping:
-                    mapping_source = "user"
-                    from backend.database import save_supplier_column_mapping
-                    save_supplier_column_mapping(supplier_name, parsed_mapping)
-                else:
-                    mapping_source = "normal"
-            else:
-                if parsed_mapping:
-                    validation_status = "needs_mapping"
-                    mapping_attempt_failed = True
-                else:
-                    # Look up saved mapping
-                    from backend.database import get_supplier_column_mapping
-                    saved_mapping = get_supplier_column_mapping(supplier_name)
-                    
-                    if saved_mapping:
-                        def normalize_header(h):
-                            return re.sub(r'[^a-z0-9]', '', (h or "").lower())
-                            
-                        norm_detected = [normalize_header(h) for h in detected_headers]
-                        
-                        req_headers = []
-                        for key in ["qty_header", "rate_header", "amount_header"]:
-                            if saved_mapping.get(key):
-                                req_headers.append(saved_mapping[key])
-                                
-                        all_headers_exist = True
-                        for h in req_headers:
-                            if normalize_header(h) not in norm_detected:
-                                all_headers_exist = False
-                                break
-                                
-                        if all_headers_exist:
-                            print(f"--- [PURCHASE-ITEM EXTRACT] Retrying with saved mapping... ---", flush=True)
-                            data2 = await run_in_threadpool(process_invoice, file_bytes_list, saved_mapping)
-                            raw_items2 = data2.get("items", [])
-                            
-                            raw_printed_items2 = []
-                            for it in raw_items2:
-                                raw_printed_items2.append({
-                                    "name": it.get("name", ""),
-                                    "reasoning": it.get("reasoning", ""),
-                                    "printed_qty": it.get("printed_qty", it.get("qty")),
-                                    "printed_uom": it.get("printed_uom", it.get("uom")),
-                                    "printed_rate": it.get("printed_rate", it.get("rate")),
-                                    "printed_discount_pct": it.get("printed_discount_pct", it.get("discount")),
-                                    "printed_gst_pct": it.get("printed_gst_pct"),
-                                    "printed_amount": it.get("printed_amount", it.get("amount")),
-                                })
-                            
-                            gst_rate2 = float(data2.get("gst_rate") or 0.0)
-                            if gst_rate2 == 0.0:
-                                gst_rates2 = [float(it.get("printed_gst_pct")) for it in raw_printed_items2 if it.get("printed_gst_pct") is not None and float(it.get("printed_gst_pct")) > 0]
-                                if gst_rates2:
-                                    from collections import Counter
-                                    most_common2 = Counter(gst_rates2).most_common(1)[0][0]
-                                    gst_rate2 = float(most_common2)
-
-                            if gst_rate2 in [2.5, 6.0, 9.0, 14.0, 20.0]:
-                                gst_rate2 *= 2.0
-                                
-                            data2["gst_rate"] = gst_rate2
-
-                            reconciled_items2 = reconcile_full_invoice(raw_printed_items2, data2, column_mapping=saved_mapping)
-                            
-                            calc_sub2 = sum(r["amount"] for r in reconciled_items2)
-                            if data2.get("cgst", 0.0) == 0.0 and data2.get("sgst", 0.0) == 0.0 and data2.get("igst", 0.0) == 0.0 and gst_rate2 > 0.0:
-                                total_tax2 = calc_sub2 * (gst_rate2 / 100.0)
-                                data2["cgst"] = round(total_tax2 / 2, 2)
-                                data2["sgst"] = round(total_tax2 / 2, 2)
-                                
-                            calc_grand2 = calculate_grand_total(reconciled_items2, data2)
-                            diff2 = abs(calc_grand2 - printed_grand_total)
-                            
-                            if diff2 <= 1.00:
-                                validation_status = "matched"
-                                mapping_source = "saved"
-                                data = data2
-                                raw_items = raw_items2
-                                reconciled_items = reconciled_items2
-                                calculated_grand_total = calc_grand2
-                                total_difference = diff2
-                            else:
-                                validation_status = "needs_mapping"
-                        else:
-                            validation_status = "needs_mapping"
-                    else:
-                        validation_status = "needs_mapping"
-
-        # Merge the sanitized math results back into the original item rows,
-        # preserving the extracted name and mapping fields.
-        for idx, item in enumerate(raw_items):
-            if idx < len(reconciled_items):
-                r = reconciled_items[idx]
-                item["qty"] = r["qty"]
-                item["rate"] = r["rate"]
-                item["discount"] = r["discount"]
-                item["amount"] = r["amount"]
-                item["uom"] = r["uom"]
-            else:
-                item["uom"] = str(item.get("printed_uom") or item.get("uom") or "PCS").strip().upper()
-
-        print(f"--- [PURCHASE-ITEM EXTRACT] Math reconciliation complete. "
-              f"{len(reconciled_items)} items reconciled (gst_rate={gst_rate}). ---", flush=True)
-
-        # Step 2: Text Mapping (shared with the V4 engine — backend/services/item_mapping.py)
-        print(f"--- [PURCHASE-ITEM EXTRACT] Mapping {len(raw_items)} items... ---", flush=True)
-        mapped_items = map_items_to_tally(raw_items)
-
-        # Map supplier
-        supplier_name = data.get("supplier_name", "")
-        mapped_supplier = map_supplier_to_tally(supplier_name)
-
-        taxes_dict = data.get("taxes") or {}
-        cgst = float(taxes_dict.get("cgst", data.get("cgst", 0.0)))
-        sgst = float(taxes_dict.get("sgst", data.get("sgst", 0.0)))
-        igst = float(taxes_dict.get("igst", data.get("igst", 0.0)))
-
-        final_response_payload = {
-            "validation_status": validation_status,
-            "mapping_source": mapping_source,
-            "mapping_attempt_failed": mapping_attempt_failed,
-            "detected_headers": detected_headers,
-            "printed_grand_total": printed_grand_total,
-            "calculated_grand_total": calculated_grand_total,
-            "total_difference": total_difference,
-            "supplier": mapped_supplier,
-            "invoice_number": str(data.get("invoice_number", "")),
-            "date": str(data.get("date", datetime.datetime.now().strftime("%Y-%m-%d"))),
-            "cgst": cgst,
-            "sgst": sgst,
-            "igst": igst,
-            "rounding_off": float(data.get("rounding_off", 0.0)),
-            "gst_rate": int(data.get("gst_rate", 0)),
-            "tax_type": str(data.get("tax_type", "local")),
-            "items": mapped_items
-        }
-
-        print(f"--- [PURCHASE-ITEM EXTRACT] Finished successfully. ---", flush=True)
-        return final_response_payload
-
-    except Exception as e:
-        print("\n!!! EXCEPTION IN PURCHASE-ITEM EXTRACTION !!!", flush=True)
-        traceback.print_exc()
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n", flush=True)
-        raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/create-supplier")
 async def create_supplier(payload: NewSupplierRequest):
