@@ -14,6 +14,7 @@ from json_repair import repair_json
 from backend.services.extraction_v3.image_preprocessor import flatten_document
 from backend.services.extraction_v3.table_detector import crop_item_table
 from backend.services.extraction_v4.metadata_extractor import call_metadata_extraction_v4
+from backend.services.extraction_v4.retry import call_with_retry
 from backend.services.reconciliation import safe_float
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -117,14 +118,14 @@ def call_gemini_extraction_v4(images: list[bytes], is_retry: bool = False) -> di
         Do not guess or calculate — only transcribe what is visibly printed.
         """
 
-        response = client.models.generate_content(
+        response = call_with_retry(lambda: client.models.generate_content(
             model='gemini-3.5-flash-lite',
             contents=uploaded_files + [base_prompt],
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=PrintTranscriptionResponseV4,
             ),
-        )
+        ))
 
         for uf in uploaded_files:
             client.files.delete(name=uf.name)

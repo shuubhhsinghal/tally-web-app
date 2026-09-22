@@ -5,6 +5,7 @@ import datetime
 from google import genai
 from google.genai import types
 from json_repair import repair_json
+from backend.services.extraction_v4.retry import call_with_retry
 
 def call_metadata_extraction_v4(images: list[bytes], is_retry: bool = False) -> dict:
     """Extracts metadata (supplier, invoice number, date, taxes, printed totals, row count) from un-cropped images."""
@@ -83,11 +84,11 @@ def call_metadata_extraction_v4(images: list[bytes], is_retry: bool = False) -> 
         if is_retry:
             base_prompt += "\nWARNING: Previous extraction failed. Double check the values."
 
-        response = client.models.generate_content(
+        response = call_with_retry(lambda: client.models.generate_content(
             model='gemini-3.5-flash-lite',
             contents=uploaded_files + [base_prompt],
             config=types.GenerateContentConfig(response_mime_type="application/json"),
-        )
+        ))
         
         for uf in uploaded_files:
             client.files.delete(name=uf.name)
