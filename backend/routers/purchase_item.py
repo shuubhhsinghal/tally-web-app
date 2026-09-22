@@ -3,8 +3,7 @@ import traceback
 from xml.sax.saxutils import escape
 from typing import List, Optional, Dict, Any
 
-from fastapi import APIRouter, File, UploadFile, HTTPException, Form, Query, Request
-from starlette.concurrency import run_in_threadpool
+from fastapi import APIRouter, HTTPException, Form, Query, Request
 from pydantic import BaseModel
 import requests
 
@@ -20,7 +19,6 @@ from backend.services.auth_helpers import enforce_store_access
 router = APIRouter()
 
 from backend.connector.transport import tally_transport
-from backend.services.image_normalizer import normalize_uploaded_invoice
 from backend.services.item_mapping import normalize_item_name
 
 # Models
@@ -337,16 +335,6 @@ async def save_alias_endpoint(payload: SaveAliasRequest):
     except Exception as e:
         print(f"Unexpected error: {e}")
         raise HTTPException(status_code=500, detail="Something went wrong. Please try again.")
-
-@router.post("/detect-corners")
-async def detect_corners_endpoint(file: UploadFile = File(...)):
-    """Best-effort starting point for the manual crop UI -- never a hard
-    dependency, so this always returns 200 even when detection fails."""
-    from backend.services.corner_detection import detect_document_corners
-    file_bytes = await file.read()
-    file_bytes = normalize_uploaded_invoice(file_bytes, file.filename, file.content_type)
-    corners = await run_in_threadpool(detect_document_corners, file_bytes)
-    return {"corners": corners}
 
 @router.post("/post")
 async def post_purchase_item(payload: PurchaseItemPostRequest, request: Request):

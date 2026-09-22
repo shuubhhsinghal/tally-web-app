@@ -27,50 +27,6 @@ export function CameraCapture({ onCapture, onClose, initialPhotoFile, onRetake }
   ]);
 
   const [activePointIdx, setActivePointIdx] = useState(null);
-  const hasUserAdjustedRef = useRef(false);
-  const [hasUserAdjusted, setHasUserAdjusted] = useState(false);
-  const [isDetectingCorners, setIsDetectingCorners] = useState(false);
-
-  // Ask Gemini for a starting guess at the document's corners as soon as a
-  // photo is ready to crop -- purely a convenience: if it fails, times out,
-  // or the user has already started dragging a handle, the default box
-  // (or whatever the user has adjusted) is left alone. While this is in
-  // flight, "Use Photo" is briefly disabled so a rushed tap can't submit the
-  // generic default box before the real edges have a chance to load.
-  useEffect(() => {
-    if (mode !== "crop" || !photoBlob) return;
-    hasUserAdjustedRef.current = false;
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setHasUserAdjusted(false);
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setIsDetectingCorners(true);
-    let cancelled = false;
-
-    // Safety timeout: never block the user for more than a couple seconds,
-    // even if detection is slow or fails silently.
-    const timeoutId = setTimeout(() => {
-      if (!cancelled) setIsDetectingCorners(false);
-    }, 2500);
-
-    (async () => {
-      try {
-        const fd = new FormData();
-        fd.append("file", photoBlob, "photo.jpg");
-        const res = await fetch("/api/purchase-item/detect-corners", { method: "POST", body: fd });
-        if (!res.ok || cancelled) return;
-        const data = await res.json();
-        if (!cancelled && data.corners && !hasUserAdjustedRef.current) {
-          setPoints(data.corners);
-        }
-      } catch (e) {
-        // Silent -- detection is a nice-to-have, never blocks the crop screen
-      } finally {
-        if (!cancelled) setIsDetectingCorners(false);
-      }
-    })();
-
-    return () => { cancelled = true; clearTimeout(timeoutId); };
-  }, [photoBlob, mode]);
 
   // Stop all camera tracks
   const stopCamera = () => {
@@ -294,8 +250,6 @@ export function CameraCapture({ onCapture, onClose, initialPhotoFile, onRetake }
 
   const handlePointerDown = (idx, e) => {
     e.preventDefault();
-    hasUserAdjustedRef.current = true;
-    setHasUserAdjusted(true);
     setActivePointIdx(idx);
   };
 
@@ -469,19 +423,9 @@ export function CameraCapture({ onCapture, onClose, initialPhotoFile, onRetake }
             <Button
               className="bg-teal-500 hover:bg-teal-600 text-white h-12 px-6 rounded-full"
               onClick={handleUsePhoto}
-              disabled={isDetectingCorners && !hasUserAdjusted}
             >
-              {isDetectingCorners && !hasUserAdjusted ? (
-                <>
-                  <span className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin mr-2" />
-                  Finding edges...
-                </>
-              ) : (
-                <>
-                  <Check className="w-5 h-5 mr-2" />
-                  Use Photo
-                </>
-              )}
+              <Check className="w-5 h-5 mr-2" />
+              Use Photo
             </Button>
           </>
         )}
