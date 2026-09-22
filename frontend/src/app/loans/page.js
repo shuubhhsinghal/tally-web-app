@@ -7,6 +7,7 @@ import { Select } from '@/components/ui/Select';
 import { SearchableSelect } from '@/components/ui/SearchableSelect';
 import { useUI } from '@/context/UIContext';
 import { useAuth } from '@/context/AuthContext';
+import { fetchWithTimeout } from '@/utils/fetchWithTimeout';
 import { Landmark, Plus, ChevronDown, ChevronUp } from "lucide-react";
 
 function formatRupees(amount) {
@@ -98,7 +99,7 @@ function AddLoanForm({ existingLenderNames, receivedIntoOptions, onCreated }) {
     }
     setCreating(true);
     try {
-      const res = await fetch("/api/loans", {
+      const res = await fetchWithTimeout("/api/loans", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -109,7 +110,7 @@ function AddLoanForm({ existingLenderNames, receivedIntoOptions, onCreated }) {
           start_date: form.start_date,
           received_into_ledger: form.received_into_ledger,
         }),
-      });
+      }, 20000);
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "Failed to add loan");
       showToast(data.message || "Loan added");
@@ -182,7 +183,7 @@ export default function LoansPage() {
   const [loading, setLoading] = useState(true);
 
   const load = () => {
-    fetch("/api/loans")
+    fetchWithTimeout("/api/loans")
       .then(res => res.json())
       .then(data => { setLenders(data.lenders || []); setTodayTotalDue(data.today_total_due || 0); setLoading(false); })
       .catch(() => setLoading(false));
@@ -191,7 +192,7 @@ export default function LoansPage() {
   useEffect(() => {
     if (!user?.is_owner) return;
     load();
-    fetch("/api/payment/metadata")
+    fetchWithTimeout("/api/payment/metadata")
       .then(res => res.json())
       .then(data => setReceivedIntoOptions(data.paid_from || []))
       .catch(() => {});

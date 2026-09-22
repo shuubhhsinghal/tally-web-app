@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation';
 import { Moon, Sun, ArrowLeft, Wifi, WifiOff, RefreshCw, LogOut } from 'lucide-react';
 import { useUI } from '@/context/UIContext';
 import { useAuth } from '@/context/AuthContext';
+import { fetchWithTimeout } from '@/utils/fetchWithTimeout';
 
 export default function TopBar({ title, showBack = false, onBack }) {
   const { theme, setTheme } = useTheme();
@@ -22,7 +23,10 @@ export default function TopBar({ title, showBack = false, onBack }) {
     // Simple mock ping to check Tally sync status based on user instruction
     const checkSync = async () => {
       try {
-        const res = await fetch('/api/sync/status');
+        // Short timeout -- this reruns every 10s anyway (see the interval
+        // below), so there's no point letting one attempt hang longer than
+        // that before showing "offline" and letting the next tick retry.
+        const res = await fetchWithTimeout('/api/sync/status', {}, 8000);
         if (res.ok) {
           const data = await res.json();
           setIsOnline(data.online !== false);
@@ -41,7 +45,10 @@ export default function TopBar({ title, showBack = false, onBack }) {
   const handleManualSync = async () => {
     setIsSyncing(true);
     try {
-      const res = await fetch('/api/sync/sync-queue', { method: 'POST' });
+      // More generous timeout than the status check -- this one actually
+      // does real Tally I/O (posting queued vouchers, pulling reporting
+      // data), which can legitimately take a while.
+      const res = await fetchWithTimeout('/api/sync/sync-queue', { method: 'POST' }, 30000);
       if (res.ok) {
         const data = await res.json();
         const hasIssue = data.status !== 'success' || (data.failed_months && data.failed_months.length > 0);
@@ -50,7 +57,7 @@ export default function TopBar({ title, showBack = false, onBack }) {
         showToast('Failed to trigger manual sync', 'error');
       }
     } catch (e) {
-      showToast('Error triggering sync', 'error');
+      showToast(e.message || 'Error triggering sync', 'error');
     } finally {
       setIsSyncing(false);
     }
