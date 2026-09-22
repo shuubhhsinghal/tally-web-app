@@ -1,10 +1,6 @@
 from pydantic import BaseModel
-from fastapi import APIRouter, HTTPException, UploadFile, File, Request
+from fastapi import APIRouter, HTTPException, Request
 import requests
-import json
-import os
-import datetime
-import traceback
 from xml.sax.saxutils import escape
 
 from backend.database import get_all_ledgers, queue_operation, get_db, update_queue_status, set_delivery_uncertain
@@ -93,79 +89,6 @@ async def create_supplier(payload: NewSupplierRequest):
         raise HTTPException(status_code=500, detail="Something went wrong. Please try again.")
 
     return {"status": "success", "message": f"Supplier '{payload.name}' processed.", "name": payload.name}
-
-@router.post("/extract")
-def extract_invoice(file: UploadFile = File(...)):
-    print(f"--- [EXTRACT] Received file: {file.filename} ({file.content_type}) ---", flush=True)
-    import tempfile
-    from google import genai
-    from google.genai import types
-
-    try:
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            raise ValueError("GEMINI_API_KEY not configured")
-
-        client = genai.Client(api_key=api_key)
-        
-        file_bytes = file.file.read()
-        print(f"--- [EXTRACT] Read {len(file_bytes)} bytes. Calling AI extraction... ---", flush=True)
-        
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
-            tmp.write(file_bytes)
-            tmp_path = tmp.name
-
-        try:
-            uploaded_file = client.files.upload(file=tmp_path)
-            
-            today = datetime.datetime.now().strftime("%d-%m-%Y")
-            year = datetime.datetime.now().year
-            prompt = f"""
-            The current date is {today}. Extract the following details from this purchase invoice.
-            
-            CRITICAL DATE RULES:
-            1. Convert natural language dates ('today', 'yesterday', '1april', '31 jul') to YYYY-MM-DD.
-            2. If the year is missing, assume {year}.
-            3. Return only a JSON object with:
-               - supplier (string)
-               - invoice_number (string)
-               - date (YYYY-MM-DD format)
-               - amount (number)
-            """
-            
-            response = client.models.generate_content(
-                model='gemini-3.5-flash-lite',
-                contents=[uploaded_file, prompt],
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                ),
-            )
-            
-            client.files.delete(name=uploaded_file.name)
-            os.unlink(tmp_path)
-            
-            raw_json = response.text.strip()
-            data = json.loads(raw_json)
-            
-            results = {
-                "supplier": str(data.get("supplier", "Unknown")),
-                "invoice_number": str(data.get("invoice_number", "Unknown")),
-                "date": str(data.get("date", datetime.datetime.now().strftime("%Y-%m-%d"))),
-                "amount": float(data.get("amount", 0.0))
-            }
-            print(f"--- [EXTRACT] Extraction successful: {results} ---", flush=True)
-            return results
-            
-        except Exception as inner_e:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-            raise inner_e
-
-    except Exception as e:
-        print("\n!!! EXCEPTION IN INVOICE EXTRACTION !!!", flush=True)
-        traceback.print_exc()
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n", flush=True)
-        raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/post")
 async def post_purchase(payload: PurchaseRequest, request: Request):
