@@ -4,6 +4,7 @@ import pypdf
 import requests
 from io import BytesIO
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from starlette.concurrency import run_in_threadpool
 from typing import Optional, List, Dict, Any
 from google import genai
 from google.genai import types
@@ -250,7 +251,7 @@ async def create_tally_ledger(payload: dict):
     except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
         from backend.database import queue_master_operation, MasterFailedException
         try:
-            res = queue_master_operation("LEDGER", name, "CREATE_LEDGER", xml_data, payload)
+            res = await run_in_threadpool(queue_master_operation, "LEDGER", name, "CREATE_LEDGER", xml_data, payload)
             if res.get("status") == "exists_confirmed":
                 return {"status": "success", "message": f"Ledger '{name}' already confirmed."}
             elif res.get("status") in ("exists_pending", "exists_pending_concurrent"):

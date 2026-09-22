@@ -9,7 +9,11 @@ from backend.services.tally_reporting_sync import fetch_and_store_vouchers
 
 def setup_db():
     fd, temp_db_path = tempfile.mkstemp()
-    conn = sqlite3.connect(temp_db_path)
+    # check_same_thread=False: fetch_and_store_vouchers now does its DB work
+    # in a threadpool worker (so a real Tally sync's writes don't block the
+    # event loop), so this mock connection is legitimately used from a
+    # different thread than the one that created it.
+    conn = sqlite3.connect(temp_db_path, check_same_thread=False)
     conn.execute("PRAGMA foreign_keys = ON")
     conn.row_factory = sqlite3.Row
     

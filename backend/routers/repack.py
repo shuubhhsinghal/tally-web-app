@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, Request
+from starlette.concurrency import run_in_threadpool
 from backend.services.auth_helpers import enforce_store_access
 from pydantic import BaseModel
 from xml.sax.saxutils import escape
@@ -83,7 +84,7 @@ async def create_repack_product(payload: RepackProductRequest):
         
     if uom_state == "NEW":
         try:
-            res = queue_master_operation("UOM", payload.output_unit, "CREATE_UOM", uom_xml, {"uom": payload.output_unit})
+            res = await run_in_threadpool(queue_master_operation, "UOM", payload.output_unit, "CREATE_UOM", uom_xml, {"uom": payload.output_unit})
             if res.get("status") == "exists_confirmed":
                 uom_state = "CONFIRMED"
             else:
@@ -106,7 +107,7 @@ async def create_repack_product(payload: RepackProductRequest):
         raise HTTPException(status_code=400, detail="Something went wrong. Please try again.")
 
     try:
-        res = queue_master_operation("ITEM", payload.new_product_name, "CREATE_ITEM", item_xml, {"name": payload.new_product_name, "uom": payload.output_unit, "parent": parent_group})
+        res = await run_in_threadpool(queue_master_operation, "ITEM", payload.new_product_name, "CREATE_ITEM", item_xml, {"name": payload.new_product_name, "uom": payload.output_unit, "parent": parent_group})
     except MasterConflictException as e:
         raise HTTPException(status_code=409, detail=str(e))
     except MasterFailedException as e:

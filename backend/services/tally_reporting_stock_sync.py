@@ -3,6 +3,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 import calendar
 import logging
+from starlette.concurrency import run_in_threadpool
 from backend.database import get_db
 from backend.connector.transport import tally_transport
 from backend.services.tally_sync_service import sanitize_tally_xml
@@ -120,9 +121,15 @@ async def async_sync_monthly_stock(start_date: str, end_date: str):
                 
     tasks = [bound_fetch(m) for m in months]
     batch_results = await asyncio.gather(*tasks)
-    
+
+    # Off the event loop: same reasoning as fetch_and_store_vouchers -- a
+    # blocking sqlite3 write loop run inline here would freeze every
+    # concurrently-served request for however long it takes.
+    return await run_in_threadpool(_store_monthly_stock, batch_results)
+
+def _store_monthly_stock(batch_results: list) -> list:
     failed_months = []
-    
+
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("BEGIN IMMEDIATE")
@@ -132,14 +139,14 @@ async def async_sync_monthly_stock(start_date: str, end_date: str):
                 if res['status'] == 'error':
                     failed_months.append(f"{ym_str}: {res['error']}")
                     continue
-                    
+
                 data = res['data']
                 required_ledgers = ["stock mahagun", "stock gulshan", "stock vvip"]
-                
+
                 for ledger_name in required_ledgers:
                     vals = data[ledger_name]
                     cursor.execute("""
-                        INSERT INTO reporting_monthly_stock 
+                        INSERT INTO reporting_monthly_stock
                         (year_month, ledger_name, opening_balance, debit_movement, credit_movement, closing_balance)
                         VALUES (?, ?, ?, ?, ?, ?)
                         ON CONFLICT(year_month, ledger_name) DO UPDATE SET
@@ -149,10 +156,10 @@ async def async_sync_monthly_stock(start_date: str, end_date: str):
                         closing_balance = excluded.closing_balance,
                         synced_at = CURRENT_TIMESTAMP
                     """, (ym_str, ledger_name, vals['opening_balance'], vals['debit_movement'], vals['credit_movement'], vals['closing_balance']))
-            
+
             conn.commit()
         except Exception as e:
             conn.rollback()
             raise e
-            
+
     return failed_months

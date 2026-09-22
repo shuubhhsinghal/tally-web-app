@@ -1,6 +1,7 @@
 from typing import Optional, List
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException, Request
+from starlette.concurrency import run_in_threadpool
 import requests
 import os
 import json
@@ -138,7 +139,7 @@ async def create_payment_ledger(payload: CreateLedgerRequest):
 
     try:
         queue_payload = {"name": payload.name, "parent": payload.parent}
-        result = queue_master_operation("LEDGER", payload.name, "CREATE_LEDGER", xml_data, queue_payload)
+        result = await run_in_threadpool(queue_master_operation, "LEDGER", payload.name, "CREATE_LEDGER", xml_data, queue_payload)
 
         status = result.get("status")
         if status == "exists_confirmed":

@@ -42,15 +42,15 @@ function LenderCard({ lender }) {
   const [expanded, setExpanded] = useState(false);
 
   return (
-    <div className="px-4 py-3">
+    <div className="px-4 py-4">
       <button onClick={() => setExpanded(e => !e)} className="flex items-center justify-between gap-3 w-full text-left">
         <div>
-          <p className="font-bold text-gray-900 dark:text-white">{lender.lender_name}</p>
-          <p className="text-xs text-gray-500">{lender.loans.length} loan{lender.loans.length !== 1 ? 's' : ''}</p>
+          <p className="text-lg font-bold text-gray-900 dark:text-white">{lender.lender_name}</p>
+          <p className="text-sm text-gray-500">{lender.loans.length} loan{lender.loans.length !== 1 ? 's' : ''}</p>
         </div>
         <div className="flex items-center gap-2">
-          <span className="text-sm font-bold text-gray-900 dark:text-white">{formatRupees(lender.total_outstanding)}</span>
-          {expanded ? <ChevronUp className="w-4 h-4 text-gray-400 flex-shrink-0" /> : <ChevronDown className="w-4 h-4 text-gray-400 flex-shrink-0" />}
+          <span className="text-base font-bold text-gray-900 dark:text-white">{formatRupees(lender.total_outstanding)}</span>
+          {expanded ? <ChevronUp className="w-5 h-5 text-gray-400 flex-shrink-0" /> : <ChevronDown className="w-5 h-5 text-gray-400 flex-shrink-0" />}
         </div>
       </button>
       {expanded && (
@@ -64,11 +64,11 @@ function LenderCard({ lender }) {
 
 function LendersSection({ lenders }) {
   return (
-    <Card className="flex flex-col gap-3">
-      <h2 className="text-lg font-bold text-gray-900 dark:text-white flex items-center gap-2">
-        <Landmark className="w-5 h-5 text-teal-600" /> Lenders
+    <Card className="flex flex-col gap-4 !p-5">
+      <h2 className="text-xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
+        <Landmark className="w-6 h-6 text-teal-600" /> Lenders
       </h2>
-      <div className="divide-y divide-gray-100 dark:divide-gray-800 -mx-4">
+      <div className="divide-y divide-gray-100 dark:divide-gray-800 -mx-5">
         {lenders.map(lender => <LenderCard key={lender.lender_name} lender={lender} />)}
       </div>
     </Card>
@@ -178,14 +178,13 @@ function AddLoanForm({ existingLenderNames, receivedIntoOptions, onCreated }) {
 export default function LoansPage() {
   const { user } = useAuth();
   const [lenders, setLenders] = useState([]);
-  const [todayTotalDue, setTodayTotalDue] = useState(0);
   const [receivedIntoOptions, setReceivedIntoOptions] = useState([]);
   const [loading, setLoading] = useState(true);
 
   const load = () => {
     fetchWithTimeout("/api/loans")
       .then(res => res.json())
-      .then(data => { setLenders(data.lenders || []); setTodayTotalDue(data.today_total_due || 0); setLoading(false); })
+      .then(data => { setLenders(data.lenders || []); setLoading(false); })
       .catch(() => setLoading(false));
   };
 
@@ -208,7 +207,6 @@ export default function LoansPage() {
     );
   }
 
-  const totalLoanCount = lenders.reduce((sum, l) => sum + l.loans.length, 0);
   const existingLenderNames = lenders.map(l => l.lender_name);
 
   return (
@@ -219,11 +217,6 @@ export default function LoansPage() {
         </div>
         <div>
           <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Loans</h1>
-          {totalLoanCount > 0 && (
-            <p className="text-sm text-gray-500">
-              {formatRupees(todayTotalDue)}/day across {totalLoanCount} loan{totalLoanCount !== 1 ? 's' : ''}
-            </p>
-          )}
         </div>
       </div>
 

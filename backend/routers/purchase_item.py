@@ -5,6 +5,7 @@ from typing import List, Optional, Dict, Any
 
 from fastapi import APIRouter, HTTPException, Form, Query, Request
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 import requests
 
 from backend.database import (
@@ -236,7 +237,7 @@ async def create_supplier(payload: NewSupplierRequest):
     except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
         from backend.database import queue_master_operation, MasterFailedException
         try:
-            res = queue_master_operation("LEDGER", payload.name, "CREATE_LEDGER", xml_data, {"name": payload.name, "parent": "Sundry Creditors"})
+            res = await run_in_threadpool(queue_master_operation, "LEDGER", payload.name, "CREATE_LEDGER", xml_data, {"name": payload.name, "parent": "Sundry Creditors"})
             if res.get("status") == "exists_confirmed":
                 return {"status": "success", "message": f"Supplier '{payload.name}' already confirmed.", "name": payload.name}
             elif res.get("status") in ("exists_pending", "exists_pending_concurrent"):
@@ -294,7 +295,7 @@ async def create_item(payload: NewItemRequest):
         
     if uom_state == "NEW":
         try:
-            res = queue_master_operation("UOM", payload.uom, "CREATE_UOM", uom_xml, {"uom": payload.uom})
+            res = await run_in_threadpool(queue_master_operation, "UOM", payload.uom, "CREATE_UOM", uom_xml, {"uom": payload.uom})
             if res.get("status") == "exists_confirmed":
                 uom_state = "CONFIRMED"
             else:
@@ -317,7 +318,7 @@ async def create_item(payload: NewItemRequest):
         raise HTTPException(status_code=400, detail="Something went wrong. Please try again.")
 
     try:
-        res = queue_master_operation("ITEM", payload.name, "CREATE_ITEM", item_xml, payload.model_dump())
+        res = await run_in_threadpool(queue_master_operation, "ITEM", payload.name, "CREATE_ITEM", item_xml, payload.model_dump())
         if res.get("status") == "exists_confirmed":
             return {"status": "success", "message": f"Item '{payload.name}' already confirmed.", "name": payload.name, "uom": payload.uom}
         elif res.get("status") in ("exists_pending", "exists_pending_concurrent", "queued"):
@@ -741,7 +742,7 @@ async def post_purchase_item(payload: PurchaseItemPostRequest, request: Request)
         </REQUESTDATA></IMPORTDATA></BODY>
     </ENVELOPE>"""
                     from backend.database import queue_master_operation
-                    queue_master_operation("UOM", raw_name, "CREATE_UOM", uom_xml, {"uom": raw_name})
+                    await run_in_threadpool(queue_master_operation, "UOM", raw_name, "CREATE_UOM", uom_xml, {"uom": raw_name})
                     has_pending = True
                 else:
                     update_queue_status(queue_id, "FAILED", f"Cannot post invoice because {entity_type.lower()} '{raw_name}' is not available in Tally or pending sync.")

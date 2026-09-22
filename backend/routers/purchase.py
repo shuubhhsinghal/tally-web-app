@@ -1,5 +1,6 @@
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException, Request
+from starlette.concurrency import run_in_threadpool
 import requests
 from xml.sax.saxutils import escape
 
@@ -75,7 +76,7 @@ async def create_supplier(payload: NewSupplierRequest):
 
     from backend.database import queue_master_operation, MasterFailedException
     try:
-        res = queue_master_operation("LEDGER", payload.name, "CREATE_LEDGER", xml_data, {"name": payload.name, "parent": "Sundry Creditors"})
+        res = await run_in_threadpool(queue_master_operation, "LEDGER", payload.name, "CREATE_LEDGER", xml_data, {"name": payload.name, "parent": "Sundry Creditors"})
         if res.get("status") == "exists_confirmed":
             return {"status": "success", "message": f"Supplier '{payload.name}' already confirmed.", "name": payload.name}
         elif res.get("status") in ("exists_pending", "exists_pending_concurrent", "queued"):
