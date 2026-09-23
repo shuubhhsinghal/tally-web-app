@@ -648,9 +648,10 @@ export function ItemWiseMode({ onPostSuccess }) {
     if (croppableFiles.length > 0) {
       setFilesToCrop(croppableFiles);
     } else {
-      const combined = [...stagedFiles, ...heicStaged];
-      setStagedFiles(combined);
-      executeExtract(combined);
+      // Stage rather than auto-extract, same as the camera-capture path --
+      // lets the "Add Another Page" / "Done & Process Invoice" prompt show
+      // instead of parsing before the user's had a chance to add more pages.
+      setStagedFiles(prev => [...prev, ...heicStaged]);
     }
   };
 
@@ -662,9 +663,10 @@ export function ItemWiseMode({ onPostSuccess }) {
     setFilesToCrop(remaining);
 
     if (remaining.length === 0) {
-      const combined = [...stagedFiles, ...croppedBatchRef.current];
-      setStagedFiles(combined);
-      executeExtract(combined);
+      // Stage rather than auto-extract, same as the camera-capture path --
+      // lets the "Add Another Page" / "Done & Process Invoice" prompt show
+      // instead of parsing before the user's had a chance to add more pages.
+      setStagedFiles(prev => [...prev, ...croppedBatchRef.current]);
       croppedBatchRef.current = [];
     }
   };
