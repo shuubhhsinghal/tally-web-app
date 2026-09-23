@@ -467,10 +467,11 @@ export default function DaybookReport() {
                                 </tr>
                             ) : data?.vouchers?.length > 0 ? (
                                 data.vouchers.map((v) => (
-                                    <tr 
-                                        key={v.id} 
-                                        onClick={() => setSelectedVoucherId(v.id)}
-                                        className="hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors cursor-pointer"
+                                    <tr
+                                        key={v.id}
+                                        onClick={() => !v.is_pending && setSelectedVoucherId(v.id)}
+                                        title={v.is_pending ? "Not yet confirmed by Tally -- no details to view yet" : undefined}
+                                        className={`transition-colors ${v.is_pending ? "opacity-70 cursor-default" : "hover:bg-blue-50 dark:hover:bg-blue-900/20 cursor-pointer"}`}
                                     >
                                         <td className="p-4 text-sm font-medium text-gray-900 dark:text-gray-100 whitespace-nowrap">
                                             {formatDateWithWeekday(v.date)}
@@ -480,7 +481,14 @@ export default function DaybookReport() {
                                             {v.reference && <div className="text-xs text-gray-500 mt-0.5">Ref: {v.reference}</div>}
                                             {v.cheque_number && <div className="text-xs text-gray-500 mt-0.5">Inst: {v.cheque_number}</div>}
                                         </td>
-                                        <td className="p-4 text-sm font-medium text-blue-600 dark:text-blue-400">{v.voucher_type}</td>
+                                        <td className="p-4 text-sm font-medium text-blue-600 dark:text-blue-400">
+                                            {v.voucher_type}
+                                            {v.is_pending && (
+                                                <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400 align-middle">
+                                                    Pending
+                                                </span>
+                                            )}
+                                        </td>
                                         <td className="p-4 text-sm text-gray-600 dark:text-gray-400">{v.voucher_number || '-'}</td>
                                         <td className="p-4 text-right font-medium text-gray-900 dark:text-gray-100">{formatCurrency(v.debit)}</td>
                                         <td className="p-4 text-right font-medium text-gray-900 dark:text-gray-100">{formatCurrency(v.credit)}</td>

@@ -7,14 +7,31 @@ from backend.services.reporting_purchase_service import get_unsynced_purchases, 
 client = TestClient(app)
 
 
+_SEEDED_VOUCHER_GUID_PREFIX = "guid-V-"
+
+
+def _cleanup_seeded_vouchers(conn):
+    # Only cleans up rows this file's own _seed_confirmed_purchase creates
+    # (matched by its distinctive tally_guid prefix), so it can't clobber
+    # confirmed-voucher data left behind by other test files sharing the same
+    # session-scoped test database.
+    conn.execute(
+        "DELETE FROM reporting_ledger_entries WHERE voucher_id IN (SELECT id FROM reporting_vouchers WHERE tally_guid LIKE ?)",
+        (f"{_SEEDED_VOUCHER_GUID_PREFIX}%",)
+    )
+    conn.execute("DELETE FROM reporting_vouchers WHERE tally_guid LIKE ?", (f"{_SEEDED_VOUCHER_GUID_PREFIX}%",))
+
+
 @pytest.fixture(autouse=True)
 def setup_db():
     with get_db() as conn:
         conn.execute("DELETE FROM offline_queue")
+        _cleanup_seeded_vouchers(conn)
         conn.commit()
     yield
     with get_db() as conn:
         conn.execute("DELETE FROM offline_queue")
+        _cleanup_seeded_vouchers(conn)
         conn.commit()
 
 
@@ -136,3 +153,146 @@ def test_purchases_endpoint_blends_pending_and_returns():
     assert data["summary"]["pending_amount"] == 800.0  # 1000 - 200
     assert data["summary"]["net_purchases"] == 800.0
     assert data["unsynced_purchases"]["pending_count"] == 2
+
+
+# --- get_purchase_bills / get_supplier_purchase_analysis: the summary total
+# already includes pending purchases/returns (tests above), but these
+# drill-down lists didn't -- so "Total Purchases: X" could not reconcile with
+# what the bills/supplier lists actually showed. These tests cover the fix.
+
+from backend.services.reporting_purchase_service import get_purchase_bills, get_supplier_purchase_analysis
+
+
+def _seed_confirmed_purchase(supplier, amount, date, voucher_number="V-1"):
+    with get_db() as conn:
+        conn.execute("INSERT OR IGNORE INTO ledgers (name, parent) VALUES (?, 'Purchase Accounts')", ("Purchases",))
+        cur = conn.execute(
+            "INSERT INTO reporting_vouchers (tally_guid, date, voucher_number, voucher_type, party_ledger_name) VALUES (?, ?, ?, 'Purchase', ?)",
+            (f"guid-{voucher_number}-{date}", date, voucher_number, supplier)
+        )
+        voucher_id = cur.lastrowid
+        conn.execute(
+            "INSERT INTO reporting_ledger_entries (voucher_id, ledger_name, amount, is_deemed_positive) VALUES (?, 'Purchases', ?, 1)",
+            (voucher_id, -amount)
+        )
+        conn.commit()
+
+
+def test_purchase_bills_includes_pending_purchase():
+    _queue_accounting_purchase(1000.0, "20260115")
+    result = get_purchase_bills("20260101", "20260131")
+    assert result["total_count"] == 1
+    assert result["bills"][0]["is_pending"] is True
+    assert result["bills"][0]["net_purchases"] == 1000.0
+
+
+def test_purchase_bills_excludes_failed():
+    _queue_accounting_purchase(1000.0, "20260115", status="FAILED")
+    result = get_purchase_bills("20260101", "20260131")
+    assert result["total_count"] == 0
+
+
+def test_purchase_bills_excludes_delivery_uncertain():
+    qid = _queue_accounting_purchase(1000.0, "20260115")
+    set_delivery_uncertain(qid, True)
+    result = get_purchase_bills("20260101", "20260131")
+    assert result["total_count"] == 0
+
+
+def test_purchase_bills_filtered_by_supplier_name():
+    _queue_accounting_purchase(1000.0, "20260115")  # supplier: "Test Supplier"
+    result_match = get_purchase_bills("20260101", "20260131", supplier_name="Test Supplier")
+    assert result_match["total_count"] == 1
+    result_other = get_purchase_bills("20260101", "20260131", supplier_name="Someone Else")
+    assert result_other["total_count"] == 0
+
+
+def test_purchase_bills_reconciles_with_summary_total():
+    _seed_confirmed_purchase("Confirmed Supplier", 5000.0, "20260110")
+    _queue_accounting_purchase(1000.0, "20260115")
+    _queue_debit_note([{"name": "Item A", "qty": 1, "uom": "PCS", "rate": 200.0, "amount": 200.0}], "20260116")
+
+    summary_resp = client.get("/api/reporting/purchases", params={"start_date": "20260101", "end_date": "20260131"})
+    bills = get_purchase_bills("20260101", "20260131", limit=100)
+
+    bills_sum = round(sum(b["net_purchases"] for b in bills["bills"]), 2)
+    assert bills_sum == summary_resp.json()["summary"]["net_purchases"]
+
+
+def test_supplier_analysis_includes_pending_only_supplier():
+    _queue_accounting_purchase(750.0, "20260115")  # supplier: "Test Supplier", no confirmed voucher exists
+    result = get_supplier_purchase_analysis("20260101", "20260131")
+    names = {s["supplier_name"]: s for s in result["suppliers"]}
+    assert "Test Supplier" in names
+    assert names["Test Supplier"]["net_purchases"] == 750.0
+    assert names["Test Supplier"]["vouchers_count"] == 1
+
+
+def test_supplier_analysis_merges_pending_into_existing_confirmed_supplier():
+    _seed_confirmed_purchase("Test Supplier", 5000.0, "20260110")
+    _queue_accounting_purchase(1000.0, "20260115")  # same supplier: "Test Supplier"
+    result = get_supplier_purchase_analysis("20260101", "20260131")
+    names = {s["supplier_name"]: s for s in result["suppliers"]}
+    assert names["Test Supplier"]["net_purchases"] == 6000.0
+    assert names["Test Supplier"]["vouchers_count"] == 2
+
+
+# --- Stock Transfer's accounting leg: posts a Journal against the "inter
+# store transfer" ledger (Purchase Accounts parent, cost-centre allocated) --
+# receiving store's purchases increase, sending store's decrease. The
+# confirmed side already includes this via plain ledger-group summation
+# (no supplier restriction); these tests cover the matching pending-side fix.
+
+def _queue_stock_transfer(total_amount, tally_date, from_store="Mahagun", to_store="Gulshan", leg="Accounting", status=None):
+    payload = {
+        "item_name": "Item A", "qty": 5.0, "rate": total_amount / 5.0, "total_amount": total_amount,
+        "from_store": from_store, "to_store": to_store, "tally_date": tally_date,
+    }
+    qid = queue_operation("POST_VOUCHER", "<ENVELOPE></ENVELOPE>", payload, f"Stock Transfer: 5.0 pcs of Item A ({leg})")
+    if status:
+        update_queue_status(qid, status)
+    return qid
+
+
+def test_pending_stock_transfer_increases_receiver_decreases_sender():
+    _queue_stock_transfer(2000.0, "20260115", from_store="Mahagun", to_store="Gulshan")
+    result_gulshan = get_pending_purchases_trend("20260101", "20260131", cost_centre="Gulshan")
+    assert result_gulshan[0]["Combined"] == 2000.0
+    result_mahagun = get_pending_purchases_trend("20260101", "20260131", cost_centre="Mahagun")
+    assert result_mahagun[0]["Combined"] == -2000.0
+
+
+def test_pending_stock_transfer_nets_to_zero_combined():
+    _queue_stock_transfer(2000.0, "20260115")
+    result = get_pending_purchases_trend("20260101", "20260131")
+    assert result[0]["Combined"] == 0.0
+
+
+def test_stock_transfer_physical_leg_ignored():
+    _queue_stock_transfer(2000.0, "20260115", leg="Physical")
+    result = get_pending_purchases_trend("20260101", "20260131")
+    assert result == []
+
+
+def test_pending_stock_transfer_excludes_delivery_uncertain():
+    qid = _queue_stock_transfer(2000.0, "20260115")
+    set_delivery_uncertain(qid, True)
+    result = get_pending_purchases_trend("20260101", "20260131")
+    assert result == []
+
+
+def test_stock_transfer_not_in_bills_or_supplier_analysis():
+    # Not a supplier invoice -- must stay out of these supplier-invoice-
+    # specific drill-downs even though it counts toward the summary total.
+    _queue_stock_transfer(2000.0, "20260115", to_store="Gulshan")
+    bills = get_purchase_bills("20260101", "20260131", cost_centre="Gulshan")
+    assert bills["total_count"] == 0
+    suppliers = get_supplier_purchase_analysis("20260101", "20260131", cost_centre="Gulshan")
+    assert suppliers["suppliers"] == []
+
+
+def test_purchases_endpoint_includes_pending_stock_transfer():
+    _queue_stock_transfer(2000.0, "20260115", from_store="Mahagun", to_store="Gulshan")
+    resp = client.get("/api/reporting/purchases", params={"start_date": "20260101", "end_date": "20260131", "cost_centre": "Gulshan"})
+    assert resp.status_code == 200
+    assert resp.json()["summary"]["net_purchases"] == 2000.0

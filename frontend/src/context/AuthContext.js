@@ -18,7 +18,16 @@ export function AuthProvider({ children }) {
     const originalFetch = window.fetch.bind(window);
     window.fetch = (input, init = {}) => {
       const url = typeof input === 'string' ? input : (input && input.url) || '';
-      if (url.startsWith('/api/')) {
+      // Report pages call the backend via an absolute, cross-origin
+      // NEXT_PUBLIC_API_URL in production (e.g. https://tallybot-api...),
+      // not a relative "/api/..." path, so match on pathname instead of
+      // the raw string -- otherwise the token silently never attaches
+      // there and every report call comes back 401.
+      let pathname = url;
+      try {
+        pathname = new URL(url, window.location.origin).pathname;
+      } catch {}
+      if (pathname.startsWith('/api/')) {
         const token = localStorage.getItem(TOKEN_KEY);
         if (token) {
           init = { ...init, headers: { ...(init.headers || {}), Authorization: `Bearer ${token}` } };

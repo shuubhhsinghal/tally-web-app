@@ -707,13 +707,19 @@ export default function PurchasesReport() {
                                         </thead>
                                         <tbody>
                                             {billsData.length > 0 ? billsData.map((bill, idx) => (
-                                                <tr 
-                                                    key={idx} 
-                                                    onClick={() => handleFetchBillDetails(bill.voucher_id)}
-                                                    className="border-b border-slate-700/50 last:border-0 hover:bg-slate-700/40 transition-colors cursor-pointer group"
+                                                <tr
+                                                    key={idx}
+                                                    onClick={() => !bill.is_pending && handleFetchBillDetails(bill.voucher_id)}
+                                                    title={bill.is_pending ? "Not yet confirmed by Tally -- no details to view yet" : undefined}
+                                                    className={`border-b border-slate-700/50 last:border-0 transition-colors group ${bill.is_pending ? "opacity-70 cursor-default" : "hover:bg-slate-700/40 cursor-pointer"}`}
                                                 >
                                                     <td className="py-4 text-slate-300 whitespace-nowrap">
                                                         {formatDateFull(bill.date)}
+                                                        {bill.is_pending && (
+                                                            <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-500/20 text-amber-400 align-middle">
+                                                                Pending
+                                                            </span>
+                                                        )}
                                                     </td>
                                                     <td className="py-4 text-slate-400 font-mono text-xs">
                                                         {bill.voucher_number || '-'}
@@ -763,13 +769,19 @@ export default function PurchasesReport() {
                                         </thead>
                                         <tbody>
                                             {dayBillsData.length > 0 ? dayBillsData.map((bill, idx) => (
-                                                <tr 
-                                                    key={idx} 
-                                                    onClick={() => handleFetchBillDetails(bill.voucher_id)}
-                                                    className="border-b border-slate-700/50 last:border-0 hover:bg-slate-700/40 transition-colors cursor-pointer group"
+                                                <tr
+                                                    key={idx}
+                                                    onClick={() => !bill.is_pending && handleFetchBillDetails(bill.voucher_id)}
+                                                    title={bill.is_pending ? "Not yet confirmed by Tally -- no details to view yet" : undefined}
+                                                    className={`border-b border-slate-700/50 last:border-0 transition-colors group ${bill.is_pending ? "opacity-70 cursor-default" : "hover:bg-slate-700/40 cursor-pointer"}`}
                                                 >
                                                     <td className="py-4 text-slate-300 whitespace-nowrap">
                                                         {bill.supplier_name}
+                                                        {bill.is_pending && (
+                                                            <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-500/20 text-amber-400 align-middle">
+                                                                Pending
+                                                            </span>
+                                                        )}
                                                     </td>
                                                     <td className="py-4 text-slate-400 font-mono text-xs">
                                                         {bill.voucher_number || '-'}
