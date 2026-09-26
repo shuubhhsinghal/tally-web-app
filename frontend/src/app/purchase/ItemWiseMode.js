@@ -1151,7 +1151,7 @@ export function ItemWiseMode({ onPostSuccess }) {
  <div className="space-y-6">
 
  {v4Data && (
- <Card className="flex flex-col gap-6 !border-accent/50 dark:!border-accent/30 bg-gradient-to-br from-teal-50/50 to-white dark:from-teal-900/10 dark:to-gray-900 shadow-sm relative overflow-hidden">
+ <Card className="flex flex-col gap-6 !border-accent/50 dark:!border-accent/30 bg-gradient-to-br from-teal-50/50 to-white dark:from-teal-900/10 dark:to-bg shadow-sm relative overflow-hidden">
  <div className="absolute top-0 right-0 p-4 opacity-10">
  <AlertCircle className="w-24 h-24 text-accent-700" />
  </div>

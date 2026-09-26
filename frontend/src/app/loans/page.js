@@ -18,14 +18,14 @@ function LoanDetailRow({ loan }) {
   return (
     <div className="px-4 py-3 flex flex-col gap-1">
       <div className="flex justify-between text-sm">
-        <span className="font-bold text-gray-900 dark:text-white">{formatRupees(loan.principal_amount)}</span>
-        <span className="text-gray-500">{loan.start_date}</span>
+        <span className="font-bold text-text">{formatRupees(loan.principal_amount)}</span>
+        <span className="text-neutral-600">{loan.start_date}</span>
       </div>
-      <p className="text-xs text-gray-500">
+      <p className="text-xs text-neutral-600">
         {formatRupees(loan.daily_amount)}/day &middot; {loan.number_of_days} days &middot; {formatRupees(loan.total_interest)} interest &middot; received into {loan.received_into_ledger}
       </p>
       {loan.accrued_interest_to_date > 0 && (
-        <p className="text-xs text-gray-500">
+        <p className="text-xs text-neutral-600">
           {formatRupees(loan.accrued_interest_to_date)} interest posted to Tally so far
         </p>
       )}
@@ -45,16 +45,16 @@ function LenderCard({ lender }) {
     <div className="px-4 py-4">
       <button onClick={() => setExpanded(e => !e)} className="flex items-center justify-between gap-3 w-full text-left">
         <div>
-          <p className="text-lg font-bold text-gray-900 dark:text-white">{lender.lender_name}</p>
-          <p className="text-sm text-gray-500">{lender.loans.length} loan{lender.loans.length !== 1 ? 's' : ''}</p>
+          <p className="text-lg font-bold text-text">{lender.lender_name}</p>
+          <p className="text-sm text-neutral-600">{lender.loans.length} loan{lender.loans.length !== 1 ? 's' : ''}</p>
         </div>
         <div className="flex items-center gap-2">
-          <span className="text-base font-bold text-gray-900 dark:text-white">{formatRupees(lender.total_outstanding)}</span>
-          {expanded ? <ChevronUp className="w-5 h-5 text-gray-400 flex-shrink-0" /> : <ChevronDown className="w-5 h-5 text-gray-400 flex-shrink-0" />}
+          <span className="text-base font-bold text-text">{formatRupees(lender.total_outstanding)}</span>
+          {expanded ? <ChevronUp className="w-5 h-5 text-neutral-500 flex-shrink-0" /> : <ChevronDown className="w-5 h-5 text-neutral-500 flex-shrink-0" />}
         </div>
       </button>
       {expanded && (
-        <div className="flex flex-col divide-y divide-gray-100 dark:divide-gray-800 mt-3 -mx-4">
+        <div className="flex flex-col divide-y divide-divider mt-3 -mx-4">
           {lender.loans.map(loan => <LoanDetailRow key={loan.id} loan={loan} />)}
         </div>
       )}
@@ -65,10 +65,10 @@ function LenderCard({ lender }) {
 function LendersSection({ lenders }) {
   return (
     <Card className="flex flex-col gap-4 !p-5">
-      <h2 className="text-xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
+      <h2 className="text-xl font-bold text-text flex items-center gap-2">
         <Landmark className="w-6 h-6 text-teal-600" /> Lenders
       </h2>
-      <div className="divide-y divide-gray-100 dark:divide-gray-800 -mx-5">
+      <div className="divide-y divide-divider -mx-5">
         {lenders.map(lender => <LenderCard key={lender.lender_name} lender={lender} />)}
       </div>
     </Card>
@@ -128,7 +128,7 @@ function AddLoanForm({ existingLenderNames, receivedIntoOptions, onCreated }) {
     return (
       <button
         onClick={() => setExpanded(true)}
-        className="flex items-center gap-2 w-full py-3 px-4 rounded-xl border border-dashed border-gray-300 dark:border-gray-700 text-sm font-bold text-gray-500 dark:text-gray-400 hover:border-teal-400 hover:text-teal-600 dark:hover:text-teal-400 transition-colors"
+        className="flex items-center gap-2 w-full py-3 px-4 rounded-xl border border-dashed border-divider text-sm font-bold text-neutral-600 hover:border-teal-400 hover:text-teal-600 dark:hover:text-teal-400 transition-colors"
       >
         <Plus className="w-4 h-4" /> Add a Loan
       </button>
@@ -138,10 +138,10 @@ function AddLoanForm({ existingLenderNames, receivedIntoOptions, onCreated }) {
   return (
     <Card className="flex flex-col gap-3">
       <div className="flex items-center justify-between">
-        <h2 className="text-lg font-bold text-gray-900 dark:text-white flex items-center gap-2">
+        <h2 className="text-lg font-bold text-text flex items-center gap-2">
           <Plus className="w-5 h-5 text-teal-600" /> Add a Loan
         </h2>
-        <button onClick={() => setExpanded(false)} className="text-xs font-medium text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">
+        <button onClick={() => setExpanded(false)} className="text-xs font-medium text-neutral-500 hover:text-text">
           Cancel
         </button>
       </div>
@@ -159,9 +159,9 @@ function AddLoanForm({ existingLenderNames, receivedIntoOptions, onCreated }) {
         <Input label="Daily installment" type="number" step="0.01" min="0.01" value={form.daily_amount} onChange={e => setForm({ ...form, daily_amount: e.target.value })} placeholder="e.g. 1200" />
         <Input label="Number of days" type="number" step="1" min="1" value={form.number_of_days} onChange={e => setForm({ ...form, number_of_days: e.target.value })} placeholder="e.g. 100" />
         {totalRepaymentAmount > 0 && (
-          <p className="text-xs text-gray-500 -mt-1.5 ml-1">
-            Total repayment: <span className="font-bold text-gray-700 dark:text-gray-300">{formatRupees(totalRepaymentAmount)}</span>
-            {" "}&middot; Interest: <span className="font-bold text-gray-700 dark:text-gray-300">{formatRupees(totalInterest)}</span>
+          <p className="text-xs text-neutral-600 -mt-1.5 ml-1">
+            Total repayment: <span className="font-bold text-neutral-700">{formatRupees(totalRepaymentAmount)}</span>
+            {" "}&middot; Interest: <span className="font-bold text-neutral-700">{formatRupees(totalInterest)}</span>
           </p>
         )}
         <Input label="Date" type="date" value={form.start_date} onChange={e => setForm({ ...form, start_date: e.target.value })} />
@@ -211,19 +211,19 @@ export default function LoansPage() {
 
   return (
     <div className="max-w-2xl mx-auto space-y-6 p-4">
-      <div className="flex items-center gap-3 border-b border-gray-100 dark:border-gray-800 pb-4">
+      <div className="flex items-center gap-3 border-b border-divider pb-4">
         <div className="bg-teal-50 dark:bg-teal-900/30 p-2.5 rounded-xl">
           <Landmark className="w-6 h-6 text-teal-600" />
         </div>
         <div>
-          <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Loans</h1>
+          <h1 className="text-2xl font-bold text-text">Loans</h1>
         </div>
       </div>
 
       {loading ? (
-        <p className="text-sm text-gray-400">Loading...</p>
+        <p className="text-sm text-neutral-500">Loading...</p>
       ) : lenders.length === 0 ? (
-        <p className="text-sm text-gray-400">No loans yet.</p>
+        <p className="text-sm text-neutral-500">No loans yet.</p>
       ) : (
         <LendersSection lenders={lenders} />
       )}

@@ -9,16 +9,16 @@ export default function PrivacyPolicy() {
   const lastUpdated = "September 16, 2026";
 
   return (
-    <div className="min-h-screen bg-gray-50 dark:bg-gray-900 pb-24 text-gray-900 dark:text-gray-100">
+    <div className="min-h-screen bg-bg pb-24 text-text">
       <div className="max-w-3xl mx-auto px-4 py-8 sm:px-6 lg:px-8">
         <header className="mb-10 text-center">
-          <h1 className="text-3xl font-extrabold tracking-tight sm:text-4xl text-gray-900 dark:text-white mb-2">
+          <h1 className="text-3xl font-extrabold tracking-tight sm:text-4xl text-text mb-2">
             Privacy Policy
           </h1>
-          <p className="text-lg text-gray-600 dark:text-gray-400">
+          <p className="text-lg text-neutral-600">
             Mom&apos;s Pride Accounting
           </p>
-          <p className="text-sm text-gray-500 dark:text-gray-500 mt-2">
+          <p className="text-sm text-neutral-500 mt-2">
             Last Updated: {lastUpdated}
           </p>
         </header>

@@ -45,14 +45,14 @@ export default function SetupPage() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900 p-4">
+    <div className="min-h-screen flex items-center justify-center bg-bg p-4">
       <div className="w-full max-w-sm">
         <div className="flex flex-col items-center mb-8">
           <div className="w-14 h-14 rounded-2xl bg-teal-600 flex items-center justify-center mb-4">
             <ShieldCheck className="w-7 h-7 text-white" />
           </div>
-          <h1 className="text-xl font-black text-gray-900 dark:text-white">Create your owner account</h1>
-          <p className="text-sm text-gray-500 dark:text-gray-400 mt-1 text-center">
+          <h1 className="text-xl font-black text-text">Create your owner account</h1>
+          <p className="text-sm text-neutral-600 mt-1 text-center">
             This is the first account on this app. It has access to every store and can add team member logins later.
           </p>
         </div>
