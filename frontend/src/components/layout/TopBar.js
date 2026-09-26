@@ -3,20 +3,31 @@
 import React, { useState, useEffect } from 'react';
 import { useTheme } from 'next-themes';
 import { useRouter } from 'next/navigation';
-import { ArrowLeft, Wifi, WifiOff, Layers, Settings as SettingsIcon, Moon, LogOut, ChevronRight } from 'lucide-react';
+import { ArrowLeft, Wifi, WifiOff, Layers, Settings as SettingsIcon, Moon, LogOut, ChevronRight, RefreshCw } from 'lucide-react';
 import { useUI } from '@/context/UIContext';
 import { useAuth } from '@/context/AuthContext';
 import { useSyncStatus } from '@/context/SyncStatusContext';
 
 // The account sheet (avatar tap) replaces what used to be three separate
-// header icons (manual sync, theme toggle, logout) -- manual sync now lives
-// on the Queue page's own Sync Now action instead, matching the design.
+// header icons (manual sync, theme toggle, logout). Manual sync also still
+// lives on the Queue page's own Sync Now action -- this is a second,
+// quicker entry point to the same shared triggerManualSync, for whenever
+// you just want to force a sync without navigating to Queue first.
 export default function TopBar({ title, kicker, showBack = false, onBack, rightContent }) {
   const { theme, setTheme } = useTheme();
   const router = useRouter();
-  const { showConfirmDialog } = useUI();
+  const { showConfirmDialog, showToast } = useUI();
   const { user, logout } = useAuth();
-  const { isOnline } = useSyncStatus();
+  const { isOnline, isSyncing, triggerManualSync } = useSyncStatus();
+
+  const handleSyncNow = async () => {
+    const result = await triggerManualSync();
+    if (result) {
+      showToast('Synced with Tally');
+    } else if (isOnline !== false) {
+      showToast('Sync failed -- try again', 'error');
+    }
+  };
   const [mounted, setMounted] = useState(false);
   const [acctOpen, setAcctOpen] = useState(false);
 
@@ -90,6 +101,20 @@ export default function TopBar({ title, kicker, showBack = false, onBack, rightC
                 </div>
               </div>
             </div>
+
+            <button
+              onClick={handleSyncNow}
+              disabled={isSyncing || isOnline === false}
+              className="w-full flex items-center gap-3.5 px-5 py-4 border-b border-divider hover:bg-text/4 transition-colors text-left disabled:opacity-60"
+            >
+              <RefreshCw className={`w-5 h-5 text-neutral-700 shrink-0 ${isSyncing ? 'animate-spin' : ''}`} />
+              <div className="flex-1 min-w-0">
+                <div className="text-[15px]">Sync now</div>
+                <div className="text-xs text-neutral-600">
+                  {isOnline === false ? 'Waiting for internet' : isSyncing ? 'Syncing with Tally…' : 'Post queued entries and refresh masters'}
+                </div>
+              </div>
+            </button>
 
             <button
               onClick={() => goTo('/masters')}
