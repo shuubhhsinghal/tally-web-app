@@ -39,3 +39,33 @@ def set_item_matching_ai(payload: ToggleRequest, request: Request):
     from backend.database import set_app_setting
     set_app_setting(ITEM_MATCHING_AI_SETTING_KEY, "true" if payload.enabled else "false")
     return {"enabled": payload.enabled}
+
+EXTRACTION_PROVIDER_SETTING_KEY = "extraction_provider"
+VALID_EXTRACTION_PROVIDERS = ("gemini", "qwen")
+
+def _extraction_provider_default() -> str:
+    provider = os.getenv("EXTRACTION_PROVIDER", "gemini").strip().lower()
+    return provider if provider in VALID_EXTRACTION_PROVIDERS else "gemini"
+
+class ExtractionProviderRequest(BaseModel):
+    provider: str
+
+@router.get("/extraction-provider")
+def get_extraction_provider_setting(request: Request):
+    _require_owner(request)
+    from backend.database import get_app_setting
+    stored = get_app_setting(EXTRACTION_PROVIDER_SETTING_KEY)
+    provider = stored.strip().lower() if stored else _extraction_provider_default()
+    if provider not in VALID_EXTRACTION_PROVIDERS:
+        provider = "gemini"
+    return {"provider": provider}
+
+@router.put("/extraction-provider")
+def set_extraction_provider_setting(payload: ExtractionProviderRequest, request: Request):
+    _require_owner(request)
+    provider = payload.provider.strip().lower()
+    if provider not in VALID_EXTRACTION_PROVIDERS:
+        raise HTTPException(status_code=400, detail=f"provider must be one of {VALID_EXTRACTION_PROVIDERS}")
+    from backend.database import set_app_setting
+    set_app_setting(EXTRACTION_PROVIDER_SETTING_KEY, provider)
+    return {"provider": provider}

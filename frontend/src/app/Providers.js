@@ -10,11 +10,19 @@ import BottomNav from '@/components/layout/BottomNav';
 
 const CHROMELESS_PATHS = ['/login', '/setup'];
 
+// Focused single-task entry forms (reached via the "+" New Entry sheet) --
+// full-screen flows in their own right, not a primary bottom-nav
+// destination, so the tab bar would just sit on top of their own footer
+// button. Unlike CHROMELESS_PATHS, an authed user visiting one of these is
+// completely normal and must NOT be redirected away.
+const NO_BOTTOM_NAV_PATHS = ['/sales', '/purchase', '/payment', '/transfer', '/stock-transfer', '/repack'];
+
 function AuthGate({ children }) {
   const { status } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
   const isChromeless = CHROMELESS_PATHS.includes(pathname);
+  const hideBottomNav = isChromeless || NO_BOTTOM_NAV_PATHS.includes(pathname);
 
   useEffect(() => {
     if (status === 'needs_setup' && pathname !== '/setup') {
@@ -27,7 +35,7 @@ function AuthGate({ children }) {
   }, [status, pathname, isChromeless, router]);
 
   if (status === 'loading') {
-    return <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900" />;
+    return <div className="min-h-screen flex items-center justify-center bg-bg" />;
   }
   // Waiting on a redirect from the effect above -- render nothing rather
   // than flashing the target page's content for one frame.
@@ -38,7 +46,7 @@ function AuthGate({ children }) {
   return (
     <>
       {children}
-      {status === 'authed' && !isChromeless && <BottomNav />}
+      {status === 'authed' && !hideBottomNav && <BottomNav />}
     </>
   );
 }

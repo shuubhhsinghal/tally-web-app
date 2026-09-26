@@ -5,10 +5,11 @@ import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
-import { SearchableSelect } from '@/components/ui/SearchableSelect';
+import { MasterAutocomplete } from '@/components/ui/MasterAutocomplete';
 import { useUI } from '@/context/UIContext';
 import { useAuth } from '@/context/AuthContext';
 import { useRouter } from 'next/navigation';
+import { Package, Store as StoreIcon } from 'lucide-react';
 
 export default function StockTransfer() {
   const router = useRouter();
@@ -78,8 +79,30 @@ export default function StockTransfer() {
 
   const handlePreview = async (e) => {
     e.preventDefault();
+
+    if (!formData.item_name) {
+      showToast("Select an item", "error");
+      return;
+    }
+    if (!formData.qty || parseFloat(formData.qty) <= 0) {
+      showToast("Enter a valid quantity", "error");
+      return;
+    }
+    if (!formData.from_store) {
+      showToast("Select the source store", "error");
+      return;
+    }
+    if (!formData.to_store) {
+      showToast("Select the destination store", "error");
+      return;
+    }
+    if (formData.from_store.trim().toLowerCase() === formData.to_store.trim().toLowerCase()) {
+      showToast("From and To stores must be different", "error");
+      return;
+    }
+
     setLoading(true);
-    
+
     try {
       const response = await fetch("/api/stock-transfer/preview", {
         method: "POST",
@@ -100,7 +123,8 @@ export default function StockTransfer() {
       }
       
       const data = await response.json();
-      setPreview(data);
+      const unit = itemCache[formData.item_name.toLowerCase()]?.unit || '';
+      setPreview({ ...data, unit });
     } catch (error) {
       showToast("Network error while generating preview.", 'error');
     }
@@ -150,34 +174,34 @@ export default function StockTransfer() {
 
   if (preview) {
     return (
-      <div className="min-h-screen bg-gray-50 dark:bg-gray-900 pb-20">
+      <div className="min-h-screen bg-bg pb-20">
         <TopBar title="Confirm" />
         <div className="max-w-md mx-auto p-4 space-y-6 mt-4">
           <Card className="flex flex-col gap-4">
             <div>
-              <p className="text-xs font-semibold text-gray-500 uppercase">Item</p>
-              <p className="text-lg font-bold text-gray-900 dark:text-white">{preview.item_name}</p>
+              <p className="text-xs font-semibold text-text/60 uppercase">Item</p>
+              <p className="text-lg font-bold text-text">{preview.item_name}</p>
             </div>
             <div className="flex gap-4">
               <div className="flex-1">
-                <p className="text-xs font-semibold text-gray-500 uppercase">Quantity</p>
-                <p className="text-base font-medium text-gray-900 dark:text-white">{preview.qty} {preview.unit}</p>
+                <p className="text-xs font-semibold text-text/60 uppercase">Quantity</p>
+                <p className="text-base font-medium text-text">{preview.qty} {preview.unit}</p>
               </div>
               <div className="flex-1">
-                <p className="text-xs font-semibold text-gray-500 uppercase">Rate</p>
-                <p className="text-base font-medium text-gray-900 dark:text-white">₹ {preview.rate}</p>
+                <p className="text-xs font-semibold text-text/60 uppercase">Rate</p>
+                <p className="text-base font-medium text-text">₹ {preview.rate}</p>
               </div>
             </div>
-            <div className="h-px bg-gray-100 dark:bg-gray-800 my-2" />
-            <div className="flex justify-between items-center bg-gray-50 dark:bg-gray-800 p-3 rounded-lg border border-gray-100 dark:border-gray-700">
+            <div className="h-px bg-divider my-2" />
+            <div className="flex justify-between items-center bg-surface p-3 rounded-lg border border-divider">
               <div className="flex flex-col">
-                <p className="text-[10px] font-bold text-gray-400 uppercase">From</p>
-                <p className="text-sm font-bold text-red-600">{preview.from_store}</p>
+                <p className="text-[10px] font-bold text-text/40 uppercase">From</p>
+                <p className="text-sm font-bold text-text">{preview.from_store}</p>
               </div>
-              <svg className="w-5 h-5 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" /></svg>
+              <svg className="w-5 h-5 text-text/30" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" /></svg>
               <div className="flex flex-col items-end">
-                <p className="text-[10px] font-bold text-gray-400 uppercase">To</p>
-                <p className="text-sm font-bold text-green-600">{preview.to_store}</p>
+                <p className="text-[10px] font-bold text-text/40 uppercase">To</p>
+                <p className="text-sm font-bold text-accent-700">{preview.to_store}</p>
               </div>
             </div>
           </Card>
@@ -196,7 +220,7 @@ export default function StockTransfer() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 dark:bg-gray-900 pb-20">
+    <div className="min-h-screen bg-bg pb-20">
       <TopBar title="Move stock" showBack />
       
       <div className="max-w-md mx-auto p-4 mt-4">
@@ -210,14 +234,18 @@ export default function StockTransfer() {
             required
           />
 
-          <SearchableSelect
-            label="Item Name"
-            placeholder="Search or select item..."
-            options={Object.keys(itemCache).map(k => itemCache[k].name)}
-            value={formData.item_name}
-            onChange={(val) => setFormData({ ...formData, item_name: val })}
-            isLoading={itemsLoading}
-          />
+          <div className="space-y-1.5">
+            <label className="block text-sm font-medium text-text/70">Item Name</label>
+            <MasterAutocomplete
+              value={formData.item_name}
+              onChange={(val) => setFormData({ ...formData, item_name: val })}
+              placeholder="Search or select item..."
+              confirmed={Object.keys(itemCache).map(k => itemCache[k].name)}
+              createLabel="item"
+              icon={Package}
+              inputClassName="w-full flex items-center gap-2.5 min-h-[56px] border border-divider rounded-md hover:border-text/45 transition-colors text-left bg-transparent text-text font-body shadow-sm"
+            />
+          </div>
 
           <Input 
             label="Quantity"
@@ -230,31 +258,31 @@ export default function StockTransfer() {
             required
           />
 
-          <Select 
-            label="From Store"
-            name="from_store"
-            value={formData.from_store}
-            onChange={handleChange}
-            required
-          >
-            <option value="">Select source...</option>
-            {meta.stores.map((s) => (
-              <option key={s} value={s}>{s}</option>
-            ))}
-          </Select>
+          <div className="space-y-1.5">
+            <label className="block text-sm font-medium text-text/70">From Store</label>
+            <MasterAutocomplete
+              value={formData.from_store}
+              onChange={(val) => setFormData({ ...formData, from_store: val })}
+              placeholder="Select source..."
+              confirmed={meta.stores}
+              createLabel="store"
+              icon={StoreIcon}
+              inputClassName="w-full flex items-center gap-2.5 min-h-[56px] border border-divider rounded-md hover:border-text/45 transition-colors text-left bg-transparent text-text font-body shadow-sm"
+            />
+          </div>
 
-          <Select 
-            label="To Store"
-            name="to_store"
-            value={formData.to_store}
-            onChange={handleChange}
-            required
-          >
-            <option value="">Select destination...</option>
-            {meta.stores.map((s) => (
-              <option key={s} value={s}>{s}</option>
-            ))}
-          </Select>
+          <div className="space-y-1.5">
+            <label className="block text-sm font-medium text-text/70">To Store</label>
+            <MasterAutocomplete
+              value={formData.to_store}
+              onChange={(val) => setFormData({ ...formData, to_store: val })}
+              placeholder="Select destination..."
+              confirmed={meta.stores}
+              createLabel="store"
+              icon={StoreIcon}
+              inputClassName="w-full flex items-center gap-2.5 min-h-[56px] border border-divider rounded-md hover:border-text/45 transition-colors text-left bg-transparent text-text font-body shadow-sm"
+            />
+          </div>
 
           <Button type="submit" disabled={loading} className="mt-8">
             {loading ? "Calculating..." : "Review Transfer"}

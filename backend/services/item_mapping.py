@@ -16,6 +16,16 @@ from backend.database import get_all_stock_items, get_all_aliases, get_all_ledge
 _FUZZY_CANDIDATES_PER_ITEM = 15
 
 def _item_ai_matching_enabled() -> bool:
+    # This fuzzy-match step always calls Gemini (see below) -- it's never
+    # been made provider-aware like the invoice extraction calls. So when
+    # Qwen is the active extraction provider, force it off regardless of the
+    # Settings toggle: otherwise a "Qwen" run would silently still make a
+    # Gemini call afterward, which defeats a clean side-by-side comparison
+    # between the two providers.
+    from backend.services.extraction_v4.retry import get_extraction_provider
+    if get_extraction_provider() == "qwen":
+        return False
+
     # Worth turning off while your Tally item catalog is still small/empty --
     # the AI step has nothing useful to match against yet (it can only ever
     # return "no match"), so it's pure cost with zero benefit until you've

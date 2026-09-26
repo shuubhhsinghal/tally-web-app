@@ -19,13 +19,71 @@ _SUPPLIER_QUEUE_DESCRIPTION_PATTERNS = (
     "Payment:%",
 )
 
+def _fetch_confirmed_movement_keys(start_date: str, end_date: str) -> tuple[set, set]:
+    """Confirmed-side keys for the same window, used to drop a SYNCED queue
+    row once its own voucher has appeared in reporting_ledger_entries --
+    without this, a queue row (never deleted after it syncs) would double
+    count forever alongside the now-visible confirmed voucher.
+
+    Purchase/Debit Note match on (party_ledger_name, reference) -- REFERENCE
+    is set verbatim from the app's own invoice_number at post time (see
+    purchase.py/purchase_item.py's <REFERENCE> tag, parsed back into
+    reporting_vouchers.reference by tally_reporting_sync.py) and is a
+    reliable exact key. Payment has no such field (payment.py posts no
+    <REFERENCE>), so it matches on (ledger_name, date, amount, narration)
+    instead -- deliberately loose, same spirit as database.py's
+    dedup_pending_against_tally, but a payment sharing supplier+date+amount+
+    narration with another is indistinguishable from a duplicate even by
+    hand, so this is safe in practice.
+
+    Ledger names are lowercased before going into either key. Every posting
+    router's own metadata endpoint shows ledgers .title()-cased for display
+    (see e.g. payment.py/purchase.py's get_*_metadata), and that display
+    string is what actually gets submitted and posted -- but Tally's Day Book
+    export returns the ledger's real stored casing (e.g. a ledger literally
+    named "cash mahagun" still gets posted to fine since Tally matches
+    ledgers case-insensitively, but comes back from Tally as "cash mahagun",
+    not "Cash Mahagun"). An exact-case match here would silently never fire
+    for any such ledger, causing a permanent double-count once its SYNCED
+    queue row's voucher is confirmed -- caught live while testing this."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT party_ledger_name, reference
+            FROM reporting_vouchers
+            WHERE voucher_type IN ('Purchase', 'Debit Note')
+              AND date >= ? AND date <= ?
+              AND reference IS NOT NULL AND reference != ''
+        """, (start_date, end_date))
+        purchase_keys = {((r['party_ledger_name'] or '').strip().lower(), r['reference']) for r in cursor.fetchall()}
+
+        cursor.execute("""
+            SELECT rle.ledger_name, rv.date, rle.amount, COALESCE(rv.narration, '') as narration
+            FROM reporting_ledger_entries rle
+            JOIN reporting_vouchers rv ON rle.voucher_id = rv.id
+            WHERE rv.voucher_type = 'Payment' AND rv.date >= ? AND rv.date <= ?
+        """, (start_date, end_date))
+        payment_keys = {
+            ((r['ledger_name'] or '').strip().lower(), r['date'], round(abs(r['amount']), 2), r['narration'])
+            for r in cursor.fetchall()
+        }
+
+    return purchase_keys, payment_keys
+
 def _fetch_pending_supplier_movements(start_date: str, end_date: str, supplier_name: str = None) -> list[dict]:
     """Synthetic movement rows (same shape as a confirmed reporting_ledger_entries
-    row, plus is_pending=True and no voucher_id) for pending purchase/return/
-    payment queue entries -- optionally scoped to one supplier, otherwise
-    across all of them (for the overview list, to avoid an extra query per
-    supplier). Excludes delivery_uncertain rows for the same double-count
-    safety reason as the Sales/Purchases pending-trend functions."""
+    row, plus is_pending=True and no voucher_id) for pending/synced-but-not-
+    yet-reporting-synced purchase/return/payment queue entries -- optionally
+    scoped to one supplier, otherwise across all of them (for the overview
+    list, to avoid an extra query per supplier). Excludes delivery_uncertain
+    rows for the same double-count safety reason as the Sales/Purchases
+    pending-trend functions.
+
+    Includes SYNCED rows (not just PENDING) so a live-posted movement doesn't
+    vanish from the supplier's balance for the up-to-30-minute gap before the
+    periodic reporting sync re-fetches it from Tally -- see
+    _fetch_confirmed_movement_keys, which is what keeps a SYNCED row from
+    then double-counting once that sync catches up."""
     # Tally-style dates arrive as either YYYYMMDD or YYYY-MM-DD depending on
     # the caller (get_creditor_ledger_movements normalizes its own inputs the
     # same way) -- normalize here too so a plain string comparison below is
@@ -37,10 +95,12 @@ def _fetch_pending_supplier_movements(start_date: str, end_date: str, supplier_n
         cursor = conn.cursor()
         placeholders = " OR ".join(["description LIKE ?"] * len(_SUPPLIER_QUEUE_DESCRIPTION_PATTERNS))
         cursor.execute(f"""
-            SELECT payload, description FROM offline_queue
-            WHERE operation_type = 'POST_VOUCHER' AND status = 'PENDING' AND ({placeholders})
+            SELECT payload, description, status FROM offline_queue
+            WHERE operation_type = 'POST_VOUCHER' AND status IN ('PENDING', 'SYNCED') AND ({placeholders})
         """, list(_SUPPLIER_QUEUE_DESCRIPTION_PATTERNS))
         rows = cursor.fetchall()
+
+    purchase_keys, payment_keys = _fetch_confirmed_movement_keys(start_date, end_date)
 
     movements = []
     for row in rows:
@@ -87,6 +147,16 @@ def _fetch_pending_supplier_movements(start_date: str, end_date: str, supplier_n
             continue
         if supplier_name and ledger != supplier_name:
             continue
+
+        if row['status'] == 'SYNCED':
+            ledger_key = ledger.strip().lower()
+            if voucher_type in ('Purchase', 'Debit Note'):
+                if (ledger_key, payload.get('invoice_number')) in purchase_keys:
+                    continue
+            elif voucher_type == 'Payment':
+                key = (ledger_key, date, round(abs(amount), 2), payload.get('narration') or '')
+                if key in payment_keys:
+                    continue
 
         movements.append({
             "date": date,

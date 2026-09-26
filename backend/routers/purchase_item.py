@@ -342,6 +342,171 @@ async def save_alias_endpoint(payload: SaveAliasRequest):
         print(f"Unexpected error: {e}")
         raise HTTPException(status_code=500, detail="Something went wrong. Please try again.")
 
+def _offline_message(adjustment_queue_id) -> str:
+    """The invoice is always safely queued by this point (queue-first
+    architecture), regardless of which network exception got us here -- this
+    just decides what to tell the user, including whether their return (if
+    any) was also queued alongside it. Without mentioning it, a return would
+    silently queue with no confirmation, only discoverable later in the
+    Queue list."""
+    if adjustment_queue_id:
+        return "Tally is offline. Invoice and return both saved to queue and will push automatically."
+    return "Tally is offline. Invoice saved to queue and will push automatically."
+
+def _parse_tally_date(raw_date: str) -> str:
+    """Normalizes a DD/MM/YYYY, YYYY-MM-DD, or already-compact date string to
+    Tally's YYYYMMDD format. Shared by every entry point that accepts a date
+    from the frontend's <input type=date> (YYYY-MM-DD) or an older DD/MM/YYYY
+    field, so both formats keep working wherever this is called."""
+    if '/' in raw_date:
+        parts = raw_date.split('/')
+        if len(parts) == 3:
+            # Assume DD/MM/YYYY
+            return f"{parts[2]}{parts[1].zfill(2)}{parts[0].zfill(2)}"
+        return raw_date.replace('/', '')
+    elif '-' in raw_date:
+        parts = raw_date.split('-')
+        if len(parts) == 3 and len(parts[0]) == 4:
+            # Assume YYYY-MM-DD
+            return f"{parts[0]}{parts[1].zfill(2)}{parts[2].zfill(2)}"
+        return raw_date.replace('-', '')
+    return raw_date
+
+def build_debit_note_xml(supplier_raw: str, inv_no_raw: str, tally_date: str, adjustment: Optional[PurchaseAdjustment]):
+    """Builds the VCHTYPE="Debit Note" XML for a Supplier Adjustment/Return
+    against a specific existing invoice (tied via BILLALLOCATIONS "Agst Ref").
+    Returns (xml, return_total), or (None, 0.0) if there's nothing to return.
+    Raises HTTPException on validation failure (bad qty, unmapped store, no
+    resolvable rate) -- callers must call this BEFORE queuing anything, so a
+    validation failure here never leaves an orphaned/duplicate queue entry
+    behind (see the "Purchase Return (Debit Note)" queue-pairing below).
+    Shared by the item-wise Purchase post (an adjustment against the invoice
+    being created in the same request) and the standalone Purchase Return
+    endpoint (against a past invoice, with no new invoice alongside it)."""
+    if not adjustment or not adjustment.items:
+        return None, 0.0
+
+    from backend.database import get_purchase_rate, get_store_mapping
+
+    supplier = escape(supplier_raw)
+    inv_no = escape(inv_no_raw)
+
+    for ritem in adjustment.items:
+        if ritem.qty <= 0 or not ritem.name.strip():
+            raise HTTPException(status_code=400, detail="Return items must have a name and a quantity greater than zero.")
+
+    adj_store_mapping = get_store_mapping(adjustment.store)
+    if not adj_store_mapping or not adj_store_mapping.get('godown_name'):
+        raise HTTPException(status_code=400, detail=f"Return store '{adjustment.store}' does not have a mapped Cost Centre or Godown. Please configure it.")
+    adj_cc = escape(adj_store_mapping['cost_center_name'])
+    adj_godown = escape(adj_store_mapping['godown_name'])
+
+    adj_guid = f"PRJ-{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
+
+    return_inventory_xml = ""
+    return_subtotal = 0.0
+    for ritem in adjustment.items:
+        # Trust a rate the client already resolved -- either the auto-filled
+        # latest rate from /return-item-rate, or one explicitly picked from
+        # the 2-year purchase history picker (which may deliberately NOT be
+        # the latest rate). Only re-resolve server-side when the client
+        # genuinely didn't supply one (e.g. an old draft).
+        resolved_rate = ritem.rate if ritem.rate and ritem.rate > 0 else get_purchase_rate(ritem.name)
+        if resolved_rate <= 0:
+            raise HTTPException(status_code=400, detail=f"Could not resolve a purchase rate for return item '{ritem.name}'. Refresh masters or record a purchase for it first.")
+
+        r_name = escape(ritem.name)
+        r_unit = escape((ritem.uom or "PCS").replace('.', '').strip() or "PCS")
+        r_qty = ritem.qty
+        r_amount = round(r_qty * resolved_rate, 2)
+        return_subtotal += r_amount
+
+        return_inventory_xml += f"""
+        <INVENTORYENTRIES.LIST>
+            <STOCKITEMNAME>{r_name}</STOCKITEMNAME>
+            <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+            <RATE>{resolved_rate}/{r_unit}</RATE>
+            <DISCOUNT>0</DISCOUNT>
+            <AMOUNT>{r_amount:.2f}</AMOUNT>
+            <ACTUALQTY>-{r_qty} {r_unit}</ACTUALQTY>
+            <BILLEDQTY>-{r_qty} {r_unit}</BILLEDQTY>
+            <BATCHALLOCATIONS.LIST>
+                <GODOWNNAME>{adj_godown}</GODOWNNAME>
+                <BATCHNAME>Primary Batch</BATCHNAME>
+                <AMOUNT>{r_amount:.2f}</AMOUNT>
+                <ACTUALQTY>-{r_qty} {r_unit}</ACTUALQTY>
+                <BILLEDQTY>-{r_qty} {r_unit}</BILLEDQTY>
+            </BATCHALLOCATIONS.LIST>
+            <ACCOUNTINGALLOCATIONS.LIST>
+                <LEDGERNAME>Purchase Return</LEDGERNAME>
+                <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+                <AMOUNT>{r_amount:.2f}</AMOUNT>
+                <CATEGORYALLOCATIONS.LIST>
+                    <CATEGORY>Primary Cost Category</CATEGORY>
+                    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+                    <COSTCENTREALLOCATIONS.LIST>
+                        <NAME>{adj_cc}</NAME>
+                        <AMOUNT>{r_amount:.2f}</AMOUNT>
+                    </COSTCENTREALLOCATIONS.LIST>
+                </CATEGORYALLOCATIONS.LIST>
+            </ACCOUNTINGALLOCATIONS.LIST>
+        </INVENTORYENTRIES.LIST>"""
+
+    return_total = round(return_subtotal, 2)
+
+    narration_parts = [p for p in [adjustment.reason, adjustment.notes] if p and p.strip()]
+    narration_xml = f"<NARRATION>{escape(' -- '.join(narration_parts))}</NARRATION>" if narration_parts else ""
+
+    debit_note_xml = f"""<ENVELOPE>
+    <HEADER>
+        <TALLYREQUEST>Import Data</TALLYREQUEST>
+    </HEADER>
+    <BODY>
+        <IMPORTDATA>
+            <REQUESTDESC>
+                <REPORTNAME>All Masters</REPORTNAME>
+                <STATICVARIABLES>
+                    <SVCURRENTCOMPANY>##SVCURRENTCOMPANY</SVCURRENTCOMPANY>
+                </STATICVARIABLES>
+            </REQUESTDESC>
+            <REQUESTDATA>
+                <TALLYMESSAGE xmlns:UDF="TallyUDF">
+                    <LEDGER ACTION="Alter" NAME="Purchase Return">
+                        <NAME.LIST><NAME>Purchase Return</NAME></NAME.LIST>
+                        <PARENT>Purchase Accounts</PARENT>
+                    </LEDGER>
+                </TALLYMESSAGE>
+                <TALLYMESSAGE xmlns:UDF="TallyUDF">
+                    <VOUCHER VCHTYPE="Debit Note" ACTION="Create">
+                        <DATE>{tally_date}</DATE>
+                        <GUID>{adj_guid}</GUID>
+                        <VOUCHERTYPENAME>Debit Note</VOUCHERTYPENAME>
+                        <REFERENCE>{inv_no}</REFERENCE>
+                        <PARTYLEDGERNAME>{supplier}</PARTYLEDGERNAME>
+                        <PARTYNAME>{supplier}</PARTYNAME>
+                        <PERSISTEDVIEW>Invoice Voucher View</PERSISTEDVIEW>
+                        <ISINVOICE>Yes</ISINVOICE>
+                        {narration_xml}
+                        {return_inventory_xml}
+                        <LEDGERENTRIES.LIST>
+                            <LEDGERNAME>{supplier}</LEDGERNAME>
+                            <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+                            <AMOUNT>-{return_total:.2f}</AMOUNT>
+                            <BILLALLOCATIONS.LIST>
+                                <NAME>{inv_no}</NAME>
+                                <BILLTYPE>Agst Ref</BILLTYPE>
+                                <AMOUNT>-{return_total:.2f}</AMOUNT>
+                            </BILLALLOCATIONS.LIST>
+                        </LEDGERENTRIES.LIST>
+                    </VOUCHER>
+                </TALLYMESSAGE>
+            </REQUESTDATA>
+        </IMPORTDATA>
+    </BODY>
+</ENVELOPE>"""
+
+    return debit_note_xml, return_total
+
 @router.post("/post")
 async def post_purchase_item(payload: PurchaseItemPostRequest, request: Request):
     print(f"--- [PURCHASE-ITEM POST] Received payload ---", flush=True)
@@ -353,24 +518,7 @@ async def post_purchase_item(payload: PurchaseItemPostRequest, request: Request)
     supplier = escape(payload.supplier)
     inv_no = escape(payload.invoice_number)
     
-    # Robustly parse tally_date to YYYYMMDD
-    raw_date = payload.tally_date
-    if '/' in raw_date:
-        parts = raw_date.split('/')
-        if len(parts) == 3:
-            # Assume DD/MM/YYYY
-            tally_date = f"{parts[2]}{parts[1].zfill(2)}{parts[0].zfill(2)}"
-        else:
-            tally_date = raw_date.replace('/', '')
-    elif '-' in raw_date:
-        parts = raw_date.split('-')
-        if len(parts) == 3 and len(parts[0]) == 4:
-            # Assume YYYY-MM-DD
-            tally_date = f"{parts[0]}{parts[1].zfill(2)}{parts[2].zfill(2)}"
-        else:
-            tally_date = raw_date.replace('-', '')
-    else:
-        tally_date = raw_date
+    tally_date = _parse_tally_date(payload.tally_date)
 
     # Reformat YYYYMMDD -> YYYY-MM-DD to match the format tally_sync_worker.py
     # writes into stock_items.last_purchase_date, so get_purchase_rate's plain
@@ -523,13 +671,20 @@ async def post_purchase_item(payload: PurchaseItemPostRequest, request: Request)
                     </LEDGER>
                 </TALLYMESSAGE>"""
     if abs(payload.rounding_off) >= 0.01:
+        # Deliberately NOT setting ROUNDINGMETHOD/ROUNDLIMIT here -- that
+        # configures this ledger as a Tally auto-rounding ledger (meant for
+        # interactive voucher entry, where Tally computes its own rounding
+        # amount to hit the nearest limit). We already compute the exact
+        # signed amount ourselves above and post it explicitly, so an
+        # auto-rounding ledger can recompute/reinterpret that sign on
+        # Tally's own terms instead of taking our AMOUNT/ISDEEMEDPOSITIVE as
+        # given -- the likely cause of a negative rounding off occasionally
+        # posting as positive.
         master_xml += """
                 <TALLYMESSAGE xmlns:UDF="TallyUDF">
                     <LEDGER ACTION="Alter" NAME="Rounding Off">
                         <NAME.LIST><NAME>Rounding Off</NAME></NAME.LIST>
                         <PARENT>Indirect Expenses</PARENT>
-                        <ROUNDINGMETHOD>Normal Rounding</ROUNDINGMETHOD>
-                        <ROUNDLIMIT>1</ROUNDLIMIT>
                     </LEDGER>
                 </TALLYMESSAGE>"""
 
@@ -573,124 +728,8 @@ async def post_purchase_item(payload: PurchaseItemPostRequest, request: Request)
     # Build the Adjustment (Item-wise Purchase Return via Debit Note) XML, if present,
     # BEFORE queuing anything -- so a validation failure here (bad qty, unmapped store,
     # no known rate) never leaves an orphaned/duplicate main-invoice queue entry behind.
-    debit_note_xml = None
-    if payload.adjustment and payload.adjustment.items:
-        adjustment = payload.adjustment
-        from backend.database import get_purchase_rate
-
-        for ritem in adjustment.items:
-            if ritem.qty <= 0 or not ritem.name.strip():
-                raise HTTPException(status_code=400, detail="Return items must have a name and a quantity greater than zero.")
-
-        adj_store_mapping = get_store_mapping(adjustment.store)
-        if not adj_store_mapping or not adj_store_mapping.get('godown_name'):
-            raise HTTPException(status_code=400, detail=f"Return store '{adjustment.store}' does not have a mapped Cost Centre or Godown. Please configure it.")
-        adj_cc = escape(adj_store_mapping['cost_center_name'])
-        adj_godown = escape(adj_store_mapping['godown_name'])
-
-        adj_guid = f"PRJ-{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
-
-        return_inventory_xml = ""
-        return_subtotal = 0.0
-        for ritem in adjustment.items:
-            # Trust a rate the client already resolved -- either the auto-filled
-            # latest rate from /return-item-rate, or one explicitly picked from
-            # the 2-year purchase history picker (which may deliberately NOT be
-            # the latest rate). Only re-resolve server-side when the client
-            # genuinely didn't supply one (e.g. an old draft).
-            resolved_rate = ritem.rate if ritem.rate and ritem.rate > 0 else get_purchase_rate(ritem.name)
-            if resolved_rate <= 0:
-                raise HTTPException(status_code=400, detail=f"Could not resolve a purchase rate for return item '{ritem.name}'. Refresh masters or record a purchase for it first.")
-
-            r_name = escape(ritem.name)
-            r_unit = escape((ritem.uom or "PCS").replace('.', '').strip() or "PCS")
-            r_qty = ritem.qty
-            r_amount = round(r_qty * resolved_rate, 2)
-            return_subtotal += r_amount
-
-            return_inventory_xml += f"""
-        <INVENTORYENTRIES.LIST>
-            <STOCKITEMNAME>{r_name}</STOCKITEMNAME>
-            <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-            <RATE>{resolved_rate}/{r_unit}</RATE>
-            <DISCOUNT>0</DISCOUNT>
-            <AMOUNT>{r_amount:.2f}</AMOUNT>
-            <ACTUALQTY>-{r_qty} {r_unit}</ACTUALQTY>
-            <BILLEDQTY>-{r_qty} {r_unit}</BILLEDQTY>
-            <BATCHALLOCATIONS.LIST>
-                <GODOWNNAME>{adj_godown}</GODOWNNAME>
-                <BATCHNAME>Primary Batch</BATCHNAME>
-                <AMOUNT>{r_amount:.2f}</AMOUNT>
-                <ACTUALQTY>-{r_qty} {r_unit}</ACTUALQTY>
-                <BILLEDQTY>-{r_qty} {r_unit}</BILLEDQTY>
-            </BATCHALLOCATIONS.LIST>
-            <ACCOUNTINGALLOCATIONS.LIST>
-                <LEDGERNAME>Purchase Return</LEDGERNAME>
-                <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-                <AMOUNT>{r_amount:.2f}</AMOUNT>
-                <CATEGORYALLOCATIONS.LIST>
-                    <CATEGORY>Primary Cost Category</CATEGORY>
-                    <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-                    <COSTCENTREALLOCATIONS.LIST>
-                        <NAME>{adj_cc}</NAME>
-                        <AMOUNT>{r_amount:.2f}</AMOUNT>
-                    </COSTCENTREALLOCATIONS.LIST>
-                </CATEGORYALLOCATIONS.LIST>
-            </ACCOUNTINGALLOCATIONS.LIST>
-        </INVENTORYENTRIES.LIST>"""
-
-        return_total = round(return_subtotal, 2)
-
-        narration_parts = [p for p in [adjustment.reason, adjustment.notes] if p and p.strip()]
-        narration_xml = f"<NARRATION>{escape(' -- '.join(narration_parts))}</NARRATION>" if narration_parts else ""
-
-        debit_note_xml = f"""<ENVELOPE>
-    <HEADER>
-        <TALLYREQUEST>Import Data</TALLYREQUEST>
-    </HEADER>
-    <BODY>
-        <IMPORTDATA>
-            <REQUESTDESC>
-                <REPORTNAME>All Masters</REPORTNAME>
-                <STATICVARIABLES>
-                    <SVCURRENTCOMPANY>##SVCURRENTCOMPANY</SVCURRENTCOMPANY>
-                </STATICVARIABLES>
-            </REQUESTDESC>
-            <REQUESTDATA>
-                <TALLYMESSAGE xmlns:UDF="TallyUDF">
-                    <LEDGER ACTION="Alter" NAME="Purchase Return">
-                        <NAME.LIST><NAME>Purchase Return</NAME></NAME.LIST>
-                        <PARENT>Purchase Accounts</PARENT>
-                    </LEDGER>
-                </TALLYMESSAGE>
-                <TALLYMESSAGE xmlns:UDF="TallyUDF">
-                    <VOUCHER VCHTYPE="Debit Note" ACTION="Create">
-                        <DATE>{tally_date}</DATE>
-                        <GUID>{adj_guid}</GUID>
-                        <VOUCHERTYPENAME>Debit Note</VOUCHERTYPENAME>
-                        <REFERENCE>{inv_no}</REFERENCE>
-                        <PARTYLEDGERNAME>{supplier}</PARTYLEDGERNAME>
-                        <PARTYNAME>{supplier}</PARTYNAME>
-                        <PERSISTEDVIEW>Invoice Voucher View</PERSISTEDVIEW>
-                        <ISINVOICE>Yes</ISINVOICE>
-                        {narration_xml}
-                        {return_inventory_xml}
-                        <LEDGERENTRIES.LIST>
-                            <LEDGERNAME>{supplier}</LEDGERNAME>
-                            <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
-                            <AMOUNT>-{return_total:.2f}</AMOUNT>
-                            <BILLALLOCATIONS.LIST>
-                                <NAME>{inv_no}</NAME>
-                                <BILLTYPE>Agst Ref</BILLTYPE>
-                                <AMOUNT>-{return_total:.2f}</AMOUNT>
-                            </BILLALLOCATIONS.LIST>
-                        </LEDGERENTRIES.LIST>
-                    </VOUCHER>
-                </TALLYMESSAGE>
-            </REQUESTDATA>
-        </IMPORTDATA>
-    </BODY>
-</ENVELOPE>"""
+    # Raw (unescaped) supplier/invoice_number -- build_debit_note_xml does its own escaping.
+    debit_note_xml, _return_total = build_debit_note_xml(payload.supplier, payload.invoice_number, tally_date, payload.adjustment)
 
     # Queue-First Architecture: Always save transaction(s) to DB before attempting to send.
     queue_payload = payload.model_dump()
@@ -704,7 +743,8 @@ async def post_purchase_item(payload: PurchaseItemPostRequest, request: Request)
         from backend.database import get_master_dependency_state, is_master_pending_sync
         
         has_pending = False
-        
+        pending_deps = []
+
         dependencies = [("LEDGER", payload.supplier, None)]
         for item in payload.items:
             uom = item.mapped_unit or item.uom
@@ -712,8 +752,15 @@ async def post_purchase_item(payload: PurchaseItemPostRequest, request: Request)
                 uom = uom.replace('.', '').strip()
             if not uom or uom == 'Not Applicable':
                 uom = 'PCS'
+            # Pass {"uom": uom} even for an already-mapped item -- this is
+            # what actually triggers get_master_dependency_state's existing
+            # conflict check against the item's real registered Tally unit.
+            # Without it (previously passing None here), a UOM typed/edited
+            # after mapping could silently disagree with the mapped item's
+            # true unit and only get caught much later by a generic Tally
+            # rejection instead of this endpoint's own clear 409 message.
             if item.is_mapped:
-                dependencies.append(("ITEM", item.mapped_name, None))
+                dependencies.append(("ITEM", item.mapped_name, {"uom": uom}))
             else:
                 dependencies.append(("ITEM", item.name, {"uom": uom}))
             dependencies.append(("UOM", uom, None))
@@ -721,13 +768,18 @@ async def post_purchase_item(payload: PurchaseItemPostRequest, request: Request)
         if payload.adjustment and payload.adjustment.items:
             for ritem in payload.adjustment.items:
                 r_uom = (ritem.uom or "PCS").replace('.', '').strip() or "PCS"
-                dependencies.append(("ITEM", ritem.name, None))
+                # Same reasoning as above -- return items always reference an
+                # existing Tally item by its real name, so this is the
+                # "already mapped" case too.
+                dependencies.append(("ITEM", ritem.name, {"uom": r_uom}))
                 dependencies.append(("UOM", r_uom, None))
 
         for entity_type, raw_name, definition_payload in dependencies:
             state, error_msg = get_master_dependency_state(entity_type, raw_name, definition_payload)
             if state == "FAILED":
                 update_queue_status(queue_id, "FAILED", f"Cannot post invoice because {entity_type.lower()} '{raw_name}' failed to sync to Tally.")
+                if adjustment_queue_id:
+                    update_queue_status(adjustment_queue_id, "FAILED", "Cancelled: the main purchase invoice this return was attached to failed validation.")
                 raise HTTPException(status_code=400, detail=f"Cannot post invoice because {entity_type.lower()} '{raw_name}' failed to sync to Tally. Resolve the master first.")
             elif state == "MISSING":
                 if entity_type == "UOM":
@@ -744,14 +796,20 @@ async def post_purchase_item(payload: PurchaseItemPostRequest, request: Request)
                     from backend.database import queue_master_operation
                     await run_in_threadpool(queue_master_operation, "UOM", raw_name, "CREATE_UOM", uom_xml, {"uom": raw_name})
                     has_pending = True
+                    pending_deps.append({"type": entity_type, "name": raw_name})
                 else:
                     update_queue_status(queue_id, "FAILED", f"Cannot post invoice because {entity_type.lower()} '{raw_name}' is not available in Tally or pending sync.")
+                    if adjustment_queue_id:
+                        update_queue_status(adjustment_queue_id, "FAILED", "Cancelled: the main purchase invoice this return was attached to failed validation.")
                     raise HTTPException(status_code=400, detail=f"Cannot post invoice because {entity_type.lower()} '{raw_name}' is not available in Tally or pending sync. Create or refresh the master before posting.")
             elif state == "CONFLICT":
                 update_queue_status(queue_id, "FAILED", f"Definition conflict for {entity_type.lower()} '{raw_name}': {error_msg}")
+                if adjustment_queue_id:
+                    update_queue_status(adjustment_queue_id, "FAILED", "Cancelled: the main purchase invoice this return was attached to failed validation.")
                 raise HTTPException(status_code=409, detail=f"Cannot post invoice due to definition conflict for {entity_type.lower()} '{raw_name}': {error_msg}")
             elif is_master_pending_sync(state):
                 has_pending = True
+                pending_deps.append({"type": entity_type, "name": raw_name})
 
         # Record each item's observed rate now that the dependency loop above
         # has confirmed nothing is FAILED/CONFLICT (either already raised).
@@ -771,8 +829,19 @@ async def post_purchase_item(payload: PurchaseItemPostRequest, request: Request)
                 )
 
         if has_pending:
-            # Leave as PENDING
-            return {"status": "queued", "reason": "pending_master_dependency", "message": "Invoice saved to offline queue because a required master is still pending sync to Tally."}
+            # Leave as PENDING. Record exactly which masters this voucher is
+            # still waiting on so the sync worker can re-check their actual
+            # state immediately before attempting delivery later -- a master
+            # queued here to resolve a MISSING dependency (e.g. the UOM
+            # above) always gets a *later* queue id than this voucher, so
+            # plain id-ascending flush order would otherwise try to send
+            # this voucher before that dependency has synced.
+            from backend.database import set_queue_pending_dependencies
+            set_queue_pending_dependencies(queue_id, pending_deps)
+            if adjustment_queue_id:
+                set_queue_pending_dependencies(adjustment_queue_id, pending_deps)
+            pending_msg = "Invoice and return both saved to offline queue" if adjustment_queue_id else "Invoice saved to offline queue"
+            return {"status": "queued", "reason": "pending_master_dependency", "message": f"{pending_msg} because a required master is still pending sync to Tally."}
             
         # Post Purchase Voucher
         set_delivery_uncertain(queue_id, True)
@@ -821,17 +890,17 @@ async def post_purchase_item(payload: PurchaseItemPostRequest, request: Request)
         # The connection itself never established (Tally's address is unreachable)
         # -- as safe as ConnectionError, nothing was ever sent.
         set_delivery_uncertain(queue_id, False)
-        return {"status": "queued", "message": "Tally is offline. Invoice saved to queue and will push automatically."}
+        return {"status": "queued", "message": _offline_message(adjustment_queue_id)}
     except requests.exceptions.Timeout:
         # Ambiguous: connection was established and the request was sent, but no
         # response came back in time -- Tally may have processed it before the
         # response was lost. Leave delivery_uncertain set (already persisted
         # above) so a manual retry is blocked until someone verifies in Tally.
-        return {"status": "queued", "message": "Tally is offline. Invoice saved to queue and will push automatically."}
+        return {"status": "queued", "message": _offline_message(adjustment_queue_id)}
     except requests.exceptions.ConnectionError:
         # Request never reached Tally at all -- safe to clear and leave PENDING.
         set_delivery_uncertain(queue_id, False)
-        return {"status": "queued", "message": "Tally is offline. Invoice saved to queue and will push automatically."}
+        return {"status": "queued", "message": _offline_message(adjustment_queue_id)}
     except HTTPException:
         raise
     except Exception as e:
@@ -841,4 +910,105 @@ async def post_purchase_item(payload: PurchaseItemPostRequest, request: Request)
         update_queue_status(queue_id, "FAILED", str(e))
         if adjustment_queue_id:
             update_queue_status(adjustment_queue_id, "FAILED", str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+class StandalonePurchaseReturnRequest(BaseModel):
+    supplier: str
+    invoice_number: str  # the original invoice this return is against (BILLALLOCATIONS "Agst Ref")
+    tally_date: str  # YYYYMMDD, DD/MM/YYYY, or YYYY-MM-DD
+    adjustment: PurchaseAdjustment
+
+@router.post("/return")
+async def post_purchase_return(payload: StandalonePurchaseReturnRequest, request: Request):
+    """A Supplier Adjustment/Return recorded on its own, days or weeks after
+    the original invoice -- not alongside a new purchase in the same request.
+    Reuses the exact same debit-note builder as the item-wise Purchase post's
+    nested return section (build_debit_note_xml), just without a sibling
+    invoice to also queue/validate."""
+    current_user = request.state.user
+    enforce_store_access(current_user, payload.adjustment.store, "post returns for")
+
+    tally_date = _parse_tally_date(payload.tally_date)
+
+    debit_note_xml, return_total = build_debit_note_xml(payload.supplier, payload.invoice_number, tally_date, payload.adjustment)
+    if not debit_note_xml:
+        raise HTTPException(status_code=400, detail="Add at least one item to return.")
+
+    queue_payload = payload.model_dump()
+    queue_payload['created_by'] = current_user['name']
+    queue_id = queue_operation("POST_VOUCHER", debit_note_xml, queue_payload, f"Purchase Return (Debit Note): {payload.invoice_number} from {payload.supplier}")
+
+    try:
+        from backend.database import get_master_dependency_state, is_master_pending_sync, queue_master_operation, set_queue_pending_dependencies
+
+        has_pending = False
+        pending_deps = []
+
+        dependencies = [("LEDGER", payload.supplier, None)]
+        for ritem in payload.adjustment.items:
+            r_uom = (ritem.uom or "PCS").replace('.', '').strip() or "PCS"
+            dependencies.append(("ITEM", ritem.name, {"uom": r_uom}))
+            dependencies.append(("UOM", r_uom, None))
+
+        for entity_type, raw_name, definition_payload in dependencies:
+            state, error_msg = get_master_dependency_state(entity_type, raw_name, definition_payload)
+            if state == "FAILED":
+                update_queue_status(queue_id, "FAILED", f"Cannot post return because {entity_type.lower()} '{raw_name}' failed to sync to Tally.")
+                raise HTTPException(status_code=400, detail=f"Cannot post return because {entity_type.lower()} '{raw_name}' failed to sync to Tally. Resolve the master first.")
+            elif state == "MISSING":
+                if entity_type == "UOM":
+                    uom_xml = f"""<ENVELOPE>
+        <HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+        <BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>Vouchers</REPORTNAME></REQUESTDESC><REQUESTDATA>
+            <TALLYMESSAGE xmlns:UDF="TallyUDF">
+                <UNIT ACTION="Create" NAME="{escape(raw_name)}">
+                    <NAME>{escape(raw_name)}</NAME><ISSIMPLEUNIT>Yes</ISSIMPLEUNIT>
+                </UNIT>
+            </TALLYMESSAGE>
+        </REQUESTDATA></IMPORTDATA></BODY>
+    </ENVELOPE>"""
+                    await run_in_threadpool(queue_master_operation, "UOM", raw_name, "CREATE_UOM", uom_xml, {"uom": raw_name})
+                    has_pending = True
+                    pending_deps.append({"type": entity_type, "name": raw_name})
+                else:
+                    update_queue_status(queue_id, "FAILED", f"Cannot post return because {entity_type.lower()} '{raw_name}' is not available in Tally or pending sync.")
+                    raise HTTPException(status_code=400, detail=f"Cannot post return because {entity_type.lower()} '{raw_name}' is not available in Tally or pending sync. Create or refresh the master before posting.")
+            elif state == "CONFLICT":
+                update_queue_status(queue_id, "FAILED", f"Definition conflict for {entity_type.lower()} '{raw_name}': {error_msg}")
+                raise HTTPException(status_code=409, detail=f"Cannot post return due to definition conflict for {entity_type.lower()} '{raw_name}': {error_msg}")
+            elif is_master_pending_sync(state):
+                has_pending = True
+                pending_deps.append({"type": entity_type, "name": raw_name})
+
+        if has_pending:
+            set_queue_pending_dependencies(queue_id, pending_deps)
+            return {"status": "queued", "reason": "pending_master_dependency", "message": "Return saved to offline queue because a required master is still pending sync to Tally."}
+
+        set_delivery_uncertain(queue_id, True)
+        response = await tally_transport.post(debit_note_xml.encode('utf-8'), timeout=15)
+        parsed = parse_tally_response(response.text, "POST_VOUCHER")
+
+        if not parsed["is_success"]:
+            set_delivery_uncertain(queue_id, False)
+            update_queue_status(queue_id, "FAILED", parsed['error_message'])
+            raise HTTPException(status_code=400, detail=f"Tally rejected the return entry: {parsed['error_message']}")
+
+        set_delivery_uncertain(queue_id, False)
+        update_queue_status(queue_id, "SYNCED")
+        return {"status": "success", "message": "Return posted successfully.", "return_total": return_total}
+    except requests.exceptions.ConnectTimeout:
+        set_delivery_uncertain(queue_id, False)
+        return {"status": "queued", "message": "Tally is offline. Return saved to queue and will push automatically."}
+    except requests.exceptions.Timeout:
+        # Ambiguous: connection was established and the request was sent, but no
+        # response came back in time -- leave delivery_uncertain set (already
+        # persisted above) so a manual retry is blocked until verified in Tally.
+        return {"status": "queued", "message": "Tally is offline. Return saved to queue and will push automatically."}
+    except requests.exceptions.ConnectionError:
+        set_delivery_uncertain(queue_id, False)
+        return {"status": "queued", "message": "Tally is offline. Return saved to queue and will push automatically."}
+    except HTTPException:
+        raise
+    except Exception as e:
+        update_queue_status(queue_id, "FAILED", str(e))
         raise HTTPException(status_code=500, detail=str(e))

@@ -6,7 +6,7 @@ export function Card({ children, className = '', onClick, ...props }) {
   return (
     <div 
       onClick={onClick}
-      className={`bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4 shadow-sm ${isClickable ? 'cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors active:scale-[0.99]' : ''} ${className}`}
+      className={`bg-transparent rounded-md border border-divider p-4 ${isClickable ? 'cursor-pointer hover:bg-text/4 transition-colors active:scale-[0.99]' : ''} ${className}`}
       {...props}
     >
       {children}

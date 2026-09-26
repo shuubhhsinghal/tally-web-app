@@ -1,12 +1,22 @@
 'use client';
 import { useState, useEffect } from "react";
-import { Card } from '@/components/ui/Card';
+import TopBar from '@/components/layout/TopBar';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
+import { Toggle } from '@/components/ui/Toggle';
 import { useUI } from '@/context/UIContext';
 import { useAuth } from '@/context/AuthContext';
-import { Settings as SettingsIcon, Users, Trash2, UserPlus, KeyRound, Sparkles } from "lucide-react";
+import { useRouter } from 'next/navigation';
+import { Trash2, UserPlus, KeyRound, Sparkles, Cpu } from "lucide-react";
+
+function SectionHeading({ icon: Icon, children }) {
+  return (
+    <h2 className="font-heading font-semibold text-xl flex items-center gap-2.5">
+      <Icon className="w-5 h-5 text-accent-700" /> {children}
+    </h2>
+  );
+}
 
 function ItemMatchingAiSection() {
   const { showToast } = useUI();
@@ -22,8 +32,7 @@ function ItemMatchingAiSection() {
       .finally(() => setLoading(false));
   }, []);
 
-  const handleToggle = async () => {
-    const next = !enabled;
+  const handleToggle = async (next) => {
     setEnabled(next);
     setSaving(true);
     try {
@@ -43,40 +52,95 @@ function ItemMatchingAiSection() {
   };
 
   return (
-    <Card className="flex flex-col gap-4">
+    <div className="flex flex-col gap-4 py-7 border-b border-divider">
       <div>
-        <h2 className="text-lg font-bold text-gray-900 dark:text-white flex items-center gap-2">
-          <Sparkles className="w-5 h-5 text-teal-600" /> AI Item Matching
-        </h2>
-        <p className="text-sm text-gray-500 mt-1">
-          When an item extracted from an invoice doesn't exactly match anything in your Tally stock list, Gemini is asked to find the closest match. Turn this off to leave unmatched items for manual selection instead.
+        <SectionHeading icon={Sparkles}>AI item matching</SectionHeading>
+        <p className="text-sm text-neutral-700 mt-2">
+          When an item read from an invoice doesn&apos;t exactly match anything in your Tally stock list, Gemini is asked to find the closest match. Turn this off to leave unmatched items for manual selection instead.
         </p>
       </div>
 
       {loading ? (
-        <p className="text-sm text-gray-400">Loading...</p>
+        <p className="text-sm text-neutral-600">Loading...</p>
       ) : (
-        <div className="flex items-center justify-between">
-          <span className="text-sm font-bold text-gray-900 dark:text-white">
+        <div className="flex items-center justify-between pt-3 border-t border-divider">
+          <span className="text-sm font-medium">
             {enabled ? "On" : "Off"}
           </span>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={enabled}
-            disabled={saving}
-            onClick={handleToggle}
-            className={`relative inline-flex h-7 w-12 items-center rounded-full transition-colors disabled:opacity-50 ${enabled ? "bg-teal-600" : "bg-gray-300 dark:bg-gray-700"
-              }`}
-          >
-            <span
-              className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${enabled ? "translate-x-6" : "translate-x-1"
-                }`}
-            />
-          </button>
+          <Toggle checked={enabled} onChange={handleToggle} disabled={saving} />
         </div>
       )}
-    </Card>
+    </div>
+  );
+}
+
+const EXTRACTION_PROVIDERS = [
+  { label: 'Gemini 3.5 Flash Lite', value: 'gemini' },
+  { label: 'Qwen 3.5 Flash', value: 'qwen' },
+];
+
+function ExtractionProviderSection() {
+  const { showToast } = useUI();
+  const [provider, setProvider] = useState('gemini');
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/settings/extraction-provider")
+      .then(res => res.json())
+      .then(data => setProvider(data.provider || 'gemini'))
+      .catch(() => { })
+      .finally(() => setLoading(false));
+  }, []);
+
+  const handleSelect = async (value) => {
+    if (value === provider || saving) return;
+    const prev = provider;
+    setProvider(value);
+    setSaving(true);
+    try {
+      const res = await fetch("/api/settings/extraction-provider", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: value }),
+      });
+      if (!res.ok) throw new Error("Failed to save setting");
+      const label = EXTRACTION_PROVIDERS.find(p => p.value === value)?.label || value;
+      showToast(`Invoice extraction now uses ${label}`);
+    } catch (err) {
+      setProvider(prev);
+      showToast(err.message, "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-4 py-7 border-b border-divider">
+      <div>
+        <SectionHeading icon={Cpu}>Invoice extraction model</SectionHeading>
+        <p className="text-sm text-neutral-700 mt-2">
+          Which AI reads purchase invoices (supplier/tax metadata and item-wise rows) and bank statement PDFs. Switching takes effect on the very next upload &mdash; no restart needed.
+        </p>
+      </div>
+
+      {loading ? (
+        <p className="text-sm text-neutral-600">Loading...</p>
+      ) : (
+        <div className="grid grid-cols-2 border border-divider rounded-md overflow-hidden">
+          {EXTRACTION_PROVIDERS.map(p => (
+            <button
+              key={p.value}
+              onClick={() => handleSelect(p.value)}
+              disabled={saving}
+              className={`h-11 px-2 text-[13px] whitespace-nowrap transition-colors ${provider === p.value ? 'border border-accent text-accent-700 bg-accent/8 -m-px' : 'hover:bg-text/5'}`}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -175,30 +239,21 @@ function TeamSection() {
   };
 
   return (
-    <Card className="flex flex-col gap-6">
-      <div>
-        <h2 className="text-lg font-bold text-gray-900 dark:text-white flex items-center gap-2">
-          <Users className="w-5 h-5 text-teal-600" /> Team
-        </h2>
-        <p className="text-sm text-gray-500 mt-1">
-          Team member accounts can only see and post to the store they're assigned to. An account with full access can do everything you can, including managing this list.
-        </p>
-      </div>
-
+    <div className="flex flex-col py-7">
       {loading ? (
-        <p className="text-sm text-gray-400">Loading...</p>
+        <p className="text-sm text-neutral-600">Loading...</p>
       ) : users.length === 0 ? (
-        <p className="text-sm text-gray-400">No accounts yet.</p>
+        <p className="text-sm text-neutral-600">No accounts yet.</p>
       ) : (
-        <div className="divide-y divide-gray-100 dark:divide-gray-800 -mx-4">
+        <div>
           {users.map(u => (
-            <div key={u.id} className="px-4 py-3">
+            <div key={u.id} className="py-3.5 border-b border-divider">
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="text-sm font-bold text-gray-900 dark:text-white">
-                    {u.name} {u.id === currentUser?.id && <span className="text-xs font-medium text-gray-400">(you)</span>}
+                  <p className="text-[15px]">
+                    {u.name} {u.id === currentUser?.id && <span className="text-sm text-neutral-600">(you)</span>}
                   </p>
-                  <p className="text-xs text-gray-500">
+                  <p className="text-sm text-neutral-700 mt-0.5">
                     {u.is_owner ? 'Owner, all stores' : u.store_name}
                   </p>
                 </div>
@@ -206,14 +261,14 @@ function TeamSection() {
                   <div className="flex items-center gap-1">
                     <button
                       onClick={() => { setResettingId(resettingId === u.id ? null : u.id); setResetPassword(""); }}
-                      className="p-2 text-gray-400 hover:text-teal-600 dark:hover:text-teal-400 transition-colors"
+                      className="p-2 text-neutral-600 hover:text-accent-700 transition-colors"
                       aria-label={`Reset ${u.name}'s password`}
                     >
                       <KeyRound className="w-4 h-4" />
                     </button>
                     <button
                       onClick={() => handleRemove(u.id, u.name)}
-                      className="p-2 text-gray-400 hover:text-red-600 dark:hover:text-red-400 transition-colors"
+                      className="p-2 text-neutral-600 hover:text-red-600 transition-colors"
                       aria-label={`Remove ${u.name}`}
                     >
                       <Trash2 className="w-4 h-4" />
@@ -240,24 +295,24 @@ function TeamSection() {
         </div>
       )}
 
-      <form onSubmit={handleCreate} className="flex flex-col gap-3 pt-4 border-t border-gray-100 dark:border-gray-800">
-        <h3 className="text-sm font-bold text-gray-900 dark:text-white flex items-center gap-2">
-          <UserPlus className="w-4 h-4" /> Add a team member
+      <form onSubmit={handleCreate} className="flex flex-col gap-3 pt-6">
+        <h3 className="font-heading font-semibold text-lg flex items-center gap-2">
+          <UserPlus className="w-4 h-4 text-accent-700" /> Add a team member
         </h3>
         <Input label="Name" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="e.g. Ravi" />
         <Input label="Password" type="password" value={form.password} onChange={e => setForm({ ...form, password: e.target.value })} placeholder="at least 4 characters" />
 
-        <label className="flex items-start gap-3 p-3 rounded-xl border border-gray-200 dark:border-gray-700 cursor-pointer">
+        <label className="flex items-start gap-3 p-3 rounded-md border border-divider cursor-pointer">
           <input
             type="checkbox"
             checked={form.is_owner}
             onChange={e => setForm({ ...form, is_owner: e.target.checked, store_name: "" })}
-            className="w-4 h-4 mt-0.5 text-teal-600 rounded focus:ring-teal-500"
+            className="w-4 h-4 mt-0.5 accent-[var(--color-accent)] rounded"
           />
           <span>
-            <span className="block text-sm font-bold text-gray-900 dark:text-white">Give full access</span>
-            <span className="block text-xs text-gray-500 mt-0.5">
-              Same as your account &mdash; every store, plus the ability to add and remove other accounts. Otherwise they're limited to one store below.
+            <span className="block text-[15px] font-medium">Give full access</span>
+            <span className="block text-sm text-neutral-700 mt-0.5">
+              Same as your account &mdash; every store, plus the ability to add and remove other accounts. Otherwise they&apos;re limited to one store below.
             </span>
           </span>
         </label>
@@ -273,7 +328,7 @@ function TeamSection() {
           {creating ? "Creating..." : "Add account"}
         </Button>
       </form>
-    </Card>
+    </div>
   );
 }
 
@@ -311,37 +366,33 @@ function ChangePasswordSection() {
   };
 
   return (
-    <Card className="flex flex-col gap-4">
-      <h2 className="text-lg font-bold text-gray-900 dark:text-white flex items-center gap-2">
-        <KeyRound className="w-5 h-5 text-teal-600" /> Change Password
-      </h2>
+    <div className="flex flex-col gap-4 py-7 border-b border-divider">
+      <SectionHeading icon={KeyRound}>Change password</SectionHeading>
       <form onSubmit={handleSubmit} className="flex flex-col gap-3">
         <Input label="Current password" type="password" value={form.current_password} onChange={e => setForm({ ...form, current_password: e.target.value })} />
         <Input label="New password" type="password" value={form.new_password} onChange={e => setForm({ ...form, new_password: e.target.value })} placeholder="at least 4 characters" />
         <Input label="Confirm new password" type="password" value={form.confirm_password} onChange={e => setForm({ ...form, confirm_password: e.target.value })} />
         <Button type="submit" disabled={saving} className="mt-1">
-          {saving ? "Saving..." : "Change Password"}
+          {saving ? "Saving..." : "Change password"}
         </Button>
       </form>
-    </Card>
+    </div>
   );
 }
 
 export default function SettingsPage() {
   const { user } = useAuth();
+  const router = useRouter();
 
   return (
-    <div className="max-w-2xl mx-auto space-y-6">
-      <div className="flex items-center gap-3 border-b border-gray-100 dark:border-gray-800 pb-4">
-        <div className="bg-teal-50 dark:bg-teal-900/30 p-2.5 rounded-xl">
-          <SettingsIcon className="w-6 h-6 text-teal-600" />
-        </div>
-        <h1 className="text-2xl font-bold text-gray-900 dark:text-white">App Settings</h1>
+    <div className="min-h-screen bg-bg pb-20">
+      <TopBar title="Settings" kicker="Mom's Pride" showBack onBack={() => router.push('/dashboard')} />
+      <div className="max-w-md mx-auto px-5">
+        <ChangePasswordSection />
+        {user?.is_owner && <ExtractionProviderSection />}
+        {user?.is_owner && <ItemMatchingAiSection />}
+        {user?.is_owner && <TeamSection />}
       </div>
-
-      <ChangePasswordSection />
-      {user?.is_owner && <ItemMatchingAiSection />}
-      {user?.is_owner && <TeamSection />}
     </div>
   );
 }

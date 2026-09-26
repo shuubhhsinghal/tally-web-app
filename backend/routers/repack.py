@@ -1,6 +1,8 @@
 from fastapi import APIRouter, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
 from backend.services.auth_helpers import enforce_store_access
+from backend.services.tally_response import parse_tally_response
+from backend.connector.transport import tally_transport
 from pydantic import BaseModel
 from xml.sax.saxutils import escape
 
@@ -147,6 +149,52 @@ class RepackExecuteRequest(BaseModel):
     store_name: str
     conversion_id: int
     dest_qty: float
+
+async def _attempt_post_repack_voucher(queue_id: int, xml_payload: str, repack_id: str) -> dict:
+    """Attempts an immediate live POST for a just-queued repack voucher and
+    reports the real outcome, mirroring the queue-first +
+    best-effort-immediate-send pattern used by payment/transfer/stock-transfer
+    -- without this, `/execute` always just queued and returned a blanket
+    "success", which was misleading even for a plain online post: the actual
+    delivery only happened up to 60s later on the background worker's next
+    tick, and any Tally-side rejection was silently invisible to the caller."""
+    from backend.database import set_delivery_uncertain, update_queue_status, get_db
+    import requests
+
+    def _set_repack_status(status: str):
+        with get_db() as conn:
+            conn.execute("UPDATE repack_operations SET status = ? WHERE id = ?", (status, repack_id))
+            conn.commit()
+
+    try:
+        set_delivery_uncertain(queue_id, True)
+        response = await tally_transport.post(xml_payload.encode('utf-8'), timeout=10)
+        parsed = parse_tally_response(response.text, "REPACK_VOUCHER")
+
+        if not parsed["is_success"]:
+            set_delivery_uncertain(queue_id, False)
+            update_queue_status(queue_id, "FAILED", parsed['error_message'])
+            _set_repack_status("FAILED")
+            return {"status": "failed", "message": parsed['error_message']}
+
+        set_delivery_uncertain(queue_id, False)
+        update_queue_status(queue_id, "SYNCED")
+        _set_repack_status("COMPLETED")
+        return {"status": "success"}
+    except requests.exceptions.ConnectTimeout:
+        set_delivery_uncertain(queue_id, False)
+        return {"status": "queued", "message": "Tally is offline. Saved to queue."}
+    except requests.exceptions.Timeout:
+        # Ambiguous: leave delivery_uncertain set (already persisted above) so
+        # a manual retry is blocked until someone verifies in Tally.
+        return {"status": "queued", "message": "Delivery uncertain -- verify in Tally before retrying."}
+    except requests.exceptions.ConnectionError:
+        set_delivery_uncertain(queue_id, False)
+        return {"status": "queued", "message": "Tally is offline. Saved to queue."}
+    except Exception as e:
+        update_queue_status(queue_id, "FAILED", str(e))
+        _set_repack_status("FAILED")
+        return {"status": "failed", "message": str(e)}
 
 @router.post("/execute")
 async def execute_repack(payload: RepackExecuteRequest, request: Request):
@@ -342,7 +390,10 @@ async def execute_repack(payload: RepackExecuteRequest, request: Request):
         conn.commit()
         
     # 8. Queue voucher operation (has its own DB connection)
-    queue_payload = {"repack_id": repack_id, "created_by": current_user['name']}
+    # tally_date is carried here (not just in repack_operations, which has no
+    # date column at all) so the daybook's pending-entry synthesis can date
+    # this correctly instead of falling back to "now".
+    queue_payload = {"repack_id": repack_id, "created_by": current_user['name'], "tally_date": current_date_tally}
     queue_id = queue_operation(
         operation_type="REPACK_VOUCHER",
         xml_data=xml_data,
@@ -364,4 +415,13 @@ async def execute_repack(payload: RepackExecuteRequest, request: Request):
         source_queue_id=queue_id, source_type='repack'
     )
 
-    return {"status": "success", "repack_id": repack_id, "message": f"Repack transaction queued. Value: ₹{total_source_amount:.2f}"}
+    result = await _attempt_post_repack_voucher(queue_id, xml_data, repack_id)
+
+    if result["status"] == "success":
+        message = f"Posted to Tally. Value: ₹{total_source_amount:.2f}"
+    elif result["status"] == "failed":
+        message = f"Tally rejected the entry: {result['message']}"
+    else:
+        message = f"{result['message']} Value: ₹{total_source_amount:.2f}"
+
+    return {"status": result["status"], "repack_id": repack_id, "message": message}

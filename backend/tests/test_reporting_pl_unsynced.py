@@ -17,6 +17,7 @@ _TEST_LEDGERS = [
 def setup_db():
     with get_db() as conn:
         conn.execute("DELETE FROM offline_queue")
+        conn.execute("DELETE FROM reporting_vouchers WHERE tally_guid LIKE 'guid-pl-%'")
         for name, parent in _TEST_LEDGERS:
             conn.execute("INSERT OR REPLACE INTO ledgers (name, parent) VALUES (?, ?)", (name, parent))
         # The full endpoint (fetch_stock_balances_from_db) requires a stock
@@ -32,6 +33,7 @@ def setup_db():
     yield
     with get_db() as conn:
         conn.execute("DELETE FROM offline_queue")
+        conn.execute("DELETE FROM reporting_vouchers WHERE tally_guid LIKE 'guid-pl-%'")
         for name, _ in _TEST_LEDGERS:
             conn.execute("DELETE FROM ledgers WHERE name = ?", (name,))
         conn.execute("DELETE FROM reporting_monthly_stock WHERE year_month = ?", ("2026-01",))
@@ -189,3 +191,191 @@ def test_stock_transfer_physical_leg_ignored_in_pl():
     _queue_stock_transfer(2000.0, "20260115", leg="Physical")
     result = _pl("Combined", "20260101", "20260131")
     assert result["cost_of_goods_sold"]["net_purchases"] == 0.0
+
+
+# --- SYNCED-but-not-yet-reporting-synced: the same up-to-30-minute gap
+# already fixed for Sales/Purchases/Creditors/Daybook. P&L is a pure
+# aggregate (nothing to drill into), so it uses the simpler permanent
+# voucher-type exclusion pattern instead of per-voucher dedup -- once SYNCED,
+# the confirmed side never counts these voucher types again, so there's
+# nothing to double-count once the reporting sync catches up.
+
+def _insert_confirmed_sale(amount, date, store, guid="guid-pl-sale-test"):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO reporting_vouchers (tally_guid, date, voucher_number, voucher_type, party_ledger_name, narration)
+            VALUES (?, ?, '900', 'Sales', 'Cash', '')
+        """, (guid, date))
+        vid = cursor.lastrowid
+        cursor.executemany("INSERT INTO reporting_ledger_entries (voucher_id, ledger_name, amount, is_deemed_positive) VALUES (?,?,?,?)", [
+            (vid, "Cash", -amount, 1),
+            (vid, "Sales", amount, 0),
+        ])
+        if store:
+            cursor.execute("""
+                INSERT INTO reporting_cost_centre_allocations (ledger_entry_id, cost_centre_name, amount)
+                SELECT id, ?, amount FROM reporting_ledger_entries WHERE voucher_id = ? AND ledger_name = 'Sales'
+            """, (store, vid))
+        conn.commit()
+
+
+def _insert_confirmed_purchase(amount, date, store, guid="guid-pl-purchase-test"):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO reporting_vouchers (tally_guid, date, voucher_number, voucher_type, party_ledger_name, narration, reference)
+            VALUES (?, ?, '901', 'Purchase', 'PLTest Supplier', '', 'INV-1')
+        """, (guid, date))
+        vid = cursor.lastrowid
+        cursor.executemany("INSERT INTO reporting_ledger_entries (voucher_id, ledger_name, amount, is_deemed_positive) VALUES (?,?,?,?)", [
+            (vid, "PLTest Supplier", -amount, 0),
+            (vid, "Purchase", amount, 1),
+        ])
+        if store:
+            cursor.execute("""
+                INSERT INTO reporting_cost_centre_allocations (ledger_entry_id, cost_centre_name, amount)
+                SELECT id, ?, amount FROM reporting_ledger_entries WHERE voucher_id = ? AND ledger_name = 'Purchase'
+            """, (store, vid))
+        conn.commit()
+
+
+def _insert_confirmed_payment(debit_ledger, amount, date, store, guid="guid-pl-payment-test"):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO reporting_vouchers (tally_guid, date, voucher_number, voucher_type, party_ledger_name, narration)
+            VALUES (?, ?, '902', 'Payment', ?, '')
+        """, (guid, date, debit_ledger))
+        vid = cursor.lastrowid
+        cursor.executemany("INSERT INTO reporting_ledger_entries (voucher_id, ledger_name, amount, is_deemed_positive) VALUES (?,?,?,?)", [
+            (vid, debit_ledger, amount, 1),
+            (vid, "Cash", -amount, 0),
+        ])
+        if store:
+            cursor.execute("""
+                INSERT INTO reporting_cost_centre_allocations (ledger_entry_id, cost_centre_name, amount)
+                SELECT id, ?, amount FROM reporting_ledger_entries WHERE voucher_id = ? AND ledger_name = ?
+            """, (store, vid, debit_ledger))
+        conn.commit()
+
+
+def test_synced_sale_not_yet_reporting_synced_still_shows_in_net_sales():
+    _queue_sale(1000.0, "20260115", status="SYNCED")
+    result = _pl("Combined", "20260101", "20260131")
+    assert result["revenue"]["net_sales"] == 1000.0
+
+
+def test_synced_sale_not_double_counted_once_reporting_synced():
+    _queue_sale(1000.0, "20260115", cost_center="Mahagun", status="SYNCED")
+    _insert_confirmed_sale(1000.0, "20260115", "Mahagun")
+
+    result = _pl("Mahagun", "20260101", "20260131")
+    assert result["revenue"]["net_sales"] == 1000.0, "confirmed voucher now covers this, queue row must not also count"
+
+
+def test_synced_purchase_not_double_counted_once_reporting_synced():
+    _queue_purchase(500.0, "20260115", cost_center="Mahagun", status="SYNCED")
+    _insert_confirmed_purchase(500.0, "20260115", "Mahagun")
+
+    result = _pl("Mahagun", "20260101", "20260131")
+    assert result["cost_of_goods_sold"]["net_purchases"] == 500.0
+
+
+def test_synced_payment_to_direct_expense_not_double_counted_once_reporting_synced():
+    _queue_payment("PLTest Rent", 300.0, "20260115", cost_center="Mahagun", status="SYNCED")
+    _insert_confirmed_payment("PLTest Rent", 300.0, "20260115", "Mahagun")
+
+    result = _pl("Mahagun", "20260101", "20260131")
+    assert result["expenses"]["direct_expenses"] == 300.0
+    breakdown = {i["ledger_name"]: i["amount"] for i in result["expenses"]["direct_expenses_items"]}
+    assert breakdown["PLTest Rent"] == 300.0
+
+
+def test_synced_payment_to_non_expense_ledger_still_excluded():
+    # A Payment voucher permanently excluded from Direct/Indirect Expenses
+    # must not leak into those groups just because it's SYNCED and confirmed
+    # -- it was never counted there to begin with (settling a supplier is a
+    # balance-sheet movement), and the exclusion is scoped per ledger-group
+    # query, not a blanket "ignore all Payment vouchers everywhere".
+    _queue_payment("PLTest Supplier", 5000.0, "20260115", status="SYNCED")
+    _insert_confirmed_payment("PLTest Supplier", 5000.0, "20260115", None)
+
+    result = _pl("Combined", "20260101", "20260131")
+    assert result["expenses"]["direct_expenses"] == 0.0
+    assert result["expenses"]["indirect_expenses"] == 0.0
+
+
+def test_synced_stock_transfer_not_double_counted_once_reporting_synced():
+    _queue_stock_transfer(2000.0, "20260115", from_store="Mahagun", to_store="Gulshan", status="SYNCED")
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO reporting_vouchers (tally_guid, date, voucher_number, voucher_type, party_ledger_name, narration)
+            VALUES ('guid-pl-st-test', '20260115', '903', 'Journal', NULL, 'Inter-store transfer: 5.0 pcs of Item A')
+        """)
+        vid = cursor.lastrowid
+        # Both legs share the exact same ledger_name ("inter store transfer",
+        # per the real posted XML) -- inserted one at a time so each entry's
+        # own lastrowid can be tied to its own cost-centre allocation,
+        # since a WHERE ledger_name=... lookup can't tell the two apart.
+        cursor.execute("INSERT INTO reporting_ledger_entries (voucher_id, ledger_name, amount, is_deemed_positive) VALUES (?, 'inter store transfer', 2000.0, 1)", (vid,))
+        entry_id = cursor.lastrowid
+        cursor.execute("INSERT INTO reporting_cost_centre_allocations (ledger_entry_id, cost_centre_name, amount) VALUES (?, 'Gulshan', 2000.0)", (entry_id,))
+        cursor.execute("INSERT INTO reporting_ledger_entries (voucher_id, ledger_name, amount, is_deemed_positive) VALUES (?, 'inter store transfer', -2000.0, 0)", (vid,))
+        entry_id = cursor.lastrowid
+        cursor.execute("INSERT INTO reporting_cost_centre_allocations (ledger_entry_id, cost_centre_name, amount) VALUES (?, 'Mahagun', -2000.0)", (entry_id,))
+        conn.commit()
+
+    result_gulshan = _pl("Gulshan", "20260101", "20260131")
+    assert result_gulshan["cost_of_goods_sold"]["net_purchases"] == 2000.0
+    result_mahagun = _pl("Mahagun", "20260101", "20260131")
+    assert result_mahagun["cost_of_goods_sold"]["net_purchases"] == -2000.0
+
+
+# --- One store's stock data missing must degrade gracefully, not take the
+# whole report down. fetch_stock_balances_from_db used to raise the instant
+# ANY required ledger was missing for either boundary month, which the
+# router's own except-Exception turned into a hard 400 for the ENTIRE
+# request -- even though calculate_pl_for_store already has its own
+# per-store "missing_stores"/None-cogs fallback, and the frontend already
+# has a ready-built per-store banner for exactly this, neither of which ever
+# got a chance to run.
+
+def test_fetch_stock_balances_omits_only_the_missing_store():
+    from backend.services.tally_group_stock import fetch_stock_balances_from_db
+    with get_db() as conn:
+        conn.execute("DELETE FROM reporting_monthly_stock WHERE year_month = '2026-01' AND ledger_name = 'stock gulshan'")
+        conn.commit()
+
+    bals = fetch_stock_balances_from_db("2026-01", "2026-01")
+    assert "mahagun" in bals
+    assert "vvip" in bals
+    assert "gulshan" not in bals, "missing ledger must be omitted, not raise and blank out everything"
+
+
+def test_endpoint_degrades_gracefully_when_one_store_stock_is_missing():
+    _queue_sale(1000.0, "20260115", cost_center="Mahagun")
+    with get_db() as conn:
+        conn.execute("DELETE FROM reporting_monthly_stock WHERE year_month = '2026-01' AND ledger_name = 'stock gulshan'")
+        conn.commit()
+
+    resp = client.get("/api/reporting/profit-loss", params={"start_month": "2026-01", "end_month": "2026-01"})
+    assert resp.status_code == 200, "one store's missing stock data must not 400 the entire report"
+    data = resp.json()
+
+    mahagun = next(s for s in data["stores"] if s["store"] == "Mahagun")
+    assert mahagun["missing_stores"] == []
+    assert mahagun["revenue"]["net_sales"] == 1000.0, "Mahagun's own figures are fully available and must still show"
+    assert mahagun["gross_profit"] is not None
+
+    gulshan = next(s for s in data["stores"] if s["store"] == "Gulshan")
+    assert gulshan["missing_stores"] == ["Gulshan"]
+    assert gulshan["cost_of_goods_sold"]["cogs"] is None
+    assert gulshan["gross_profit"] is None
+    assert gulshan["net_profit"] is None
+
+    combined = data["combined"]
+    assert "Gulshan" in combined["missing_stores"]
+    assert combined["gross_profit"] is None, "Combined can't compute COGS without every store's stock"
+    assert combined["revenue"]["net_sales"] == 1000.0, "revenue itself doesn't depend on stock and must still total correctly"

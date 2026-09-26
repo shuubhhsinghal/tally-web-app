@@ -37,6 +37,37 @@ _PURCHASE_GROUP_QUEUE_DESCRIPTION_PATTERNS = _PURCHASE_QUEUE_DESCRIPTION_PATTERN
     "Stock Transfer:%(Accounting)",
 )
 
+# Used only by the headline summary/trend/store-comparison queries below
+# (calculate_purchases, get_purchases_trend, get_store_comparisons) --
+# permanently excludes these three voucher shapes -- each is posted
+# exclusively by this app (Purchase/Debit Note directly, matching
+# _PURCHASE_QUEUE_DESCRIPTION_PATTERNS above; the inter-store-transfer
+# Journal matching _PURCHASE_GROUP_QUEUE_DESCRIPTION_PATTERNS' extra entry)
+# and is instead counted permanently from the offline queue the moment it's
+# SYNCED (get_queue_purchases_trend). Mirrors get_ledger_current_balance's
+# loan-voucher exclusion and reporting_sales_service.calculate_sales'
+# Sales-voucher exclusion, for the identical reason: a Tally-confirmed
+# voucher can lag up to 30 minutes behind an already-successful post via the
+# separate reporting sync, and a plain number has no row to double-count.
+#
+# Deliberately NOT applied to get_purchase_bills / get_supplier_purchase_analysis
+# (the per-invoice drill-down views): those still count a Purchase/Debit Note
+# only once truly confirmed by Tally, same as before this constant existed,
+# and only merge in PENDING queue rows (_fetch_pending_purchase_bill_rows) --
+# never SYNCED ones. A drill-down row is never deleted from the queue once
+# SYNCED, so folding it in there too would double-count it forever once the
+# real confirmed row also appeared, not just for the ~30 minutes until the
+# reporting sync catches up -- and permanently excluding Purchase/Debit Note
+# from these views instead would permanently hide the GST/item-level detail
+# a confirmed voucher provides, which the queue payload doesn't preserve.
+# So a purchase can briefly (same ~30 min window as before) be reflected in
+# the headline total before it's visible in Bills/By-supplier -- an existing,
+# narrower characteristic this change doesn't newly introduce.
+_PURCHASE_QUEUE_OWNED_VOUCHER_EXCLUSION_SQL = """
+          AND rv.voucher_type NOT IN ('Purchase', 'Debit Note')
+          AND NOT (rv.voucher_type = 'Journal' AND COALESCE(rv.narration, '') LIKE 'Inter-store transfer:%')
+"""
+
 def _compute_purchase_queue_amount(description: str, payload: dict) -> list:
     """Returns a list of (signed_amount, store_or_None) pairs for one
     purchase-related offline_queue row's payload -- almost always exactly one
@@ -116,18 +147,20 @@ def get_unsynced_purchases(start_date: str, end_date: str, cost_centre: str = No
         "failed_amount": round(failed_amount, 2),
     }
 
-def get_pending_purchases_trend(start_date: str, end_date: str, cost_centre: str = None) -> list[dict]:
-    """The subset of get_unsynced_purchases' PENDING entries that are safe to
-    fold into the report's own figures -- same per-date/per-store shape as
-    get_purchases_trend, and the same delivery_uncertain exclusion rationale
-    as get_pending_sales_trend (backend/services/reporting_sales_service.py)."""
+def get_queue_purchases_trend(start_date: str, end_date: str, cost_centre: str = None) -> list[dict]:
+    """Every purchase/return this app has ever posted -- PENDING or SYNCED --
+    that's safe to fold into the report's own figures, same per-date/per-store
+    shape as get_purchases_trend, and the same delivery_uncertain exclusion
+    rationale as reporting_sales_service.get_queue_sales_trend. A SYNCED row
+    is trusted here permanently (see _PURCHASE_QUEUE_OWNED_VOUCHER_EXCLUSION_SQL
+    on the confirmed side), not just until the reporting sync catches up."""
     with get_db() as conn:
         cursor = conn.cursor()
         placeholders = " OR ".join(["description LIKE ?"] * len(_PURCHASE_GROUP_QUEUE_DESCRIPTION_PATTERNS))
         cursor.execute(f"""
             SELECT payload, description FROM offline_queue
             WHERE operation_type = 'POST_VOUCHER' AND ({placeholders})
-              AND status = 'PENDING'
+              AND status IN ('PENDING', 'SYNCED')
         """, list(_PURCHASE_GROUP_QUEUE_DESCRIPTION_PATTERNS))
         rows = cursor.fetchall()
 
@@ -166,11 +199,23 @@ def get_pending_purchases_trend(start_date: str, end_date: str, cost_centre: str
 def _fetch_pending_purchase_bill_rows(start_date: str, end_date: str, cost_centre: str = None, supplier_name: str = None) -> list[dict]:
     """Per-transaction synthetic bill rows for PENDING (non-delivery_uncertain)
     purchase/return queue entries -- same scope and inclusion rules as
-    get_pending_purchases_trend, but one row per queue entry (not grouped by
+    get_queue_purchases_trend, but one row per queue entry (not grouped by
     date), so it can be merged directly into get_purchase_bills' and
     get_supplier_purchase_analysis's per-voucher lists. Without this, the
     summary total (which already includes pending) wouldn't reconcile with
-    what these drill-down lists show."""
+    what these drill-down lists show.
+
+    Deliberately stays PENDING-only (unlike get_queue_purchases_trend, which
+    also includes SYNCED for the headline summary/trend/store-comparison):
+    once a Purchase/Debit Note voucher is SYNCED, this app's ONLY way to
+    later drill into its real GST/item-level detail is via the confirmed
+    reporting_vouchers row the separate reporting sync eventually creates.
+    A synthetic queue row is never deleted once SYNCED, so folding it in here
+    too would double-count it forever (not just for the ~30 minutes until
+    that sync catches up) once the real row also appears. The summary total
+    doesn't have this problem (a plain number has no row to duplicate), which
+    is why only it gets the fuller fix -- see
+    _PURCHASE_QUEUE_OWNED_VOUCHER_EXCLUSION_SQL's docstring."""
     with get_db() as conn:
         cursor = conn.cursor()
         placeholders = " OR ".join(["description LIKE ?"] * len(_PURCHASE_QUEUE_DESCRIPTION_PATTERNS))
@@ -229,11 +274,15 @@ def calculate_purchases(start_date: str, end_date: str, cost_centre: str = None)
     Net Purchases = SUM(amount * -1) where ledgers.parent = 'Purchase Accounts'
     This elegantly handles Normal Purchases (Debit) as positive and Purchase Returns (Credit) as negative.
     Excludes GST ledgers inherently.
-    
+
     Uses strict Cost Centre logic:
     Allocated: SUM(rca.amount * -1) where rca.cost_centre_name = ?
     Unallocated: SUM(rle.amount * -1) where rca.ledger_entry_id IS NULL
     Combined: SUM(allocated) + SUM(unallocated)
+
+    See _PURCHASE_QUEUE_OWNED_VOUCHER_EXCLUSION_SQL: Purchase/Debit
+    Note/inter-store-transfer-Journal vouchers are permanently excluded here
+    and counted from the offline queue instead (get_queue_purchases_trend).
     """
     
     with get_db() as conn:
@@ -249,15 +298,15 @@ def calculate_purchases(start_date: str, end_date: str, cost_centre: str = None)
             WHERE l.parent = 'Purchase Accounts'
               AND CAST(rv.date AS INTEGER) >= CAST(? AS INTEGER)
               AND CAST(rv.date AS INTEGER) <= CAST(? AS INTEGER)
-        """
+        """ + _PURCHASE_QUEUE_OWNED_VOUCHER_EXCLUSION_SQL
         allocated_params = [start_date, end_date]
         if cost_centre and cost_centre != "Unallocated":
             allocated_query += " AND rca.cost_centre_name = ?"
             allocated_params.append(cost_centre)
-        
+
         cursor.execute(allocated_query, allocated_params)
         allocated_amount = cursor.fetchone()['allocated_purchases']
-        
+
         # 2. Unallocated Purchases
         unallocated_amount = 0.0
         if not cost_centre or cost_centre == "Unallocated":
@@ -271,7 +320,7 @@ def calculate_purchases(start_date: str, end_date: str, cost_centre: str = None)
                   AND rca.ledger_entry_id IS NULL
                   AND CAST(rv.date AS INTEGER) >= CAST(? AS INTEGER)
                   AND CAST(rv.date AS INTEGER) <= CAST(? AS INTEGER)
-            """
+            """ + _PURCHASE_QUEUE_OWNED_VOUCHER_EXCLUSION_SQL
             cursor.execute(unallocated_query, [start_date, end_date])
             unallocated_amount = cursor.fetchone()['unallocated_purchases']
             
@@ -297,13 +346,14 @@ def get_store_comparisons(start_date: str, end_date: str) -> list[dict]:
             WHERE l.parent = 'Purchase Accounts'
               AND CAST(rv.date AS INTEGER) >= CAST(? AS INTEGER)
               AND CAST(rv.date AS INTEGER) <= CAST(? AS INTEGER)
+        """ + _PURCHASE_QUEUE_OWNED_VOUCHER_EXCLUSION_SQL + """
             GROUP BY store_name
         """
         cursor.execute(allocated_query, [start_date, end_date])
         results = [dict(row) for row in cursor.fetchall()]
-        
+
         unallocated_query = """
-            SELECT 
+            SELECT
                 'Unallocated' as store_name,
                 COALESCE(SUM(rle.amount * -1), 0.0) as net_purchases
             FROM reporting_vouchers rv
@@ -314,7 +364,7 @@ def get_store_comparisons(start_date: str, end_date: str) -> list[dict]:
               AND rca.ledger_entry_id IS NULL
               AND CAST(rv.date AS INTEGER) >= CAST(? AS INTEGER)
               AND CAST(rv.date AS INTEGER) <= CAST(? AS INTEGER)
-        """
+        """ + _PURCHASE_QUEUE_OWNED_VOUCHER_EXCLUSION_SQL
         cursor.execute(unallocated_query, [start_date, end_date])
         unallocated = cursor.fetchone()
         
@@ -343,12 +393,12 @@ def get_purchases_trend(start_date: str, end_date: str, cost_centre: str = None)
                 WHERE l.parent = 'Purchase Accounts'
                   AND CAST(rv.date AS INTEGER) >= CAST(? AS INTEGER)
                   AND CAST(rv.date AS INTEGER) <= CAST(? AS INTEGER)
-            """
+            """ + _PURCHASE_QUEUE_OWNED_VOUCHER_EXCLUSION_SQL
             params = [start_date, end_date]
             if cost_centre:
                 allocated_query += " AND rca.cost_centre_name = ?"
                 params.append(cost_centre)
-                
+
             allocated_query += " GROUP BY rv.date, store_name"
             
             cursor.execute(allocated_query, params)
@@ -378,6 +428,7 @@ def get_purchases_trend(start_date: str, end_date: str, cost_centre: str = None)
                   AND rca.ledger_entry_id IS NULL
                   AND CAST(rv.date AS INTEGER) >= CAST(? AS INTEGER)
                   AND CAST(rv.date AS INTEGER) <= CAST(? AS INTEGER)
+            """ + _PURCHASE_QUEUE_OWNED_VOUCHER_EXCLUSION_SQL + """
                 GROUP BY rv.date
             """
             cursor.execute(unallocated_query, [start_date, end_date])

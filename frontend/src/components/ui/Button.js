@@ -1,17 +1,21 @@
 import React from 'react';
 
-export function Button({ 
-  children, 
-  variant = 'primary', 
-  className = '', 
-  disabled = false, 
-  ...props 
+export function Button({
+  children,
+  variant = 'primary',
+  className = '',
+  disabled = false,
+  ...props
 }) {
-  const baseStyles = "w-full min-h-[48px] px-4 rounded-xl font-medium text-base transition-colors flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed";
-  
+  const baseStyles = "w-full min-h-[48px] px-4 rounded-md font-heading font-semibold text-base transition-colors flex items-center justify-center gap-2 disabled:opacity-45 disabled:cursor-not-allowed";
+
+  // Matches the design system's outlined/bordered button language (no
+  // filled buttons) -- "danger" is the one deliberate exception, kept
+  // semantically red since the source design never shows a destructive
+  // confirmation to copy exactly, and real delete actions need the cue.
   const variants = {
-    primary: "bg-teal-600 hover:bg-teal-700 text-white shadow-sm",
-    secondary: "bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-gray-100 hover:bg-gray-50 dark:hover:bg-gray-700",
+    primary: "border border-accent text-accent hover:bg-accent/12 active:bg-accent/22",
+    secondary: "border border-divider text-text hover:bg-text/7 active:bg-text/14",
     danger: "bg-red-600 hover:bg-red-700 text-white shadow-sm"
   };
 

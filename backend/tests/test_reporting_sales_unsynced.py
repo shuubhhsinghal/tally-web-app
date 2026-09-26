@@ -2,7 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 from backend.main import app
 from backend.database import get_db, queue_operation, update_queue_status
-from backend.services.reporting_sales_service import get_unsynced_sales, get_pending_sales_trend
+from backend.services.reporting_sales_service import get_unsynced_sales, get_queue_sales_trend, calculate_sales
 
 client = TestClient(app)
 
@@ -104,7 +104,7 @@ def test_pending_sales_trend_excludes_delivery_uncertain():
     qid = _queue_sale(500.0, "20260115")
     set_delivery_uncertain(qid, True)
 
-    result = get_pending_sales_trend("20260101", "20260131")
+    result = get_queue_sales_trend("20260101", "20260131")
     assert result == []
 
 
@@ -113,7 +113,7 @@ def test_pending_sales_trend_groups_by_date_and_store():
     _queue_sale(300.0, "20260115", cost_center="Mahagun")
     _queue_sale(200.0, "20260116", cost_center="Gulshan")
 
-    result = get_pending_sales_trend("20260101", "20260131")
+    result = get_queue_sales_trend("20260101", "20260131")
     by_date = {r["date"]: r for r in result}
     assert by_date["20260115"]["Mahagun"] == 800.0
     assert by_date["20260115"]["Combined"] == 800.0
@@ -165,3 +165,65 @@ def test_sales_endpoint_cost_centre_filter_applies_to_blended_total():
     data = resp.json()
     assert data["summary"]["pending_amount"] == 500.0
     assert data["summary"]["net_sales"] == 500.0
+
+
+# --- A SYNCED (already live in Tally) sale must not vanish while waiting for
+# the separate reporting sync to re-confirm it, and must not be double
+# counted once that sync does eventually catch up. ---
+
+def test_synced_sale_is_included_in_queue_sales_trend():
+    # This is the exact gap this whole test class guards against: previously
+    # get_pending_sales_trend only ever looked at PENDING rows, so a sale
+    # that posted live and immediately flipped to SYNCED disappeared from
+    # every report total until the next ~30-minute reporting sync.
+    qid = _queue_sale(500.0, "20260115")
+    update_queue_status(qid, "SYNCED")
+
+    result = get_queue_sales_trend("20260101", "20260131")
+    assert result == [{"date": "20260115", "Combined": 500.0, "Combined_invoices": 1, "Unallocated": 500.0}]
+
+
+def test_sales_endpoint_does_not_lose_a_synced_sale_before_reporting_sync_catches_up():
+    qid = _queue_sale(500.0, "20260115")
+    update_queue_status(qid, "SYNCED")
+
+    resp = client.get("/api/reporting/sales", params={"start_date": "20260101", "end_date": "20260131"})
+    data = resp.json()
+    assert data["summary"]["net_sales_confirmed"] == 0.0  # reporting sync hasn't run yet
+    assert data["summary"]["net_sales"] == 500.0  # but the total already reflects it
+
+
+def test_synced_sale_is_not_double_counted_once_reporting_sync_catches_up():
+    # Once the separate reporting sync eventually re-pulls the same Sales
+    # voucher from Tally into reporting_ledger_entries, calculate_sales must
+    # exclude it (it's a VCHTYPE=Sales voucher) so the queue-sourced count
+    # above is the only place it's ever counted -- never both.
+    with get_db() as conn:
+        conn.execute("INSERT OR IGNORE INTO ledgers (name, parent, cost_centre) VALUES ('Cash Mahagun', 'Cash-in-Hand', 0)")
+        conn.execute("INSERT OR IGNORE INTO ledgers (name, parent, cost_centre) VALUES ('Sales', 'Sales Accounts', 0)")
+        conn.commit()
+
+    qid = _queue_sale(500.0, "20260115")
+    update_queue_status(qid, "SYNCED")
+
+    with get_db() as conn:
+        conn.execute("""
+            INSERT INTO reporting_vouchers (tally_guid, date, voucher_type, narration)
+            VALUES ('guid-sale-1', '20260115', 'Sales', 'Sales entry')
+        """)
+        voucher_id = conn.execute("SELECT id FROM reporting_vouchers WHERE tally_guid = 'guid-sale-1'").fetchone()[0]
+        conn.execute(
+            "INSERT INTO reporting_ledger_entries (voucher_id, ledger_name, amount, is_deemed_positive) VALUES (?, ?, ?, ?)",
+            (voucher_id, "Cash Mahagun", -500.0, 1),
+        )
+        conn.execute(
+            "INSERT INTO reporting_ledger_entries (voucher_id, ledger_name, amount, is_deemed_positive) VALUES (?, ?, ?, ?)",
+            (voucher_id, "Sales", 500.0, 0),
+        )
+        conn.commit()
+
+    assert calculate_sales("20260101", "20260131") == 0.0  # excluded -- still only counted via the queue
+
+    resp = client.get("/api/reporting/sales", params={"start_date": "20260101", "end_date": "20260131"})
+    data = resp.json()
+    assert data["summary"]["net_sales"] == 500.0  # not 1000.0

@@ -1,8 +1,8 @@
 from fastapi import APIRouter, HTTPException, Query, Request
 from typing import Optional
 from backend.services.tally_reporting_sync import async_sync_cost_centres, async_sync_vouchers
-from backend.services.reporting_sales_service import calculate_sales, get_sales_trend, get_store_comparisons, get_unsynced_sales, get_pending_sales_trend
-from backend.services.reporting_purchase_service import calculate_purchases, get_purchases_trend, get_store_comparisons as get_purchase_store_comparisons, get_item_purchase_analysis, get_unsynced_purchases, get_pending_purchases_trend
+from backend.services.reporting_sales_service import calculate_sales, get_sales_trend, get_store_comparisons, get_unsynced_sales, get_queue_sales_trend, get_sales_invoice_count, get_payment_mode_trend, get_queue_payment_mode_trend, get_store_comparisons_with_change
+from backend.services.reporting_purchase_service import calculate_purchases, get_purchases_trend, get_store_comparisons as get_purchase_store_comparisons, get_item_purchase_analysis, get_unsynced_purchases, get_queue_purchases_trend
 from backend.utils.reporting_utils import check_data_completeness, get_previous_period, merge_trend_rows, merge_pending_into_store_comparison
 from backend.database import get_db
 from backend.services.auth_helpers import resolve_view_store_filter, enforce_report_row_store_access
@@ -118,19 +118,21 @@ async def get_sales_report(
 
         net_sales_confirmed = calculate_sales(start_date, end_date, cost_centre)
 
-        # Sales still sitting in the local offline queue (Tally unreachable or
-        # not yet re-synced) are otherwise invisible here, since this report
-        # only reads Tally's own confirmed vouchers -- fold the safe subset
-        # (see get_pending_sales_trend's docstring for what's excluded and why)
-        # into the real figures so "Total Sales" reflects what's actually
-        # happened, not just what Tally has confirmed so far.
-        pending_trend = get_pending_sales_trend(start_date, end_date, cost_centre)
+        # Every sale this app has posted -- PENDING or already SYNCED -- is
+        # otherwise invisible here for up to 30 minutes, since this report
+        # only reads Tally's own confirmed vouchers and the separate
+        # reporting sync that re-pulls them runs on its own schedule (see
+        # get_queue_sales_trend's docstring for what's excluded and why).
+        # Folding it in here means "Total Sales" reflects what's actually
+        # happened the moment this app knows about it, not only once Tally's
+        # own report has caught up.
+        pending_trend = get_queue_sales_trend(start_date, end_date, cost_centre)
         pending_amount = round(sum(row['Combined'] for row in pending_trend), 2)
         net_sales = round(net_sales_confirmed + pending_amount, 2)
 
         if is_prev_complete:
             prev_net_sales_confirmed = calculate_sales(prev_s, prev_e, cost_centre)
-            prev_pending_trend = get_pending_sales_trend(prev_s, prev_e, cost_centre)
+            prev_pending_trend = get_queue_sales_trend(prev_s, prev_e, cost_centre)
             prev_pending_amount = sum(row['Combined'] for row in prev_pending_trend)
             prev_net_sales = round(prev_net_sales_confirmed + prev_pending_amount, 2)
             change_amount = net_sales - prev_net_sales
@@ -141,15 +143,50 @@ async def get_sales_report(
             change_pct = None
 
         trend = merge_trend_rows(get_sales_trend(start_date, end_date, cost_centre), pending_trend)
-        store_comparison = merge_pending_into_store_comparison(
-            get_store_comparisons(start_date, end_date),
-            get_pending_sales_trend(start_date, end_date)  # unfiltered, matching get_store_comparisons' own scope
-        )
+        trend = merge_trend_rows(trend, get_payment_mode_trend(start_date, end_date, cost_centre))
+        trend = merge_trend_rows(trend, get_queue_payment_mode_trend(start_date, end_date, cost_centre))
+
+        # Store-wise totals fold in the queue-sourced amount the same way the
+        # overall summary does (see net_sales above), and each store's own
+        # change_percentage is computed against its OWN queue-inclusive
+        # previous-period total -- not just the confirmed figure -- so a
+        # store's % change stays consistent with the headline number just above it.
+        store_comparison = get_store_comparisons_with_change(start_date, end_date)
+        pending_by_store = {}
+        for row in get_queue_sales_trend(start_date, end_date):
+            for key, value in row.items():
+                if key in ('date', 'Combined', 'Combined_invoices'):
+                    continue
+                pending_by_store[key] = pending_by_store.get(key, 0.0) + value
+        prev_pending_by_store = {}
+        for row in get_queue_sales_trend(prev_s, prev_e):
+            for key, value in row.items():
+                if key in ('date', 'Combined', 'Combined_invoices'):
+                    continue
+                prev_pending_by_store[key] = prev_pending_by_store.get(key, 0.0) + value
+
+        seen_stores = {row['store_name'] for row in store_comparison}
+        for store_name, amount in pending_by_store.items():
+            if store_name not in seen_stores:
+                store_comparison.append({"store_name": store_name, "net_sales": 0.0, "previous_net_sales": None, "change_percentage": None})
+                seen_stores.add(store_name)
+
+        for row in store_comparison:
+            row['net_sales'] = round(row['net_sales'] + pending_by_store.get(row['store_name'], 0.0), 2)
+            prev_total = (row.get('previous_net_sales') or 0.0) + prev_pending_by_store.get(row['store_name'], 0.0)
+            if prev_total:
+                row['change_percentage'] = round((row['net_sales'] - prev_total) / prev_total * 100, 1)
+            row['previous_net_sales'] = round(prev_total, 2) if prev_total else row.get('previous_net_sales')
+
         if cost_centre:
             # Cross-store breakdown is meaningless (and a data leak) once
             # the caller is locked to one store -- only their own row applies.
             store_comparison = [row for row in store_comparison if row.get('store_name') == cost_centre]
         unsynced_sales = get_unsynced_sales(start_date, end_date, cost_centre)
+
+        pending_invoice_count = sum(row.get('Combined_invoices', 0) for row in get_queue_sales_trend(start_date, end_date, cost_centre))
+        invoice_count = get_sales_invoice_count(start_date, end_date, cost_centre) + pending_invoice_count
+        avg_bill = round(net_sales / invoice_count, 2) if invoice_count else 0.0
 
         return {
             "is_data_complete": is_complete,
@@ -161,7 +198,9 @@ async def get_sales_report(
                 "pending_amount": pending_amount,
                 "previous_net_sales": round(prev_net_sales, 2) if prev_net_sales is not None else None,
                 "change_amount": round(change_amount, 2) if change_amount is not None else None,
-                "change_percentage": round(change_pct, 2) if change_pct is not None else None
+                "change_percentage": round(change_pct, 2) if change_pct is not None else None,
+                "invoice_count": invoice_count,
+                "avg_bill": avg_bill
             },
             "trend": trend,
             "store_comparison": store_comparison,
@@ -182,16 +221,17 @@ def get_purchases_report(request: Request, start_date: str = Query(...), end_dat
 
         net_purchases_confirmed = calculate_purchases(start_date, end_date, cost_centre)
 
-        # Purchases (and returns) still sitting in the local offline queue --
-        # see get_pending_purchases_trend's docstring for the three queue
-        # shapes this covers and why a return is subtracted, not added.
-        pending_trend = get_pending_purchases_trend(start_date, end_date, cost_centre)
+        # Every purchase/return this app has posted -- PENDING or already
+        # SYNCED -- otherwise invisible here for up to 30 minutes (see
+        # get_queue_purchases_trend's docstring for the three queue shapes
+        # this covers and why a return is subtracted, not added).
+        pending_trend = get_queue_purchases_trend(start_date, end_date, cost_centre)
         pending_amount = round(sum(row['Combined'] for row in pending_trend), 2)
         net_purchases = round(net_purchases_confirmed + pending_amount, 2)
 
         if is_prev_complete:
             prev_net_purchases_confirmed = calculate_purchases(prev_s, prev_e, cost_centre)
-            prev_pending_trend = get_pending_purchases_trend(prev_s, prev_e, cost_centre)
+            prev_pending_trend = get_queue_purchases_trend(prev_s, prev_e, cost_centre)
             prev_pending_amount = sum(row['Combined'] for row in prev_pending_trend)
             prev_net_purchases = round(prev_net_purchases_confirmed + prev_pending_amount, 2)
             change_amount = net_purchases - prev_net_purchases
@@ -204,7 +244,7 @@ def get_purchases_report(request: Request, start_date: str = Query(...), end_dat
         trend = merge_trend_rows(get_purchases_trend(start_date, end_date, cost_centre), pending_trend)
         store_comparison = merge_pending_into_store_comparison(
             get_purchase_store_comparisons(start_date, end_date),
-            get_pending_purchases_trend(start_date, end_date)  # unfiltered, matching get_purchase_store_comparisons' own scope
+            get_queue_purchases_trend(start_date, end_date)  # unfiltered, matching get_purchase_store_comparisons' own scope
         )
         if cost_centre:
             store_comparison = [row for row in store_comparison if row.get('store_name') == cost_centre]

@@ -17,6 +17,7 @@ from fastapi import BackgroundTasks
 from starlette.concurrency import run_in_threadpool
 from backend.services.image_normalizer import normalize_uploaded_invoice
 from backend.services.image_enhancer import enhance_document_image, apply_manual_perspective_crop
+from backend.services.extraction_v4.retry import get_extraction_provider
 import traceback
 
 
@@ -43,16 +44,22 @@ def _debug_log_crop(draft_id, page_idx, points, warped_bytes):
     except Exception as e:
         print(f"[DEBUG CROP LOG] Failed to persist debug crop data: {e}", flush=True)
 
-def process_async_extraction(draft_id: str, files_data: list):
+def process_async_extraction(draft_id: str, files_data: list, provider_override: str = None, on_complete=None):
+    """on_complete, when given, is called once with (success: bool,
+    extracted_data: dict | None, error: str | None) after this draft reaches
+    READY or FAILED -- e.g. so a WhatsApp sender can be told the real
+    outcome instead of just that their photo was received. Best-effort:
+    a callback failure is logged, never allowed to override the draft's
+    own success/failure status."""
     from backend.services.extraction_v4.extraction_engine import process_invoice_v4
     from backend.services.extraction_v4.text_mapper import map_items_to_tally, map_supplier_to_tally
-    
+
     try:
         f_bytes_list = []
         for file_bytes, filename, content_type in files_data:
             f_bytes_list.append(normalize_uploaded_invoice(file_bytes, filename, content_type))
-            
-        extracted_data = process_invoice_v4(f_bytes_list)
+
+        extracted_data = process_invoice_v4(f_bytes_list, provider_override=provider_override)
         
         mapped_items = map_items_to_tally(extracted_data.get("items", []))
         extracted_data["items"] = mapped_items
@@ -97,7 +104,13 @@ def process_async_extraction(draft_id: str, files_data: list):
                 draft_id
             ))
             conn.commit()
-            
+
+        if on_complete:
+            try:
+                on_complete(True, extracted_data, None)
+            except Exception as cb_err:
+                print(f"on_complete callback failed for draft {draft_id}: {cb_err}")
+
     except Exception as e:
         print(f"Async extraction failed: {e}")
         traceback.print_exc()
@@ -105,18 +118,29 @@ def process_async_extraction(draft_id: str, files_data: list):
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                UPDATE purchase_drafts 
+                UPDATE purchase_drafts
                 SET status = 'FAILED', draft_data = ?, updated_at = ?
                 WHERE id = ?
             """, (json.dumps({"error": str(e)}), now, draft_id))
             conn.commit()
 
-def enqueue_draft_extraction(background_tasks: BackgroundTasks, files_data: list, draft_id: str = None, crop_points_list: list = None):
+        if on_complete:
+            try:
+                on_complete(False, None, str(e))
+            except Exception as cb_err:
+                print(f"on_complete callback failed for draft {draft_id}: {cb_err}")
+
+def enqueue_draft_extraction(background_tasks: BackgroundTasks, files_data: list, draft_id: str = None, crop_points_list: list = None, provider_override: str = None, on_complete=None):
     """
     Enqueues the V4 extraction process for an uploaded invoice.
     files_data: list of tuples (file_bytes, filename, content_type)
     crop_points_list: optional list aligned by index with files_data, each entry
     either a 4-point array (manually marked corners) or None.
+    provider_override: pins the extraction provider for this call (e.g. "qwen"
+    for WhatsApp uploads) regardless of the global Settings toggle. None keeps
+    the default behavior of reading that toggle.
+    on_complete: optional callback(success, extracted_data, error) invoked once
+    extraction actually finishes -- see process_async_extraction.
     Returns: draft_id
     """
     if not draft_id:
@@ -127,6 +151,13 @@ def enqueue_draft_extraction(background_tasks: BackgroundTasks, files_data: list
 
     def _get_crop_points(i):
         return crop_points_list[i] if i < len(crop_points_list) else None
+
+    # Qwen gets the exact raw upload, minus format normalization -- only a
+    # manual crop (if the user drew one) is still applied. No auto-orient,
+    # deskew, auto perspective-correction, illumination correction, or
+    # upscale. Gemini keeps the full scanner-like enhancement pipeline below,
+    # which was tuned/verified against it.
+    skip_enhancement = get_extraction_provider(provider_override) == "qwen"
 
     first_file_bytes, first_filename, first_content_type = files_data[0]
 
@@ -147,7 +178,8 @@ def enqueue_draft_extraction(background_tasks: BackgroundTasks, files_data: list
         if first_crop_points:
             first_file_bytes = apply_manual_perspective_crop(first_file_bytes, first_crop_points)
             _debug_log_crop(draft_id, 0, first_crop_points, first_file_bytes)
-        first_file_bytes = enhance_document_image(first_file_bytes, skip_perspective_detection=bool(first_crop_points))
+        if not skip_enhancement:
+            first_file_bytes = enhance_document_image(first_file_bytes, skip_perspective_detection=bool(first_crop_points))
 
     # Update the files_data with normalized bytes for the first file
     files_data[0] = (first_file_bytes, first_filename, first_content_type)
@@ -169,7 +201,8 @@ def enqueue_draft_extraction(background_tasks: BackgroundTasks, files_data: list
                         if crop_points:
                             norm_bytes = apply_manual_perspective_crop(norm_bytes, crop_points)
                             _debug_log_crop(draft_id, i, crop_points, norm_bytes)
-                        norm_bytes = enhance_document_image(norm_bytes, skip_perspective_detection=bool(crop_points))
+                        if not skip_enhancement:
+                            norm_bytes = enhance_document_image(norm_bytes, skip_perspective_detection=bool(crop_points))
                     files_data[i] = (norm_bytes, f_name, f_type)
                 else:
                     norm_bytes = first_file_bytes
@@ -219,8 +252,8 @@ def enqueue_draft_extraction(background_tasks: BackgroundTasks, files_data: list
                 return draft_id
             raise
 
-    background_tasks.add_task(process_async_extraction, draft_id, files_data)
-    
+    background_tasks.add_task(process_async_extraction, draft_id, files_data, provider_override, on_complete)
+
     return draft_id
 
 @router.post("/async-extract")
@@ -323,12 +356,28 @@ def list_purchase_drafts():
         conn.row_factory = dict_factory
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT id, supplier_name, invoice_number, invoice_date, grand_total, item_count, status, image_path, created_at, updated_at
+            SELECT id, supplier_name, invoice_number, invoice_date, grand_total, item_count, status, draft_data, image_path, created_at, updated_at
             FROM purchase_drafts
             WHERE status != 'POSTED'
             ORDER BY created_at DESC
         """)
         rows = cursor.fetchall()
+
+    # Surface how many extracted items didn't auto-match a known Tally stock
+    # item (item_mapping.map_items_to_tally sets is_mapped per item) -- lets
+    # the inbox distinguish "ready to push" from "needs a manual item check"
+    # without the client re-fetching each draft's full item list.
+    for row in rows:
+        raw = row.pop("draft_data", None)
+        unmatched_count = None
+        if raw:
+            try:
+                items = json.loads(raw).get("items") or []
+                unmatched_count = sum(1 for i in items if not i.get("is_mapped"))
+            except Exception:
+                pass
+        row["unmatched_count"] = unmatched_count
+
     return {"drafts": rows}
 
 @router.get("/{draft_id}")

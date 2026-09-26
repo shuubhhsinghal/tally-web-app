@@ -6,7 +6,7 @@ import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 from fastapi.testclient import TestClient
 from backend.main import app
-from backend.database import get_db, init_db
+from backend.database import get_db, init_db, queue_operation, update_queue_status
 from backend.services.tally_reporting_sync import fetch_and_store_vouchers
 
 client = TestClient(app)
@@ -167,7 +167,38 @@ def setup_teardown_db():
         mock_resp.text = MOCK_PURCHASE_XML
         mock_post.return_value = mock_resp
         asyncio.run(fetch_and_store_vouchers('20260701', '20260731'))
-    
+
+    # P-1/P-2 (Purchase) and P-3 (Debit Note) each also need a matching SYNCED
+    # queue row: the confirmed-side summary/trend/store-comparison queries
+    # permanently exclude both voucher types (this app's sole-poster
+    # assumption -- see _PURCHASE_QUEUE_OWNED_VOUCHER_EXCLUSION_SQL) and count
+    # them from here instead, while the Bills/Supplier-analysis endpoints
+    # below still read the confirmed reporting_vouchers rows directly
+    # (unaffected). Without this, the summary tests would see 0 instead of
+    # each amount.
+    with get_db() as conn:
+        conn.execute("DELETE FROM offline_queue WHERE description LIKE 'Purchase Invoice: P-%' OR description LIKE 'Purchase Return (Debit Note): P-%'")
+        conn.commit()
+    qid1 = queue_operation(
+        "POST_VOUCHER", "<ENVELOPE/>",
+        {"supplier": "Supplier A", "invoice_number": "P-1", "amount": 1000.0, "tally_date": "20260701", "cost_center": "Store A", "narration": ""},
+        "Purchase Invoice: P-1 from Supplier A",
+    )
+    update_queue_status(qid1, "SYNCED")
+    qid2 = queue_operation(
+        "POST_VOUCHER", "<ENVELOPE/>",
+        {"supplier": "Supplier B", "invoice_number": "P-2", "amount": 500.0, "tally_date": "20260702", "cost_center": None, "narration": ""},
+        "Purchase Invoice: P-2 from Supplier B",
+    )
+    update_queue_status(qid2, "SYNCED")
+    qid3 = queue_operation(
+        "POST_VOUCHER", "<ENVELOPE/>",
+        {"supplier": "Supplier A", "invoice_number": "P-3", "tally_date": "20260703",
+         "adjustment": {"store": "Store A", "items": [{"name": "Item X", "qty": 2, "rate": 100.0}]}},
+        "Purchase Return (Debit Note): P-3 from Supplier A",
+    )
+    update_queue_status(qid3, "SYNCED")
+
     yield
     
     # Teardown
@@ -175,6 +206,8 @@ def setup_teardown_db():
         cursor = conn.cursor()
         cursor.execute("DELETE FROM reporting_vouchers WHERE tally_guid IN ('P-1', 'P-2', 'P-3')")
         cursor.execute("DELETE FROM reporting_sync_history WHERE start_date='20260701'")
+        cursor.execute("DELETE FROM offline_queue WHERE description LIKE 'Purchase Invoice: P-%' OR description LIKE 'Purchase Return (Debit Note): P-%'")
+        conn.commit()
 
 def test_purchases_report_combined():
     # Store A: 1000 - 200 = 800

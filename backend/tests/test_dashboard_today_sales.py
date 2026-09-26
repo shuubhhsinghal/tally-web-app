@@ -29,12 +29,16 @@ def _today():
 
 
 def _insert_confirmed_sale(amount, date=None):
+    # voucher_type is deliberately NOT "Sales" -- calculate_sales excludes
+    # that type permanently (it's always sourced from this app's own offline
+    # queue instead, see get_queue_sales_trend). "Journal" here simulates a
+    # manual adjustment touching a Sales Accounts ledger some other way.
     date = date or _today()
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("INSERT OR IGNORE INTO ledgers (name, parent) VALUES ('Sales', 'Sales Accounts')")
         cursor.execute(
-            "INSERT INTO reporting_vouchers (tally_guid, date, voucher_type) VALUES (?, ?, 'Sales')",
+            "INSERT INTO reporting_vouchers (tally_guid, date, voucher_type) VALUES (?, ?, 'Journal')",
             (f"guid-{date}-{amount}", date)
         )
         voucher_id = cursor.lastrowid
@@ -68,6 +72,20 @@ def test_today_sales_combines_confirmed_and_pending():
 
     assert data["today_sales"] == 700.0
     assert data["today_sales_pending_count"] == 1
+
+
+def test_today_sales_includes_synced_queue_entries():
+    # The exact gap this fix closes: a sale that posted live and immediately
+    # flipped to SYNCED must count right away, not disappear until the
+    # separate ~30-minute reporting sync re-confirms it from Tally.
+    _insert_confirmed_sale(500)
+    _insert_queued_sale(200, "SYNCED")
+
+    res = client.get("/api/dashboard/stats")
+    data = res.json()
+
+    assert data["today_sales"] == 700.0
+    assert data["today_sales_pending_count"] == 0  # SYNCED isn't "pending" for the badge
 
 
 def test_today_sales_excludes_failed_queue_entries():

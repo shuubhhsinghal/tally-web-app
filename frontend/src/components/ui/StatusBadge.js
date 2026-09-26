@@ -1,18 +1,21 @@
 import React from 'react';
-import { CheckCircle2, Clock, XCircle } from 'lucide-react';
+import { CheckCircle2, Clock, AlertCircle } from 'lucide-react';
 
 export function StatusBadge({ status, label, className = '' }) {
   // status: 'synced' | 'waiting' | 'failed'
+  // Matches the design system's convention of distinguishing sync states by
+  // icon + label, not color -- "synced" is calm/neutral, "waiting" and
+  // "failed" both use the single accent (no separate red/amber semantics).
   const variants = {
-    synced: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400 border-green-200 dark:border-green-800",
-    waiting: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 border-amber-200 dark:border-amber-800",
-    failed: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400 border-red-200 dark:border-red-800"
+    synced: "border-divider text-neutral-700",
+    waiting: "border-accent text-accent-700",
+    failed: "border-accent text-accent-700",
   };
 
   const Icon = {
     synced: CheckCircle2,
     waiting: Clock,
-    failed: XCircle
+    failed: AlertCircle
   }[status] || Clock;
 
   const defaultLabel = {
@@ -22,7 +25,7 @@ export function StatusBadge({ status, label, className = '' }) {
   }[status] || 'Unknown';
 
   return (
-    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold border ${variants[status] || variants.waiting} ${className}`}>
+    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${variants[status] || variants.waiting} ${className}`}>
       <Icon className="w-3.5 h-3.5" />
       {label || defaultLabel}
     </span>

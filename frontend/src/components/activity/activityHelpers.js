@@ -1,4 +1,4 @@
-import { Receipt, MoveRight, Building, Package, Landmark } from 'lucide-react';
+import { Receipt, ShoppingCart, ArrowDownLeft, ArrowUpRight, RotateCcw, Landmark } from 'lucide-react';
 
 export const getStatus = (dbStatus) => {
   if (dbStatus === 'PENDING') return 'waiting';
@@ -6,20 +6,17 @@ export const getStatus = (dbStatus) => {
   return 'failed';
 };
 
-export const getIconType = (opType) => {
-  if (!opType) return 'sale';
-  if (opType.includes('VOUCHER')) return 'sale';
-  if (opType.includes('LEDGER') || opType.includes('ITEM')) return 'bank';
-  return 'sale';
-};
-
-export const getIcon = (type) => {
-  switch (type) {
-    case 'sale': return <Receipt className="w-5 h-5 text-blue-500" />;
-    case 'purchase': return <Package className="w-5 h-5 text-purple-500" />;
-    case 'stock': return <MoveRight className="w-5 h-5 text-indigo-500" />;
-    case 'bank': return <Landmark className="w-5 h-5 text-teal-500" />;
-    case 'transfer': return <Building className="w-5 h-5 text-green-500" />;
-    default: return <Receipt className="w-5 h-5 text-gray-500" />;
+// Distinguished by icon shape, not color, matching the design system's
+// monochrome convention (color is reserved for the accent/attention cases).
+// Mirrors the icon choices in the "New entry" sheet (BottomNav.js).
+export const getIcon = (typeLabel) => {
+  switch (typeLabel) {
+    case 'Sale': return <Receipt className="w-5 h-5 text-neutral-700" />;
+    case 'Purchase': return <ShoppingCart className="w-5 h-5 text-neutral-700" />;
+    case 'Purchase return': return <RotateCcw className="w-5 h-5 text-neutral-700" />;
+    case 'Payment': return <ArrowUpRight className="w-5 h-5 text-neutral-700" />;
+    case 'Receipt': return <ArrowDownLeft className="w-5 h-5 text-neutral-700" />;
+    case 'Loan received': return <Landmark className="w-5 h-5 text-neutral-700" />;
+    default: return <Receipt className="w-5 h-5 text-neutral-700" />;
   }
 };

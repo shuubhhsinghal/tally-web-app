@@ -108,7 +108,12 @@ def test_staff_cannot_post_flat_purchase_unallocated():
 
 # --- Payment ---
 
-def test_staff_cannot_post_expense_payment_for_other_store():
+def test_staff_expense_payment_cost_center_is_forced_to_own_store():
+    # A non-owner is never trusted to supply the cost centre themselves for an
+    # expense payment -- rather than rejecting a mismatched/spoofed value with
+    # a 403 (the old behaviour), their own store is silently substituted, so
+    # there's no request shape that lets them post an expense attributed to
+    # a store they don't belong to.
     owner = _setup_owner()
     _create_staff(owner["token"], "Staff One", "staffpass", "Mahagun")
     staff = _login("Staff One", "staffpass")
@@ -121,7 +126,13 @@ def test_staff_cannot_post_expense_payment_for_other_store():
         },
         headers=_auth_headers(staff["token"]),
     )
-    assert res.status_code == 403
+    assert res.status_code != 403
+
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT payload FROM offline_queue WHERE description LIKE 'Payment:%' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    assert json.loads(row["payload"])["cost_center"] == "Mahagun"
 
 
 def test_staff_can_post_payment_with_no_cost_center():

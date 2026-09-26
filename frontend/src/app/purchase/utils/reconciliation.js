@@ -117,7 +117,13 @@ export function calculateAndReconcileV4(extractedData, gstRecordingMethod, userG
   if (userGstBasisOverride && userGstBasisOverride !== "unknown") {
     gstBasis = userGstBasisOverride;
   } else {
-    gstBasis = "exclusive";
+    // Use the header-keyword + math-comparison detector (reads the header
+    // and per-item line_amount values already resolved above) instead of
+    // blindly assuming "exclusive" -- only fall back to that default when
+    // detection is genuinely inconclusive, so an ambiguous invoice still
+    // shows real (if provisional) numbers rather than all-zero item rows.
+    const detected = detectGstBasis(processedData);
+    gstBasis = detected !== "unknown" ? detected : "exclusive";
   }
   
   const calculatedItems = [];

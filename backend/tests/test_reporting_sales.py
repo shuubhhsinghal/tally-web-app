@@ -15,19 +15,25 @@ from backend.services.reporting_sales_service import (
 )
 from backend.services.tally_reporting_sync import fetch_and_store_vouchers
 
-# Dummy XML with comprehensive cases:
-# VCH 1: Sales, 1000 to Store A, 500 to Store B, 150 CGST (GST should be ignored).
+# Dummy XML with comprehensive cases. VCHTYPE is deliberately NOT "Sales" for
+# V1/V3 -- calculate_sales excludes that voucher type (it's always sourced
+# from this app's own offline queue instead, counted the moment it's SYNCED
+# rather than waiting on this same reporting sync -- see
+# reporting_sales_service.get_queue_sales_trend). "Journal" here simulates a
+# manual adjustment touching a Sales Accounts ledger some other way, which
+# this report should still pick up normally.
+# VCH 1: Journal, 1000 to Store A, 500 to Store B, 150 CGST (GST should be ignored).
 # VCH 2: Sales Return (Credit Note), 200 from Store A (Reduction).
-# VCH 3: Sales Unallocated, 300 to no store.
+# VCH 3: Journal, 300 to no store.
 MOCK_XML = """<ENVELOPE>
   <BODY>
     <DATA>
       <COLLECTION>
-        <!-- Voucher 1: Sales with GST and Allocations -->
+        <!-- Voucher 1: Journal with GST and Allocations -->
         <VOUCHER VCHKEY="v1">
           <GUID>v1</GUID>
           <DATE>20230915</DATE>
-          <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
+          <VOUCHERTYPENAME>Journal</VOUCHERTYPENAME>
           <ALLLEDGERENTRIES.LIST>
             <LEDGERNAME>Sales Account 1</LEDGERNAME>
             <AMOUNT>1500.00</AMOUNT>
@@ -73,11 +79,11 @@ MOCK_XML = """<ENVELOPE>
           </ALLLEDGERENTRIES.LIST>
         </VOUCHER>
 
-        <!-- Voucher 3: Sales Unallocated -->
+        <!-- Voucher 3: Journal, Unallocated -->
         <VOUCHER VCHKEY="v3">
           <GUID>v3</GUID>
           <DATE>20230917</DATE>
-          <VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
+          <VOUCHERTYPENAME>Journal</VOUCHERTYPENAME>
           <ALLLEDGERENTRIES.LIST>
             <LEDGERNAME>Sales Account 1</LEDGERNAME>
             <AMOUNT>300.00</AMOUNT>

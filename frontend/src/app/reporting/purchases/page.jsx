@@ -1,864 +1,723 @@
 "use client";
 
-import React, { useState, useEffect } from 'react';
-import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-import { TrendingUp, TrendingDown, ChevronLeft, ArrowUpRight, ArrowDownRight, Store, Calendar, ShoppingCart, Users, FileText, Package, X, AlertTriangle } from 'lucide-react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
+import { useSyncStatus } from '@/context/SyncStatusContext';
+import TopBar from '@/components/layout/TopBar';
+import ReportTabs from '@/components/layout/ReportTabs';
+import { Wifi, WifiOff, ChevronDown, ChevronRight, AlertTriangle, Calendar, Users, X, Package } from 'lucide-react';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 
 const PRESETS = [
-    { label: "This Week", value: "week" },
-    { label: "This Month", value: "month" },
-    { label: "This Quarter", value: "quarter" },
-    { label: "This Financial Year", value: "fy" },
-    { label: "Custom", value: "custom" },
+  { label: "Today", value: "today" },
+  { label: "7 days", value: "7days" },
+  { label: "This month", value: "month" },
+  { label: "30 days", value: "30days" },
+  { label: "Custom", value: "custom" },
 ];
 
-function formatCurrency(val) {
-    if (val === undefined || val === null) return "₹0.00";
-    return new Intl.NumberFormat('en-IN', {
-        style: 'currency',
-        currency: 'INR',
-        maximumFractionDigits: 0
-    }).format(val);
+// Dark-to-light accent steps -- mirrors the Sales report's per-store bar/legend
+// gradation so the two reports read as the same visual language.
+const STORE_SWATCHES = ['bg-accent-800', 'bg-accent-500', 'bg-accent-300', 'bg-accent-600', 'bg-accent-200'];
+
+function fmtMoney(v) {
+  const n = Math.round(v || 0);
+  return `₹${n.toLocaleString('en-IN')}`;
+}
+function fmtMoney2(v) {
+  const n = Number(v || 0);
+  return `₹${n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-function formatShortCurrency(val) {
-    if (val === undefined || val === null) return "0";
-    if (val >= 100000) return (val / 100000).toFixed(1) + 'L';
-    if (val >= 1000) return (val / 1000).toFixed(0) + 'K';
-    return val.toString();
-}
+function pad2(n) { return String(n).padStart(2, '0'); }
+function fmtYYYYMMDD(d) { return `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}`; }
 
-function getPresetDates(preset) {
-    const today = new Date();
-    const y = today.getFullYear();
-    const m = today.getMonth();
-    
-    let start, end;
-    
-    if (preset === "week") {
-        const day = today.getDay();
-        const diff = today.getDate() - day + (day === 0 ? -6 : 1);
-        start = new Date(today.setDate(diff));
-        end = new Date(today.setDate(diff + 6));
-    } else if (preset === "month") {
-        start = new Date(y, m, 1);
-        end = new Date(y, m + 1, 0);
-    } else if (preset === "quarter") {
-        const qMonth = Math.floor(m / 3) * 3;
-        start = new Date(y, qMonth, 1);
-        end = new Date(y, qMonth + 3, 0);
-    } else if (preset === "fy") {
-        const fyStartYear = m >= 3 ? y : y - 1;
-        start = new Date(fyStartYear, 3, 1);
-        end = new Date(fyStartYear + 1, 2, 31);
-    } else {
-        start = new Date(y, m, 1);
-        end = new Date(y, m + 1, 0);
-    }
-    
-    const fmt = (dt) => {
-        const yyyy = dt.getFullYear();
-        const mm = String(dt.getMonth() + 1).padStart(2, '0');
-        const dd = String(dt.getDate()).padStart(2, '0');
-        return `${yyyy}${mm}${dd}`;
-    };
+function getPresetDates(preset, custom) {
+  const today = new Date();
+  const fmt = fmtYYYYMMDD;
+
+  if (preset === "today") {
+    return { start: fmt(today), end: fmt(today) };
+  }
+  if (preset === "7days") {
+    const start = new Date(today); start.setDate(today.getDate() - 6);
+    return { start: fmt(start), end: fmt(today) };
+  }
+  if (preset === "month") {
+    const start = new Date(today.getFullYear(), today.getMonth(), 1);
+    const end = new Date(today.getFullYear(), today.getMonth() + 1, 0);
     return { start: fmt(start), end: fmt(end) };
+  }
+  if (preset === "30days") {
+    const start = new Date(today); start.setDate(today.getDate() - 29);
+    return { start: fmt(start), end: fmt(today) };
+  }
+  return custom || { start: fmt(today), end: fmt(today) };
 }
 
 const formatDateInput = (yyyymmdd) => {
-    if (!yyyymmdd || yyyymmdd.length !== 8) return "";
-    return `${yyyymmdd.substring(0, 4)}-${yyyymmdd.substring(4, 6)}-${yyyymmdd.substring(6, 8)}`;
+  if (!yyyymmdd || yyyymmdd.length !== 8) return "";
+  return `${yyyymmdd.substring(0, 4)}-${yyyymmdd.substring(4, 6)}-${yyyymmdd.substring(6, 8)}`;
 };
+const parseDateInput = (yyyy_mm_dd) => (yyyy_mm_dd ? yyyy_mm_dd.replace(/-/g, '') : "");
 
-const parseDateInput = (yyyy_mm_dd) => {
-    if (!yyyy_mm_dd) return "";
-    return yyyy_mm_dd.replace(/-/g, '');
-};
+function toDate(yyyymmdd) {
+  return new Date(+yyyymmdd.slice(0, 4), +yyyymmdd.slice(4, 6) - 1, +yyyymmdd.slice(6, 8));
+}
+function formatDateShort(yyyymmdd) {
+  return new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short' }).format(toDate(yyyymmdd));
+}
+function formatDateFull(yyyymmdd) {
+  return new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }).format(toDate(yyyymmdd));
+}
+function dayOfWeekLabel(yyyymmdd) {
+  const d = toDate(yyyymmdd);
+  const today = new Date();
+  const yesterday = new Date(); yesterday.setDate(today.getDate() - 1);
+  if (fmtYYYYMMDD(d) === fmtYYYYMMDD(today)) return 'Today';
+  if (fmtYYYYMMDD(d) === fmtYYYYMMDD(yesterday)) return 'Yesterday';
+  return new Intl.DateTimeFormat('en-GB', { weekday: 'short', day: 'numeric', month: 'short' }).format(d);
+}
+function daysBetween(start, end) {
+  const ms = toDate(end) - toDate(start);
+  return Math.round(ms / 86400000) + 1;
+}
 
-const formatDateShort = (yyyymmdd) => {
-    if (!yyyymmdd || yyyymmdd.length !== 8) return yyyymmdd;
-    const date = new Date(
-        parseInt(yyyymmdd.substring(0, 4)),
-        parseInt(yyyymmdd.substring(4, 6)) - 1,
-        parseInt(yyyymmdd.substring(6, 8))
-    );
-    return new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short' }).format(date);
-};
-
-const formatDateFull = (yyyymmdd) => {
-    if (!yyyymmdd || yyyymmdd.length !== 8) return yyyymmdd;
-    const date = new Date(
-        parseInt(yyyymmdd.substring(0, 4)),
-        parseInt(yyyymmdd.substring(4, 6)) - 1,
-        parseInt(yyyymmdd.substring(6, 8))
-    );
-    return new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }).format(date);
-};
-
-const CustomTooltip = ({ active, payload, label }) => {
-    if (active && payload && payload.length) {
-        return (
-            <div className="bg-slate-800 border border-slate-700 p-3 rounded-xl shadow-xl">
-                <p className="text-slate-400 text-xs font-medium mb-1">{formatDateShort(label)}</p>
-                <p className="text-white font-bold text-lg">{formatCurrency(payload[0].value)}</p>
-            </div>
-        );
-    }
-    return null;
-};
+function ChangeIndicator({ pct }) {
+  if (pct === null || pct === undefined) return null;
+  const arrow = pct >= 0 ? '▲' : '▼';
+  return <span className="text-neutral-700">{arrow} {Math.abs(pct).toFixed(0)}%</span>;
+}
 
 export default function PurchasesReport() {
-    const router = useRouter();
-    const { user } = useAuth();
-    const lockedStore = user && !user.is_owner ? user.store_name : null;
-    const [isMounted, setIsMounted] = useState(false);
-    useEffect(() => setIsMounted(true), []);
+  const router = useRouter();
+  const { user } = useAuth();
+  const { isOnline } = useSyncStatus();
+  const isOwner = !user || user.is_owner;
+  const lockedStore = user && !user.is_owner ? user.store_name : null;
 
-    const [loading, setLoading] = useState(false);
-    const [data, setData] = useState(null);
-    const [error, setError] = useState(null);
-    const [preset, setPreset] = useState("month");
-    const [dates, setDates] = useState(getPresetDates("month"));
-    const [costCentres, setCostCentres] = useState([]);
-    const [selectedStore, setSelectedStore] = useState(lockedStore || "");
+  const [preset, setPreset] = useState("7days");
+  const [customDates, setCustomDates] = useState(null);
+  const [selectedStore, setSelectedStore] = useState(lockedStore || "");
+  const [costCentres, setCostCentres] = useState([]);
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [queueCount, setQueueCount] = useState(null);
 
-    useEffect(() => {
-        if (lockedStore) setSelectedStore(lockedStore);
-    }, [lockedStore]);
+  const [listMode, setListMode] = useState('daily'); // daily | suppliers
+  const [expandedRow, setExpandedRow] = useState(null); // day date, or supplier name
+  const [rowBills, setRowBills] = useState([]);
+  const [rowBillsLoading, setRowBillsLoading] = useState(false);
 
-    // Supplier Drilldown State
-    const [suppliersLoading, setSuppliersLoading] = useState(false);
-    const [supplierData, setSupplierData] = useState([]);
-    const [selectedSupplier, setSelectedSupplier] = useState(null);
-    
-    // Day Drilldown State
-    const [selectedDay, setSelectedDay] = useState(null);
-    const [dayBillsLoading, setDayBillsLoading] = useState(false);
-    const [dayBillsData, setDayBillsData] = useState([]);
-    
-    const [billsLoading, setBillsLoading] = useState(false);
-    const [billsData, setBillsData] = useState([]);
-    
-    const [billDetailsLoading, setBillDetailsLoading] = useState(false);
-    const [billDetails, setBillDetails] = useState(null);
-    const [listMode, setListMode] = useState("daily"); // daily, suppliers
+  const [supplierData, setSupplierData] = useState([]);
+  const [suppliersLoading, setSuppliersLoading] = useState(false);
 
-    useEffect(() => {
-        fetch(`${API_BASE}/api/reporting/inspect/cost-centres`)
-            .then(res => res.json())
-            .then(d => {
-                if(Array.isArray(d)) setCostCentres(d);
-            })
-            .catch(err => console.error(err));
-    }, []);
+  const [billDetails, setBillDetails] = useState(null);
+  const [billDetailsLoading, setBillDetailsLoading] = useState(false);
 
-    // Fetch Overview Data
-    useEffect(() => {
-        if (!dates.start || !dates.end) return;
-        setLoading(true);
-        let url = `${API_BASE}/api/reporting/purchases?start_date=${dates.start}&end_date=${dates.end}`;
-        if (selectedStore) url += `&cost_centre=${encodeURIComponent(selectedStore)}`;
-        
-        fetch(url)
-            .then(res => {
-                if (!res.ok) throw new Error("Failed to fetch purchases data");
-                return res.json();
-            })
-            .then(d => { setData(d); setError(null); })
-            .catch(err => setError(err.message))
-            .finally(() => setLoading(false));
-    }, [dates, selectedStore]);
+  // A running balance as of today -- independent of the period pills above,
+  // same way the reference design's "Still to pay" figure doesn't move when
+  // you change the trend period. Owner-only, mirroring the Creditors report's
+  // own access restriction (a supplier balance isn't scoped to one store).
+  const [stillToPay, setStillToPay] = useState(null);
+  const [stillToPayLoading, setStillToPayLoading] = useState(false);
 
-    // Fetch Suppliers Data
-    useEffect(() => {
-        if (!dates.start || !dates.end) return;
-        
-        // Reset sub-drilldowns when filters change or mode changes
-        setSelectedSupplier(null);
-        setSelectedDay(null);
-        setBillDetails(null);
-        
-        setSuppliersLoading(true);
-        let url = `${API_BASE}/api/reporting/purchases/suppliers?start_date=${dates.start}&end_date=${dates.end}&limit=100`;
-        if (selectedStore) url += `&cost_centre=${encodeURIComponent(selectedStore)}`;
-        
-        fetch(url)
-            .then(res => res.json())
-            .then(d => setSupplierData(d.suppliers || []))
-            .catch(err => console.error(err))
-            .finally(() => setSuppliersLoading(false));
-    }, [dates, selectedStore]);
+  const dates = useMemo(() => getPresetDates(preset, customDates), [preset, customDates]);
 
-    // Fetch Bills for Supplier
-    useEffect(() => {
-        if (!selectedSupplier) {
-            setBillsData([]);
-            return;
-        }
-        
-        setBillsLoading(true);
-        let url = `${API_BASE}/api/reporting/purchases/bills?start_date=${dates.start}&end_date=${dates.end}&supplier_name=${encodeURIComponent(selectedSupplier)}&limit=100`;
-        if (selectedStore) url += `&cost_centre=${encodeURIComponent(selectedStore)}`;
-        
-        fetch(url)
-            .then(res => res.json())
-            .then(d => setBillsData(d.bills || []))
-            .catch(err => console.error(err))
-            .finally(() => setBillsLoading(false));
-    }, [selectedSupplier, dates, selectedStore]);
+  useEffect(() => {
+    if (lockedStore) setSelectedStore(lockedStore);
+  }, [lockedStore]);
 
-    // Fetch Bills for Day
-    useEffect(() => {
-        if (!selectedDay) {
-            setDayBillsData([]);
-            return;
-        }
-        setDayBillsLoading(true);
-        let url = `${API_BASE}/api/reporting/purchases/bills?start_date=${selectedDay}&end_date=${selectedDay}&limit=100`;
-        if (selectedStore) url += `&cost_centre=${encodeURIComponent(selectedStore)}`;
-        
-        fetch(url)
-            .then(res => res.json())
-            .then(d => setDayBillsData(d.bills || []))
-            .catch(err => console.error(err))
-            .finally(() => setDayBillsLoading(false));
-    }, [selectedDay, selectedStore]);
+  useEffect(() => {
+    fetch(`${API_BASE}/api/reporting/inspect/cost-centres`)
+      .then(res => res.json())
+      .then(d => { if (Array.isArray(d)) setCostCentres(d); })
+      .catch(err => console.error(err));
 
-    const handleFetchBillDetails = (voucherId) => {
-        setBillDetailsLoading(true);
-        fetch(`${API_BASE}/api/reporting/purchases/bills/${voucherId}`)
-            .then(res => res.json())
-            .then(d => setBillDetails(d))
-            .catch(err => console.error(err))
-            .finally(() => setBillDetailsLoading(false));
-    };
+    fetch('/api/dashboard/stats')
+      .then(res => res.json())
+      .then(d => setQueueCount(d.queue_count ?? 0))
+      .catch(() => {});
+  }, []);
 
-    const handlePresetChange = (p) => {
-        setPreset(p);
-        if (p !== "custom") {
-            setDates(getPresetDates(p));
-        }
-    };
+  useEffect(() => {
+    if (!isOwner) return;
+    setStillToPayLoading(true);
+    const today = fmtYYYYMMDD(new Date());
+    fetch(`${API_BASE}/api/reporting/creditors?start_date=20000101&end_date=${today}`)
+      .then(res => { if (!res.ok) throw new Error("Failed to fetch creditors"); return res.json(); })
+      .then(d => {
+        const due = (d.creditors || []).filter(c => c.period_closing > 0.005);
+        const total = due.reduce((sum, c) => sum + c.period_closing, 0);
+        setStillToPay({ total, supplierCount: due.length });
+      })
+      .catch(() => setStillToPay(null))
+      .finally(() => setStillToPayLoading(false));
+  }, [isOwner]);
 
-    if (!isMounted) return <div className="min-h-screen bg-[#0f172a]"></div>;
+  useEffect(() => {
+    if (!dates.start || !dates.end) return;
+    setLoading(true);
+    setExpandedRow(null);
+    let url = `${API_BASE}/api/reporting/purchases?start_date=${dates.start}&end_date=${dates.end}`;
+    if (selectedStore) url += `&cost_centre=${encodeURIComponent(selectedStore)}`;
 
-    // Derived Overview Data Calculations
-    const trendData = data?.trend || [];
-    let highestDay = null;
-    let lowestDay = null;
-    let storeColors = ['bg-amber-500', 'bg-orange-400', 'bg-pink-400', 'bg-rose-500', 'bg-fuchsia-400'];
+    fetch(url)
+      .then(res => { if (!res.ok) throw new Error("Failed to fetch purchases data"); return res.json(); })
+      .then(d => { setData(d); setError(null); })
+      .catch(err => setError(err.message))
+      .finally(() => setLoading(false));
+  }, [dates, selectedStore]);
 
-    if (trendData.length > 0) {
-        const sorted = [...trendData].sort((a, b) => b.Combined - a.Combined);
-        highestDay = sorted[0];
-        lowestDay = sorted.filter(d => d.Combined > 0).pop() || sorted[sorted.length - 1]; // Lowest non-zero day
+  useEffect(() => {
+    if (!dates.start || !dates.end) return;
+    setSuppliersLoading(true);
+    let url = `${API_BASE}/api/reporting/purchases/suppliers?start_date=${dates.start}&end_date=${dates.end}&limit=100`;
+    if (selectedStore) url += `&cost_centre=${encodeURIComponent(selectedStore)}`;
+
+    fetch(url)
+      .then(res => res.json())
+      .then(d => setSupplierData(d.suppliers || []))
+      .catch(err => console.error(err))
+      .finally(() => setSuppliersLoading(false));
+  }, [dates, selectedStore]);
+
+  useEffect(() => {
+    if (!expandedRow) { setRowBills([]); return; }
+    setRowBillsLoading(true);
+    let url;
+    if (listMode === 'daily') {
+      url = `${API_BASE}/api/reporting/purchases/bills?start_date=${expandedRow}&end_date=${expandedRow}&limit=100`;
+    } else {
+      url = `${API_BASE}/api/reporting/purchases/bills?start_date=${dates.start}&end_date=${dates.end}&supplier_name=${encodeURIComponent(expandedRow)}&limit=100`;
     }
+    if (selectedStore) url += `&cost_centre=${encodeURIComponent(selectedStore)}`;
 
-    const storeComparison = data?.store_comparison?.filter(s => s.net_purchases > 0).sort((a, b) => b.net_purchases - a.net_purchases) || [];
-    const totalPurchasesFromStores = storeComparison.reduce((sum, s) => sum + s.net_purchases, 0);
+    fetch(url)
+      .then(res => res.json())
+      .then(d => setRowBills(d.bills || []))
+      .catch(err => console.error(err))
+      .finally(() => setRowBillsLoading(false));
+  }, [expandedRow, listMode, dates, selectedStore]);
 
-    const dayByDay = [...trendData].reverse().filter(d => d.Combined > 0).map(d => {
-        let topStore = "Unknown";
-        let maxStoreAmt = -1;
-        Object.keys(d).forEach(k => {
-            if (k !== 'date' && k !== 'Combined' && k !== 'Combined_invoices') {
-                if (d[k] > maxStoreAmt) {
-                    maxStoreAmt = d[k];
-                    topStore = k;
-                }
-            }
-        });
-        return {
-            date: d.date,
-            invoices: d.Combined_invoices || 0,
-            topStore,
-            amount: d.Combined
-        };
-    });
+  const handleFetchBillDetails = (voucherId) => {
+    setBillDetailsLoading(true);
+    fetch(`${API_BASE}/api/reporting/purchases/bills/${voucherId}`)
+      .then(res => res.json())
+      .then(d => setBillDetails(d))
+      .catch(err => console.error(err))
+      .finally(() => setBillDetailsLoading(false));
+  };
 
-    return (
-        <div className="min-h-screen bg-[#0f172a] text-slate-200 pb-24 font-sans selection:bg-amber-500/30">
-            {/* Header */}
-            <div className="px-5 pt-12 pb-4">
-                <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-3">
-                        <button onClick={() => router.back()} className="p-1 hover:bg-slate-800 rounded-full transition-colors">
-                            <ChevronLeft className="w-7 h-7 text-white" />
-                        </button>
-                        <div>
-                            <h1 className="text-2xl font-bold text-white tracking-tight whitespace-nowrap">Purchase Report</h1>
-                            <p className="text-slate-400 text-xs sm:text-sm">Analyze your purchase activity</p>
-                        </div>
-                    </div>
+  const toggleRow = (key) => setExpandedRow(prev => (prev === key ? null : key));
+  const handleListModeChange = (mode) => { setListMode(mode); setExpandedRow(null); };
+
+  // Zero-filled so the chart draws one bar per calendar day in the period,
+  // same convention as the Sales report's trend.
+  const trend = useMemo(() => {
+    const byDate = {};
+    (data?.trend || []).forEach(row => { byDate[row.date] = row; });
+    const days = [];
+    if (dates.start && dates.end) {
+      let cursor = toDate(dates.start);
+      const end = toDate(dates.end);
+      while (cursor <= end) {
+        const key = fmtYYYYMMDD(cursor);
+        days.push(byDate[key] || { date: key, Combined: 0, Combined_invoices: 0 });
+        cursor = new Date(cursor); cursor.setDate(cursor.getDate() + 1);
+      }
+    }
+    return days;
+  }, [data, dates]);
+  const periodDays = daysBetween(dates.start, dates.end);
+  const avgPerDay = data?.summary?.net_purchases ? data.summary.net_purchases / periodDays : 0;
+
+  const storeNamesFromTrend = useMemo(() => {
+    const names = new Set();
+    trend.forEach(row => Object.keys(row).forEach(k => {
+      if (!['date', 'Combined', 'Combined_invoices'].includes(k)) names.add(k);
+    }));
+    return Array.from(names);
+  }, [trend]);
+
+  const maxBar = Math.max(1, ...trend.map(t => t.Combined || 0));
+  const [highlightedDate, setHighlightedDate] = useState(null);
+  const currentHighlight = trend.find(t => t.date === highlightedDate)
+    || [...trend].reverse().find(t => t.Combined > 0)
+    || trend[trend.length - 1];
+
+  const storeComparison = data?.store_comparison?.filter(s => s.net_purchases > 0).sort((a, b) => b.net_purchases - a.net_purchases) || [];
+  const storeNames = useMemo(() => {
+    const primary = storeComparison.map(s => s.store_name);
+    const extra = storeNamesFromTrend.filter(n => !primary.includes(n));
+    return [...primary, ...extra];
+  }, [storeComparison, storeNamesFromTrend]);
+  const storeColorIndex = (name) => storeNames.indexOf(name) % STORE_SWATCHES.length;
+  const totalForStores = storeComparison.reduce((sum, s) => sum + s.net_purchases, 0);
+
+  const dayRows = [...trend].reverse().filter(d => d.Combined > 0);
+
+  const now = new Date();
+  const monthKicker = new Intl.DateTimeFormat('en-US', { month: 'long', year: 'numeric' }).format(now).toUpperCase();
+  const storeLabel = selectedStore ? selectedStore.toUpperCase() : 'ALL STORES';
+  const periodLabelMap = { today: 'TODAY', '7days': 'LAST 7 DAYS', month: 'THIS MONTH', '30days': 'LAST 30 DAYS' };
+  const periodLabel = periodLabelMap[preset] || `${formatDateShort(dates.start)} – ${formatDateShort(dates.end)}`.toUpperCase();
+
+  return (
+    <div className="min-h-screen bg-bg pb-24">
+      <TopBar
+        title="Reports"
+        kicker={monthKicker}
+        rightContent={
+          <div className={`flex items-center gap-1.5 h-9 px-3 rounded-full border shrink-0 ${isOnline === false ? 'border-accent text-accent-700' : 'border-divider text-neutral-700'}`}>
+            {isOnline === false ? <WifiOff className="w-3.5 h-3.5" /> : <Wifi className="w-3.5 h-3.5" />}
+            <span className="text-xs font-medium whitespace-nowrap">
+              {isOnline === false ? 'Offline' : 'Online'}{queueCount > 0 ? ` · ${queueCount} saved` : ''}
+            </span>
+          </div>
+        }
+      />
+      <ReportTabs />
+
+      <div className="max-w-md mx-auto px-4">
+        {!lockedStore && (
+          <div className="flex gap-2 overflow-x-auto py-4 -mx-1 px-1" style={{ scrollbarWidth: 'none' }}>
+            <button
+              onClick={() => setSelectedStore('')}
+              className={`shrink-0 px-3.5 h-9 rounded-full border text-sm transition-colors ${!selectedStore ? 'border-accent text-accent-700 bg-accent/8' : 'border-divider text-text hover:border-text/45'}`}
+            >
+              All stores
+            </button>
+            {costCentres.map(c => (
+              <button
+                key={c.id}
+                onClick={() => setSelectedStore(c.name)}
+                className={`shrink-0 px-3.5 h-9 rounded-full border text-sm whitespace-nowrap transition-colors ${selectedStore === c.name ? 'border-accent text-accent-700 bg-accent/8' : 'border-divider text-text hover:border-text/45'}`}
+              >
+                {c.name}
+              </button>
+            ))}
+          </div>
+        )}
+
+        <div className="flex gap-2 overflow-x-auto pb-4 -mx-1 px-1" style={{ scrollbarWidth: 'none' }}>
+          {PRESETS.map(p => (
+            <button
+              key={p.value}
+              onClick={() => setPreset(p.value)}
+              className={`shrink-0 px-3.5 h-9 rounded-full border text-sm whitespace-nowrap transition-colors ${preset === p.value ? 'border-accent text-accent-700 bg-accent/8' : 'border-divider text-text hover:border-text/45'}`}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+
+        {preset === "custom" && (
+          <div className="flex gap-3 pb-4">
+            <div className="flex-1">
+              <label className="text-xs text-neutral-600 mb-1 block">Start date</label>
+              <input
+                type="date"
+                value={formatDateInput(customDates?.start || dates.start)}
+                onChange={e => setCustomDates(prev => ({ start: parseDateInput(e.target.value), end: prev?.end || dates.end }))}
+                className="w-full h-10 px-3 rounded-md border border-divider bg-bg text-text text-sm focus:outline-none focus:border-accent"
+              />
+            </div>
+            <div className="flex-1">
+              <label className="text-xs text-neutral-600 mb-1 block">End date</label>
+              <input
+                type="date"
+                value={formatDateInput(customDates?.end || dates.end)}
+                onChange={e => setCustomDates(prev => ({ start: prev?.start || dates.start, end: parseDateInput(e.target.value) }))}
+                className="w-full h-10 px-3 rounded-md border border-divider bg-bg text-text text-sm focus:outline-none focus:border-accent"
+              />
+            </div>
+          </div>
+        )}
+
+        {error && (
+          <div className="flex items-start gap-2 border border-accent rounded-md p-3 mb-4">
+            <AlertTriangle className="w-4 h-4 text-accent-700 shrink-0 mt-0.5" />
+            <p className="text-accent-700 text-xs leading-snug">{error}</p>
+          </div>
+        )}
+
+        {loading ? (
+          <p className="text-sm text-neutral-600 text-center py-16">Loading&hellip;</p>
+        ) : error ? null : (
+          <>
+            {data?.is_data_complete === false && (
+              <div className="flex items-start gap-2 border border-accent rounded-md p-3 mb-4">
+                <AlertTriangle className="w-4 h-4 text-accent-700 shrink-0 mt-0.5" />
+                <p className="text-accent-700 text-xs leading-snug">
+                  Reporting data for this period may be incomplete &mdash; run a Tally sync to make sure everything is up to date.
+                </p>
+              </div>
+            )}
+
+            {(data?.unsynced_purchases?.pending_amount || 0) - (data?.summary?.pending_amount || 0) > 0.005 && (
+              <div className="flex items-start gap-2 border border-accent rounded-md p-3 mb-4">
+                <AlertTriangle className="w-4 h-4 text-accent-700 shrink-0 mt-0.5" />
+                <p className="text-accent-700 text-xs leading-snug">
+                  {fmtMoney(data.unsynced_purchases.pending_amount - data.summary.pending_amount)} in purchases has an uncertain Tally delivery status and is not included below &mdash; verify manually in the{' '}
+                  <button onClick={() => router.push('/queue')} className="underline font-semibold">Queue</button> before it can be counted.
+                </p>
+              </div>
+            )}
+
+            {data?.unsynced_purchases?.failed_count > 0 && (
+              <div className="flex items-start gap-2 border border-accent rounded-md p-3 mb-4">
+                <AlertTriangle className="w-4 h-4 text-accent-700 shrink-0 mt-0.5" />
+                <p className="text-accent-700 text-xs leading-snug">
+                  {data.unsynced_purchases.failed_count} purchase entr{data.unsynced_purchases.failed_count === 1 ? 'y' : 'ies'} totaling {fmtMoney(data.unsynced_purchases.failed_amount)} failed to sync to Tally and need{data.unsynced_purchases.failed_count === 1 ? 's' : ''} attention in the{' '}
+                  <button onClick={() => router.push('/queue')} className="underline font-semibold">Queue</button>.
+                </p>
+              </div>
+            )}
+
+            {/* Summary: Total purchases + Still to pay */}
+            <div className={`grid ${isOwner ? 'grid-cols-[1.3fr_1fr]' : 'grid-cols-1'} gap-4 pb-4`}>
+              <div className="min-w-0">
+                <div className="text-[10.5px] tracking-[0.12em] uppercase text-accent-700">{storeLabel} · {periodLabel}</div>
+                <div className="font-heading text-4xl leading-tight mt-1">{fmtMoney(data?.summary?.net_purchases)}</div>
+                <div className="text-sm text-neutral-700 mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5">
+                  <span>{data?.summary?.change_pct !== null && data?.summary?.change_pct !== undefined
+                    ? `${data.summary.change_pct >= 0 ? '+' : ''}${data.summary.change_pct.toFixed(0)}% vs last period`
+                    : ''}</span>
                 </div>
-
-                {/* Filters */}
-                <div className="flex gap-4 mt-6">
-                    <div className="flex-1">
-                        <label className="text-xs font-medium text-slate-500 mb-1.5 block">Store</label>
-                        <div className="relative">
-                            {lockedStore ? (
-                                <div className="w-full bg-[#1e293b] border border-slate-700/50 text-slate-200 text-sm py-3 pl-3 pr-8 rounded-xl truncate">
-                                    {lockedStore}
-                                </div>
-                            ) : (
-                            <select
-                                value={selectedStore}
-                                onChange={e => setSelectedStore(e.target.value)}
-                                className="w-full appearance-none bg-[#1e293b] border border-slate-700/50 text-slate-200 text-sm py-3 pl-3 pr-8 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-500/50 truncate"
-                            >
-                                <option value="">Combined (All Stores)</option>
-                                {costCentres.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
-                            </select>
-                            )}
-                            <Store className="w-4 h-4 text-slate-500 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                        </div>
-                    </div>
-                    <div className="flex-1">
-                        <label className="text-xs font-medium text-slate-500 mb-1.5 block">Period</label>
-                        <div className="relative">
-                            <select 
-                                value={preset}
-                                onChange={e => handlePresetChange(e.target.value)}
-                                className="w-full appearance-none bg-[#1e293b] border border-slate-700/50 text-slate-200 text-sm py-3 pl-3 pr-8 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-500/50 truncate"
-                            >
-                                {PRESETS.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
-                            </select>
-                            <Calendar className="w-4 h-4 text-slate-500 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                        </div>
-                    </div>
-                </div>
-
-                {preset === "custom" && (
-                    <div className="flex gap-4 mt-4">
-                        <div className="flex-1">
-                            <label className="text-xs font-medium text-slate-500 mb-1.5 block">Start Date</label>
-                            <input 
-                                type="date"
-                                value={formatDateInput(dates.start)}
-                                onChange={e => setDates(prev => ({ ...prev, start: parseDateInput(e.target.value) }))}
-                                className="w-full bg-[#1e293b] border border-slate-700/50 text-slate-200 text-sm py-3 px-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-500/50"
-                            />
-                        </div>
-                        <div className="flex-1">
-                            <label className="text-xs font-medium text-slate-500 mb-1.5 block">End Date</label>
-                            <input 
-                                type="date"
-                                value={formatDateInput(dates.end)}
-                                onChange={e => setDates(prev => ({ ...prev, end: parseDateInput(e.target.value) }))}
-                                className="w-full bg-[#1e293b] border border-slate-700/50 text-slate-200 text-sm py-3 px-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-500/50"
-                            />
-                        </div>
-                    </div>
+                {Math.abs(data?.summary?.pending_amount || 0) > 0.005 && (
+                  <p className="text-xs text-accent-700 mt-1">
+                    {fmtMoney(data.summary.net_purchases_confirmed)} confirmed {data.summary.pending_amount >= 0 ? '+' : '-'} {fmtMoney(Math.abs(data.summary.pending_amount))} pending
+                  </p>
                 )}
+              </div>
+
+              {isOwner && (
+                <div className="border-l border-divider pl-4 min-w-0">
+                  <div className="text-[10.5px] tracking-[0.12em] uppercase text-neutral-700">Still to pay</div>
+                  <div className="font-heading text-2xl leading-tight mt-1.5">
+                    {stillToPayLoading ? '…' : fmtMoney(stillToPay?.total)}
+                  </div>
+                  <div className="text-xs text-neutral-700">
+                    {stillToPayLoading ? '' : `${stillToPay?.supplierCount || 0} supplier${stillToPay?.supplierCount === 1 ? '' : 's'} · all stores`}
+                  </div>
+                </div>
+              )}
             </div>
 
-            {error && (
-                <div className="mx-5 mb-4 flex items-start gap-2 bg-rose-950/40 border border-rose-800/50 rounded-xl p-3">
-                    <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
-                    <p className="text-rose-300 text-xs leading-snug">{error}</p>
+            <div className="border-t border-divider my-5" />
+
+            {/* Purchase trend */}
+            <div className="flex justify-between items-start mb-1">
+              <div>
+                <h3 className="font-heading font-semibold text-xl">Purchase trend</h3>
+                <p className="text-sm text-neutral-600">Daily &middot; {periodDays} day{periodDays === 1 ? '' : 's'}</p>
+              </div>
+              {currentHighlight && (
+                <div className="text-right">
+                  <div className="text-sm text-neutral-700">{formatDateShort(currentHighlight.date)}</div>
+                  <div className="font-heading font-semibold text-xl">{fmtMoney(currentHighlight.Combined)}</div>
                 </div>
+              )}
+            </div>
+
+            {trend.length > 0 && (
+              <div className="mt-4">
+                <div className="text-xs text-neutral-600 mb-1">avg {fmtMoney(avgPerDay)}</div>
+                <div className="relative h-40 flex items-end gap-1.5 border-b border-divider">
+                  <div
+                    className="absolute left-0 right-0 border-t border-dashed border-neutral-500"
+                    style={{ bottom: `${Math.min(100, (avgPerDay / maxBar) * 100)}%` }}
+                  />
+                  {trend.map(day => {
+                    const hasPurchases = day.Combined > 0;
+                    const isActive = hasPurchases && day.date === (currentHighlight?.date);
+                    return (
+                      <button
+                        key={day.date}
+                        onClick={() => hasPurchases && setHighlightedDate(day.date)}
+                        disabled={!hasPurchases}
+                        className={`flex-1 min-w-[6px] h-full flex flex-col-reverse rounded-t-sm overflow-hidden transition-opacity ${hasPurchases ? (isActive ? '' : 'opacity-55 hover:opacity-80') : 'cursor-default opacity-55'}`}
+                        title={`${formatDateShort(day.date)}: ${fmtMoney(day.Combined)}`}
+                      >
+                        {storeNames.map((name, i) => {
+                          const val = day[name] || 0;
+                          const pct = maxBar > 0 ? (val / maxBar) * 100 : 0;
+                          return pct > 0 ? (
+                            <div key={name} className={STORE_SWATCHES[i % STORE_SWATCHES.length]} style={{ height: `${pct}%` }} />
+                          ) : null;
+                        })}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="flex justify-between text-xs text-neutral-600 mt-2">
+                  <span>{formatDateShort(trend[0].date)}</span>
+                  {trend.length > 2 && <span>{formatDateShort(trend[Math.floor(trend.length / 2)].date)}</span>}
+                  <span>{formatDateShort(trend[trend.length - 1].date)}</span>
+                </div>
+                {storeNames.length > 0 && (
+                  <div className="flex flex-wrap gap-x-4 gap-y-1.5 mt-4">
+                    {storeNames.map((name, i) => (
+                      <div key={name} className="flex items-center gap-1.5 text-sm text-neutral-700">
+                        <span className={`w-2.5 h-2.5 rounded-sm shrink-0 ${STORE_SWATCHES[i % STORE_SWATCHES.length]}`} />
+                        {name}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             )}
 
-            {loading ? (
-                <div className="flex justify-center items-center h-64">
-                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-amber-400"></div>
+            <div className="border-t border-divider my-5" />
+
+            {/* By store */}
+            {storeComparison.length > 0 && !selectedStore && (
+              <>
+                <h3 className="font-heading font-semibold text-xl mb-4">By store</h3>
+                <div className="flex flex-col gap-5">
+                  {storeComparison.map((store) => {
+                    const pct = totalForStores > 0 ? (store.net_purchases / totalForStores) * 100 : 0;
+                    const swatch = STORE_SWATCHES[storeColorIndex(store.store_name)];
+                    return (
+                      <div key={store.store_name}>
+                        <div className="flex items-center gap-2 mb-1.5">
+                          <span className={`w-2.5 h-2.5 rounded-sm shrink-0 ${swatch}`} />
+                          <span className="text-[15px]">{store.store_name}</span>
+                          <span className="flex-1" />
+                          <span className="font-heading font-semibold text-lg">{fmtMoney(store.net_purchases)}</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <div className="flex-1 h-1.5 rounded-full bg-divider overflow-hidden">
+                            <div className={`h-full rounded-full ${swatch}`} style={{ width: `${pct}%` }} />
+                          </div>
+                          <span className="text-xs text-neutral-600 w-9 text-right">{pct.toFixed(0)}%</span>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
-            ) : error ? null : (
-                <div className="px-5 space-y-5 animate-in fade-in duration-300">
+                <div className="border-t border-divider my-5" />
+              </>
+            )}
 
-                        {/* Data-completeness warning -- the periodic Tally sync itself hasn't
-                            fully covered this date range yet, so the figures below may be
-                            missing vouchers Tally already has. */}
-                        {data?.is_data_complete === false && (
-                            <div className="flex items-start gap-2 bg-amber-950/40 border border-amber-800/50 rounded-xl p-3">
-                                <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                                <p className="text-amber-300 text-xs leading-snug">
-                                    Reporting data for this period may be incomplete -- run a Tally sync to make sure everything is up to date.
-                                </p>
-                            </div>
-                        )}
+            {/* Day-wise / Supplier-wise toggle */}
+            <div className="grid grid-cols-2 border border-divider rounded-md overflow-hidden mb-4">
+              <button
+                onClick={() => handleListModeChange('daily')}
+                className={`h-10 flex items-center justify-center gap-1.5 text-[13.5px] transition-colors ${listMode === 'daily' ? 'border border-accent text-accent-700 bg-accent/8 -m-px' : 'hover:bg-text/5'}`}
+              >
+                <Calendar className="w-3.5 h-3.5" /> Day-wise
+              </button>
+              <button
+                onClick={() => handleListModeChange('suppliers')}
+                className={`h-10 flex items-center justify-center gap-1.5 text-[13.5px] transition-colors ${listMode === 'suppliers' ? 'border border-accent text-accent-700 bg-accent/8 -m-px' : 'hover:bg-text/5'}`}
+              >
+                <Users className="w-3.5 h-3.5" /> Supplier-wise
+              </button>
+            </div>
 
-                        {/* Unsynced purchases warning. Plain pending entries (including
-                            pending returns, which are netted in as a deduction) are folded
-                            into the figures below -- see the "confirmed + pending" breakdown
-                            under Total Purchases -- so this only calls out entries that are
-                            NOT reflected anywhere above: delivery-uncertain entries (safety
-                            excluded) and entries Tally has actively rejected. */}
-                        {(data?.unsynced_purchases?.pending_amount || 0) - (data?.summary?.pending_amount || 0) > 0.005 && (
-                            <div className="flex items-start gap-2 bg-amber-950/40 border border-amber-800/50 rounded-xl p-3">
-                                <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                                <p className="text-amber-300 text-xs leading-snug">
-                                    {formatCurrency(data.unsynced_purchases.pending_amount - data.summary.pending_amount)} in purchases has an uncertain Tally delivery status and is not included above -- verify manually in the{' '}
-                                    <button onClick={() => router.push('/queue')} className="underline font-semibold hover:text-amber-200">Queue</button> before it can be counted.
-                                </p>
+            {listMode === 'daily' ? (
+              dayRows.length === 0 ? (
+                <p className="text-sm text-neutral-600 text-center py-8">No purchases in this period.</p>
+              ) : dayRows.map(day => {
+                const isOpen = expandedRow === day.date;
+                return (
+                  <div key={day.date} className="border-b border-divider last:border-0">
+                    <button onClick={() => toggleRow(day.date)} className="w-full flex items-center gap-3 py-3.5 text-left">
+                      <div className="flex-1 min-w-0">
+                        <div className="text-[14.5px] truncate">{dayOfWeekLabel(day.date)}</div>
+                        <div className="text-[11.5px] text-neutral-700">{day.Combined_invoices || 0} bill{day.Combined_invoices === 1 ? '' : 's'}</div>
+                      </div>
+                      <span className="font-heading font-semibold text-lg shrink-0">{fmtMoney(day.Combined)}</span>
+                      {isOpen ? <ChevronDown className="w-4 h-4 text-neutral-500 shrink-0" /> : <ChevronRight className="w-4 h-4 text-neutral-500 shrink-0" />}
+                    </button>
+                    {isOpen && (
+                      <div className="pl-3.5 border-l border-accent ml-1 mb-3 flex flex-col animate-in fade-in duration-200">
+                        {rowBillsLoading ? (
+                          <p className="text-sm text-neutral-600 py-3">Loading&hellip;</p>
+                        ) : rowBills.length === 0 ? (
+                          <p className="text-sm text-neutral-600 py-3">No bills found.</p>
+                        ) : rowBills.map((bill, idx) => (
+                          <button
+                            key={idx}
+                            onClick={() => !bill.is_pending && !String(bill.voucher_id).startsWith('pending-') && handleFetchBillDetails(bill.voucher_id)}
+                            title={bill.is_pending ? "Not yet confirmed by Tally -- no details to view yet" : undefined}
+                            className={`flex items-center gap-3 py-2.5 border-t border-divider text-left ${bill.is_pending ? 'opacity-70 cursor-default' : 'hover:bg-text/4'}`}
+                          >
+                            <div className="flex-1 min-w-0">
+                              <div className="text-sm truncate">{bill.supplier_name}</div>
+                              <div className="text-[11.5px] text-neutral-700">{bill.voucher_number || 'No ref'}</div>
                             </div>
-                        )}
-
-                        {data?.unsynced_purchases?.failed_count > 0 && (
-                            <div className="flex items-start gap-2 bg-rose-950/40 border border-rose-800/50 rounded-xl p-3">
-                                <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
-                                <p className="text-rose-300 text-xs leading-snug">
-                                    {data.unsynced_purchases.failed_count} purchase entr{data.unsynced_purchases.failed_count === 1 ? 'y' : 'ies'} totaling {formatCurrency(data.unsynced_purchases.failed_amount)} failed to sync to Tally and need{data.unsynced_purchases.failed_count === 1 ? 's' : ''} attention in the{' '}
-                                    <button onClick={() => router.push('/queue')} className="underline font-semibold hover:text-rose-200">Queue</button>.
-                                </p>
+                            <div className="text-right shrink-0">
+                              <div className="font-heading font-semibold text-base">{fmtMoney2(bill.net_purchases)}</div>
+                              {bill.is_pending && (
+                                <span className="inline-block text-[10px] font-bold uppercase tracking-wider text-accent-700 bg-accent/8 border border-accent px-1.5 py-0.5 rounded mt-0.5">
+                                  Pending
+                                </span>
+                              )}
                             </div>
-                        )}
-
-                        {/* Total Purchases Card */}
-                        <div className="bg-slate-800/50 border border-slate-700/50 rounded-2xl p-5 relative overflow-hidden backdrop-blur-sm">
-                            <div className="absolute -right-6 -bottom-6 opacity-[0.07] pointer-events-none">
-                                <svg width="200" height="150" viewBox="0 0 200 150">
-                                    <path d="M0 150 L30 100 L70 120 L130 40 L170 60 L200 0" fill="none" stroke="white" strokeWidth="20" strokeLinecap="round" strokeLinejoin="round"/>
-                                </svg>
-                            </div>
-                            
-                            <div className="flex items-start gap-4 relative z-10">
-                                <div className="w-12 h-12 bg-amber-950/50 rounded-xl flex items-center justify-center shrink-0 border border-amber-900/50">
-                                    <ShoppingCart className="w-6 h-6 text-amber-400" />
-                                </div>
-                                <div>
-                                    <p className="text-slate-400 text-sm font-medium mb-1">Total Purchases</p>
-                                    <h2 className="text-4xl font-bold text-white tracking-tight mb-1">
-                                        {formatCurrency(data?.summary?.net_purchases)}
-                                    </h2>
-
-                                    {Math.abs(data?.summary?.pending_amount || 0) > 0.005 && (
-                                        <p className="text-amber-400/90 text-xs mb-2">
-                                            {formatCurrency(data.summary.net_purchases_confirmed)} confirmed {data.summary.pending_amount >= 0 ? '+' : '-'} {formatCurrency(Math.abs(data.summary.pending_amount))} pending Tally confirmation
-                                        </p>
-                                    )}
-
-                                    {data?.summary?.change_pct !== null && data?.summary?.change_pct !== undefined && (
-                                        <div className="flex items-center gap-2">
-                                            <div className={`flex items-center gap-1 text-sm font-semibold ${data.summary.change_pct >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                                                {data.summary.change_pct >= 0 ? <ArrowUpRight className="w-4 h-4" /> : <ArrowDownRight className="w-4 h-4" />}
-                                                {Math.abs(data.summary.change_pct).toFixed(1)}%
-                                            </div>
-                                            <p className="text-slate-500 text-xs">
-                                                vs. last period ({formatCurrency(data?.summary?.previous_purchases)})
-                                            </p>
-                                        </div>
-                                    )}
-                                    {(data?.summary?.change_pct === null || data?.summary?.change_pct === undefined) && data?.previous_period?.is_data_complete === false && (
-                                        <p className="text-slate-500 text-xs italic">
-                                            vs. last period unavailable -- that period's Tally sync is incomplete
-                                        </p>
-                                    )}
-                                </div>
-                            </div>
-                        </div>
-
-                        {/* Purchase Trend Chart */}
-                        <div className="bg-slate-800/50 border border-slate-700/50 rounded-2xl p-5 backdrop-blur-sm">
-                            <div className="flex justify-between items-center mb-6">
-                                <div className="flex items-center gap-2">
-                                    <div className="w-8 h-8 bg-amber-900/30 rounded-lg flex items-center justify-center">
-                                        <TrendingUp className="w-4 h-4 text-amber-400" />
-                                    </div>
-                                    <h3 className="text-base font-bold text-white">Purchase Trend</h3>
-                                </div>
-                            </div>
-                            
-                            <div className="h-48 w-full -ml-4">
-                                <ResponsiveContainer width="100%" height="100%">
-                                    <AreaChart data={trendData}>
-                                        <defs>
-                                            <linearGradient id="colorPurchases" x1="0" y1="0" x2="0" y2="1">
-                                                <stop offset="5%" stopColor="#f59e0b" stopOpacity={0.3}/>
-                                                <stop offset="95%" stopColor="#f59e0b" stopOpacity={0}/>
-                                            </linearGradient>
-                                        </defs>
-                                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#334155" opacity={0.5} />
-                                        <XAxis 
-                                            dataKey="date" 
-                                            tickFormatter={formatDateShort} 
-                                            axisLine={false} 
-                                            tickLine={false} 
-                                            tick={{fill: '#64748b', fontSize: 10}}
-                                            minTickGap={20}
-                                            dy={10}
-                                        />
-                                        <YAxis 
-                                            tickFormatter={formatShortCurrency}
-                                            axisLine={false}
-                                            tickLine={false}
-                                            tick={{fill: '#64748b', fontSize: 10}}
-                                            dx={-10}
-                                        />
-                                        <Tooltip content={<CustomTooltip />} />
-                                        <Area 
-                                            type="monotone" 
-                                            dataKey="Combined" 
-                                            stroke="#f59e0b" 
-                                            strokeWidth={3}
-                                            fillOpacity={1} 
-                                            fill="url(#colorPurchases)" 
-                                            activeDot={{ r: 6, fill: '#fff', stroke: '#f59e0b', strokeWidth: 3 }}
-                                        />
-                                    </AreaChart>
-                                </ResponsiveContainer>
-                            </div>
-                        </div>
-
-                        {/* Store-wise Purchases */}
-                        {storeComparison.length > 0 && !selectedStore && (
-                            <div className="bg-slate-800/50 border border-slate-700/50 rounded-2xl p-5 backdrop-blur-sm">
-                                <div className="flex justify-between items-center mb-6">
-                                    <div className="flex items-center gap-2">
-                                        <div className="w-8 h-8 bg-pink-900/30 rounded-lg flex items-center justify-center">
-                                            <Store className="w-4 h-4 text-pink-400" />
-                                        </div>
-                                        <h3 className="text-base font-bold text-white">Store-wise Purchases</h3>
-                                    </div>
-                                </div>
-                                
-                                <div className="space-y-5">
-                                    {storeComparison.map((store, idx) => {
-                                        const percentage = totalPurchasesFromStores > 0 ? (store.net_purchases / totalPurchasesFromStores) * 100 : 0;
-                                        const color = storeColors[idx % storeColors.length];
-                                        
-                                        return (
-                                            <div key={store.store_name} className="flex flex-col gap-2">
-                                                <div className="flex justify-between items-end">
-                                                    <span className="text-sm font-medium text-slate-300">{store.store_name}</span>
-                                                    <div className="flex items-center gap-3">
-                                                        <span className="text-sm font-bold text-white">{formatCurrency(store.net_purchases)}</span>
-                                                        <span className="text-xs text-slate-500 w-8 text-right">{percentage.toFixed(0)}%</span>
-                                                    </div>
-                                                </div>
-                                                <div className="h-2 w-full bg-slate-700/50 rounded-full overflow-hidden">
-                                                    <div className={`h-full ${color} rounded-full`} style={{ width: `${percentage}%` }}></div>
-                                                </div>
-                                            </div>
-                                        )
-                                    })}
-                                </div>
-                            </div>
-                        )}
-
-                        {/* Highest / Lowest Cards */}
-                        <div className="grid grid-cols-2 gap-4">
-                            <div className="bg-slate-800/50 border border-slate-700/50 rounded-2xl p-4 backdrop-blur-sm flex flex-col items-start gap-2">
-                                <div className="w-8 h-8 bg-emerald-900/30 rounded-lg flex items-center justify-center shrink-0">
-                                    <TrendingUp className="w-4 h-4 text-emerald-400" />
-                                </div>
-                                <div>
-                                    <p className="text-[10px] font-medium text-slate-500 uppercase tracking-wider mb-0.5">Highest Day</p>
-                                    <p className="text-[11px] font-semibold text-slate-300 mb-0.5">{highestDay ? formatDateFull(highestDay.date) : '-'}</p>
-                                    <p className="text-sm font-bold text-white">{formatCurrency(highestDay?.Combined)}</p>
-                                </div>
-                            </div>
-                            <div className="bg-slate-800/50 border border-slate-700/50 rounded-2xl p-4 backdrop-blur-sm flex flex-col items-start gap-2">
-                                <div className="w-8 h-8 bg-rose-900/30 rounded-lg flex items-center justify-center shrink-0">
-                                    <TrendingDown className="w-4 h-4 text-rose-400" />
-                                </div>
-                                <div>
-                                    <p className="text-[10px] font-medium text-slate-500 uppercase tracking-wider mb-0.5">Lowest Day</p>
-                                    <p className="text-[11px] font-semibold text-slate-300 mb-0.5">{lowestDay ? formatDateFull(lowestDay.date) : '-'}</p>
-                                    <p className="text-sm font-bold text-white">{formatCurrency(lowestDay?.Combined)}</p>
-                                </div>
-                            </div>
-                        </div>
-
-                        {/* Lists Section */}
-                        {!selectedSupplier && !selectedDay ? (
-                            <div className="bg-slate-800/50 border border-slate-700/50 rounded-2xl p-5 backdrop-blur-sm">
-                                {/* Toggle Header */}
-                                <div className="flex gap-2 p-1 bg-slate-900/50 rounded-xl mb-5">
-                                    <button 
-                                        onClick={() => setListMode("daily")}
-                                        className={`flex-1 py-2 text-xs sm:text-sm font-medium rounded-lg transition-colors flex items-center justify-center gap-2 ${listMode === "daily" ? "bg-amber-500/20 text-amber-400" : "text-slate-400 hover:text-slate-200"}`}
-                                    >
-                                        <Calendar className="w-4 h-4" />
-                                        Day-by-Day
-                                    </button>
-                                    <button 
-                                        onClick={() => setListMode("suppliers")}
-                                        className={`flex-1 py-2 text-xs sm:text-sm font-medium rounded-lg transition-colors flex items-center justify-center gap-2 ${listMode === "suppliers" ? "bg-amber-500/20 text-amber-400" : "text-slate-400 hover:text-slate-200"}`}
-                                    >
-                                        <Users className="w-4 h-4" />
-                                        Top Suppliers
-                                    </button>
-                                </div>
-
-                                {listMode === "daily" ? (
-                                    <div className="overflow-x-auto">
-                                        {Math.abs(data?.summary?.pending_amount || 0) > 0.005 && (
-                                            <p className="text-slate-500 text-[11px] italic mb-3">Includes entries still pending Tally confirmation.</p>
-                                        )}
-                                        <table className="w-full text-sm text-left animate-in fade-in duration-300">
-                                            <thead className="text-[10px] text-slate-500 uppercase tracking-wider border-b border-slate-700/50">
-                                                <tr>
-                                                    <th className="pb-3 font-medium">Date</th>
-                                                    <th className="pb-3 font-medium text-center">Invoices</th>
-                                                    <th className="pb-3 font-medium hidden sm:table-cell">Top Store</th>
-                                                    <th className="pb-3 font-medium text-right">Amount</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                                {dayByDay.length > 0 ? dayByDay.map((day, idx) => (
-                                                    <tr 
-                                                        key={idx} 
-                                                        onClick={() => setSelectedDay(day.date)}
-                                                        className="border-b border-slate-700/50 last:border-0 hover:bg-slate-700/40 transition-colors cursor-pointer group"
-                                                    >
-                                                        <td className="py-4 text-slate-300 whitespace-nowrap group-hover:text-amber-400 transition-colors">
-                                                            {formatDateFull(day.date)}
-                                                        </td>
-                                                        <td className="py-4 text-slate-400 text-center">
-                                                            {day.invoices}
-                                                        </td>
-                                                        <td className="py-4 text-slate-400 hidden sm:table-cell">
-                                                            {day.topStore}
-                                                        </td>
-                                                        <td className="py-4 font-semibold text-white text-right">
-                                                            {formatCurrency(day.amount)}
-                                                        </td>
-                                                    </tr>
-                                                )) : (
-                                                    <tr>
-                                                        <td colSpan="4" className="py-8 text-center text-slate-500">
-                                                            No purchases recorded for this period.
-                                                        </td>
-                                                    </tr>
-                                                )}
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                ) : (
-                                    suppliersLoading ? (
-                                        <div className="flex justify-center items-center h-32">
-                                            <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-amber-400"></div>
-                                        </div>
-                                    ) : (
-                                        <div className="overflow-x-auto">
-                                            {Math.abs(data?.summary?.pending_amount || 0) > 0.005 && (
-                                                <p className="text-slate-500 text-[11px] italic mb-3">Confirmed purchases only -- doesn't yet include entries still pending Tally confirmation.</p>
-                                            )}
-                                            <table className="w-full text-sm text-left animate-in fade-in duration-300">
-                                                <thead className="text-[10px] text-slate-500 uppercase tracking-wider border-b border-slate-700/50">
-                                                    <tr>
-                                                        <th className="pb-3 font-medium">Supplier</th>
-                                                        <th className="pb-3 font-medium text-center">Bills</th>
-                                                        <th className="pb-3 font-medium text-right">Total Amount</th>
-                                                    </tr>
-                                                </thead>
-                                                <tbody>
-                                                    {supplierData.length > 0 ? supplierData.map((supp, idx) => (
-                                                        <tr 
-                                                            key={idx} 
-                                                            onClick={() => setSelectedSupplier(supp.supplier_name)}
-                                                            className="border-b border-slate-700/50 last:border-0 hover:bg-slate-700/40 transition-colors cursor-pointer group"
-                                                        >
-                                                            <td className="py-4 text-amber-100 font-medium group-hover:text-amber-400 transition-colors">
-                                                                {supp.supplier_name}
-                                                            </td>
-                                                            <td className="py-4 text-slate-400 text-center">
-                                                                {supp.vouchers_count}
-                                                            </td>
-                                                            <td className="py-4 font-semibold text-white text-right">
-                                                                {formatCurrency(supp.net_purchases)}
-                                                            </td>
-                                                        </tr>
-                                                    )) : (
-                                                        <tr>
-                                                            <td colSpan="3" className="py-8 text-center text-slate-500">
-                                                                No suppliers found for this period.
-                                                            </td>
-                                                        </tr>
-                                                    )}
-                                                </tbody>
-                                            </table>
-                                        </div>
-                                    )
-                                )}
-                            </div>
-                        ) : selectedSupplier ? (
-                        // Supplier Bills Drilldown
-                        <div className="bg-slate-800/50 border border-slate-700/50 rounded-2xl p-5 backdrop-blur-sm animate-in slide-in-from-right-4 duration-300">
-                            <div className="flex items-center gap-3 mb-6">
-                                <button onClick={() => { setSelectedSupplier(null); setBillDetails(null); }} className="p-1 hover:bg-slate-700 rounded-full transition-colors">
-                                    <ChevronLeft className="w-6 h-6 text-slate-400 hover:text-white" />
-                                </button>
-                                <div>
-                                    <h3 className="text-base font-bold text-white">{selectedSupplier}</h3>
-                                    <p className="text-xs text-slate-400">Bills for selected period</p>
-                                </div>
-                            </div>
-
-                            {billsLoading ? (
-                                <div className="flex justify-center items-center h-32">
-                                    <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-amber-400"></div>
-                                </div>
-                            ) : (
-                                <div className="overflow-x-auto">
-                                    <table className="w-full text-sm text-left">
-                                        <thead className="text-[10px] text-slate-500 uppercase tracking-wider border-b border-slate-700/50">
-                                            <tr>
-                                                <th className="pb-3 font-medium">Date</th>
-                                                <th className="pb-3 font-medium">Ref No.</th>
-                                                <th className="pb-3 font-medium text-right">Amount</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {billsData.length > 0 ? billsData.map((bill, idx) => (
-                                                <tr
-                                                    key={idx}
-                                                    onClick={() => !bill.is_pending && handleFetchBillDetails(bill.voucher_id)}
-                                                    title={bill.is_pending ? "Not yet confirmed by Tally -- no details to view yet" : undefined}
-                                                    className={`border-b border-slate-700/50 last:border-0 transition-colors group ${bill.is_pending ? "opacity-70 cursor-default" : "hover:bg-slate-700/40 cursor-pointer"}`}
-                                                >
-                                                    <td className="py-4 text-slate-300 whitespace-nowrap">
-                                                        {formatDateFull(bill.date)}
-                                                        {bill.is_pending && (
-                                                            <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-500/20 text-amber-400 align-middle">
-                                                                Pending
-                                                            </span>
-                                                        )}
-                                                    </td>
-                                                    <td className="py-4 text-slate-400 font-mono text-xs">
-                                                        {bill.voucher_number || '-'}
-                                                    </td>
-                                                    <td className="py-4 font-semibold text-white text-right group-hover:text-amber-400 transition-colors">
-                                                        {formatCurrency(bill.net_purchases)}
-                                                    </td>
-                                                </tr>
-                                            )) : (
-                                                <tr>
-                                                    <td colSpan="3" className="py-8 text-center text-slate-500">
-                                                        No bills found for this supplier.
-                                                    </td>
-                                                </tr>
-                                            )}
-                                        </tbody>
-                                    </table>
-                                </div>
-                            )}
-                        </div>
-                    ) : (
-                        // Day Bills Drilldown
-                        <div className="bg-slate-800/50 border border-slate-700/50 rounded-2xl p-5 backdrop-blur-sm animate-in slide-in-from-right-4 duration-300">
-                            <div className="flex items-center gap-3 mb-6">
-                                <button onClick={() => { setSelectedDay(null); setBillDetails(null); }} className="p-1 hover:bg-slate-700 rounded-full transition-colors">
-                                    <ChevronLeft className="w-6 h-6 text-slate-400 hover:text-white" />
-                                </button>
-                                <div>
-                                    <h3 className="text-base font-bold text-white">{formatDateFull(selectedDay)}</h3>
-                                    <p className="text-xs text-slate-400">Purchases on this day</p>
-                                </div>
-                            </div>
-
-                            {dayBillsLoading ? (
-                                <div className="flex justify-center items-center h-32">
-                                    <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-amber-400"></div>
-                                </div>
-                            ) : (
-                                <div className="overflow-x-auto">
-                                    <table className="w-full text-sm text-left">
-                                        <thead className="text-[10px] text-slate-500 uppercase tracking-wider border-b border-slate-700/50">
-                                            <tr>
-                                                <th className="pb-3 font-medium">Supplier</th>
-                                                <th className="pb-3 font-medium">Ref No.</th>
-                                                <th className="pb-3 font-medium text-right">Amount</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {dayBillsData.length > 0 ? dayBillsData.map((bill, idx) => (
-                                                <tr
-                                                    key={idx}
-                                                    onClick={() => !bill.is_pending && handleFetchBillDetails(bill.voucher_id)}
-                                                    title={bill.is_pending ? "Not yet confirmed by Tally -- no details to view yet" : undefined}
-                                                    className={`border-b border-slate-700/50 last:border-0 transition-colors group ${bill.is_pending ? "opacity-70 cursor-default" : "hover:bg-slate-700/40 cursor-pointer"}`}
-                                                >
-                                                    <td className="py-4 text-slate-300 whitespace-nowrap">
-                                                        {bill.supplier_name}
-                                                        {bill.is_pending && (
-                                                            <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-500/20 text-amber-400 align-middle">
-                                                                Pending
-                                                            </span>
-                                                        )}
-                                                    </td>
-                                                    <td className="py-4 text-slate-400 font-mono text-xs">
-                                                        {bill.voucher_number || '-'}
-                                                    </td>
-                                                    <td className="py-4 font-semibold text-white text-right group-hover:text-amber-400 transition-colors">
-                                                        {formatCurrency(bill.net_purchases)}
-                                                    </td>
-                                                </tr>
-                                            )) : (
-                                                <tr>
-                                                    <td colSpan="3" className="py-8 text-center text-slate-500">
-                                                        No bills found for this day.
-                                                    </td>
-                                                </tr>
-                                            )}
-                                        </tbody>
-                                    </table>
-                                </div>
-                            )}
-                        </div>
+                          </button>
+                        ))}
+                      </div>
                     )}
-                </div>
-            )}
-
-            {/* Bill Details Modal Overlay */}
-            {billDetails && (
-                <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-in fade-in duration-200">
-                    <div className="bg-slate-900 border border-slate-700 w-full max-w-lg rounded-t-2xl sm:rounded-2xl shadow-2xl overflow-hidden animate-in slide-in-from-bottom-8 sm:slide-in-from-bottom-4 duration-300">
-                        <div className="flex justify-between items-center p-5 border-b border-slate-800">
-                            <div>
-                                <h4 className="text-lg font-bold text-white">Bill Details</h4>
-                                <p className="text-xs text-slate-400">Ref: {billDetails.voucher?.voucher_number || '-'} • {formatDateFull(billDetails.voucher?.date)}</p>
+                  </div>
+                );
+              })
+            ) : (
+              suppliersLoading ? (
+                <p className="text-sm text-neutral-600 text-center py-8">Loading&hellip;</p>
+              ) : supplierData.length === 0 ? (
+                <p className="text-sm text-neutral-600 text-center py-8">No suppliers found for this period.</p>
+              ) : supplierData.map(supp => {
+                const isOpen = expandedRow === supp.supplier_name;
+                return (
+                  <div key={supp.supplier_name} className="border-b border-divider last:border-0">
+                    <button onClick={() => toggleRow(supp.supplier_name)} className="w-full flex items-center gap-3 py-3.5 text-left">
+                      <div className="flex-1 min-w-0">
+                        <div className="text-[14.5px] truncate">{supp.supplier_name}</div>
+                        <div className="text-[11.5px] text-neutral-700">{supp.vouchers_count} bill{supp.vouchers_count === 1 ? '' : 's'}</div>
+                      </div>
+                      <span className="font-heading font-semibold text-lg shrink-0">{fmtMoney(supp.net_purchases)}</span>
+                      {isOpen ? <ChevronDown className="w-4 h-4 text-neutral-500 shrink-0" /> : <ChevronRight className="w-4 h-4 text-neutral-500 shrink-0" />}
+                    </button>
+                    {isOpen && (
+                      <div className="pl-3.5 border-l border-accent ml-1 mb-3 flex flex-col animate-in fade-in duration-200">
+                        {rowBillsLoading ? (
+                          <p className="text-sm text-neutral-600 py-3">Loading&hellip;</p>
+                        ) : rowBills.length === 0 ? (
+                          <p className="text-sm text-neutral-600 py-3">No bills found.</p>
+                        ) : rowBills.map((bill, idx) => (
+                          <button
+                            key={idx}
+                            onClick={() => !bill.is_pending && !String(bill.voucher_id).startsWith('pending-') && handleFetchBillDetails(bill.voucher_id)}
+                            title={bill.is_pending ? "Not yet confirmed by Tally -- no details to view yet" : undefined}
+                            className={`flex items-center gap-3 py-2.5 border-t border-divider text-left ${bill.is_pending ? 'opacity-70 cursor-default' : 'hover:bg-text/4'}`}
+                          >
+                            <div className="flex-1 min-w-0">
+                              <div className="text-sm truncate">{formatDateFull(bill.date)}</div>
+                              <div className="text-[11.5px] text-neutral-700">{bill.voucher_number || 'No ref'}</div>
                             </div>
-                            <button onClick={() => setBillDetails(null)} className="p-2 hover:bg-slate-800 rounded-full transition-colors text-slate-400 hover:text-white">
-                                <X className="w-5 h-5" />
-                            </button>
-                        </div>
-                        <div className="p-5 max-h-[60vh] overflow-y-auto">
-                            {billDetailsLoading ? (
-                                <div className="flex justify-center items-center h-32">
-                                    <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-amber-400"></div>
-                                </div>
-                            ) : billDetails.items && billDetails.items.length > 0 ? (
-                                <div className="space-y-4">
-                                    {billDetails.items.map((item, idx) => {
-                                        const calculatedRate = item.rate || (Math.abs(item.billed_qty) > 0 ? Math.abs(item.amount) / Math.abs(item.billed_qty) : 0);
-                                        return (
-                                            <div key={idx} className="bg-slate-800/50 border border-slate-700/50 p-4 rounded-xl flex gap-4">
-                                                <div className="w-10 h-10 bg-slate-700/50 rounded-lg flex items-center justify-center shrink-0">
-                                                    <Package className="w-5 h-5 text-slate-400" />
-                                                </div>
-                                                <div className="flex-1">
-                                                    <p className="text-sm font-semibold text-slate-200 mb-1">{item.stock_item_name}</p>
-                                                    <div className="flex justify-between items-end">
-                                                        <p className="text-xs text-slate-400">
-                                                            <span className="font-mono text-amber-400/80">{Math.abs(item.billed_qty)}</span>
-                                                            <span className="ml-1 text-[10px] uppercase">QTY</span>
-                                                            <span className="mx-2">•</span>
-                                                            <span className="font-mono">{formatCurrency(calculatedRate)}</span>
-                                                            <span className="ml-1 text-[10px] uppercase">Rate</span>
-                                                        </p>
-                                                        <p className="text-sm font-bold text-white">{formatCurrency(Math.abs(item.amount))}</p>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        );
-                                    })}
-                                </div>
-                            ) : (
-                                <div className="text-center py-8 text-slate-500 text-sm">
-                                    No inventory items found for this bill.
-                                </div>
-                            )}
-                        </div>
-                    </div>
-                </div>
+                            <div className="text-right shrink-0">
+                              <div className="font-heading font-semibold text-base">{fmtMoney2(bill.net_purchases)}</div>
+                              {bill.is_pending && (
+                                <span className="inline-block text-[10px] font-bold uppercase tracking-wider text-accent-700 bg-accent/8 border border-accent px-1.5 py-0.5 rounded mt-0.5">
+                                  Pending
+                                </span>
+                              )}
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })
             )}
-        </div>
-    );
+          </>
+        )}
+      </div>
+
+      {/* Bill details bottom sheet */}
+      {billDetails && (
+        <>
+          <div className="fixed inset-0 bg-black/40 z-40 transition-opacity" onClick={() => setBillDetails(null)} />
+          <div className="fixed inset-x-0 bottom-0 sm:inset-0 z-50 flex items-end sm:items-center justify-center sm:p-4 pointer-events-none">
+            <div
+              className="bg-surface border-t sm:border border-divider rounded-t-2xl sm:rounded-lg shadow-lg w-full sm:max-w-lg max-h-[85vh] flex flex-col pointer-events-auto animate-in slide-in-from-bottom-full sm:zoom-in-95"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="w-12 h-1.5 bg-divider rounded-full mx-auto mt-3 sm:hidden" />
+              <div className="flex items-start justify-between gap-3 px-6 py-4 border-b border-divider">
+                <div className="min-w-0">
+                  <div className="text-[10.5px] tracking-[0.12em] uppercase text-accent-700">
+                    Purchase bill{billDetails.voucher?.voucher_number ? ` · ${billDetails.voucher.voucher_number}` : ''}
+                  </div>
+                  <h3 className="font-heading font-semibold text-xl truncate">{billDetails.voucher?.party_ledger_name}</h3>
+                  <p className="text-sm text-neutral-700">
+                    {formatDateFull(billDetails.voucher?.date)}{billDetails.voucher?.store_name ? ` · ${billDetails.voucher.store_name}` : ''}
+                  </p>
+                </div>
+                <button onClick={() => setBillDetails(null)} className="text-neutral-500 hover:text-text transition-colors shrink-0">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="overflow-y-auto flex-1 px-6 py-4">
+                {billDetailsLoading ? (
+                  <p className="text-sm text-neutral-600 text-center py-8">Loading&hellip;</p>
+                ) : billDetails.items && billDetails.items.length > 0 ? (
+                  <>
+                    <div className="border-t border-divider">
+                      {billDetails.items.map((item, idx) => {
+                        const qty = Math.abs(item.billed_qty || 0);
+                        const rate = item.rate || (qty > 0 ? Math.abs(item.amount) / qty : 0);
+                        return (
+                          <div key={idx} className="flex justify-between gap-3 py-2.5 border-b border-divider">
+                            <div className="min-w-0">
+                              <div className="text-sm truncate">{item.stock_item_name}</div>
+                              <div className="text-[11.5px] text-neutral-700">{qty} × {fmtMoney2(rate)}</div>
+                            </div>
+                            <div className="text-sm shrink-0">{fmtMoney2(Math.abs(item.amount))}</div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    <div className="flex flex-col gap-1 mt-4">
+                      <div className="flex justify-between text-sm text-neutral-700">
+                        <span>Items total</span>
+                        <span>{fmtMoney2(billDetails.purchase_value)}</span>
+                      </div>
+                      {billDetails.taxes?.cgst > 0 && (
+                        <div className="flex justify-between text-sm text-neutral-700">
+                          <span>CGST</span><span>{fmtMoney2(billDetails.taxes.cgst)}</span>
+                        </div>
+                      )}
+                      {billDetails.taxes?.sgst > 0 && (
+                        <div className="flex justify-between text-sm text-neutral-700">
+                          <span>SGST</span><span>{fmtMoney2(billDetails.taxes.sgst)}</span>
+                        </div>
+                      )}
+                      {billDetails.taxes?.igst > 0 && (
+                        <div className="flex justify-between text-sm text-neutral-700">
+                          <span>IGST</span><span>{fmtMoney2(billDetails.taxes.igst)}</span>
+                        </div>
+                      )}
+                      {Math.abs(billDetails.rounding || 0) > 0.005 && (
+                        <div className="flex justify-between text-sm text-neutral-700">
+                          <span>Rounding off</span><span>{fmtMoney2(billDetails.rounding)}</span>
+                        </div>
+                      )}
+                      <div className="flex justify-between items-baseline border-t border-text pt-2 mt-1">
+                        <span className="font-heading font-semibold text-lg">Bill total</span>
+                        <span className="font-heading font-semibold text-xl">{fmtMoney2(billDetails.supplier_payable)}</span>
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <div className="text-center py-8 flex flex-col items-center gap-2 text-neutral-600">
+                    <Package className="w-6 h-6" />
+                    <p className="text-sm">No inventory items found for this bill.</p>
+                  </div>
+                )}
+              </div>
+
+              <div className="px-6 py-4 border-t border-divider">
+                <button
+                  onClick={() => setBillDetails(null)}
+                  className="w-full h-11 border border-divider rounded-md text-[15px] hover:bg-text/5 transition-colors"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
 }

@@ -1,406 +1,420 @@
 "use client";
 
-import React, { useState, useEffect } from 'react';
-import { AlertCircle, TrendingUp, TrendingDown, RefreshCw, Calendar, Store, Info, ChevronLeft, ChevronRight, ArrowLeft } from 'lucide-react';
-import ReportTabs from '@/components/layout/ReportTabs';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useAuth } from '@/context/AuthContext';
+import { useSyncStatus } from '@/context/SyncStatusContext';
+import TopBar from '@/components/layout/TopBar';
+import ReportTabs from '@/components/layout/ReportTabs';
+import { Wifi, WifiOff, AlertTriangle } from 'lucide-react';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 
+// The backend only ever computes P&L for these three fixed stores (see
+// calculate_pl_for_store in reporting_pl.py) -- unlike Sales/Purchases/
+// Daybook, this isn't driven by the dynamic cost-centres list.
+const PL_STORES = ['Mahagun', 'Gulshan', 'Vvip'];
+
 const PRESETS = [
-    { label: "This Month", value: "month" },
-    { label: "This Quarter", value: "quarter" },
-    { label: "This Financial Year", value: "fy" },
-    { label: "Custom Month Range", value: "custom" },
+  { label: "This month", value: "month" },
+  { label: "This quarter", value: "quarter" },
+  { label: "This financial year", value: "fy" },
+  { label: "Custom months", value: "custom" },
 ];
 
-function formatCurrency(val) {
-    if (val === undefined || val === null) return "—";
-    return new Intl.NumberFormat('en-IN', {
-        style: 'currency',
-        currency: 'INR',
-        minimumFractionDigits: 2
-    }).format(val);
+function fmtMoney(v) {
+  if (v === undefined || v === null) return "—";
+  const n = Math.round(v);
+  return `₹${Math.abs(n).toLocaleString('en-IN')}`;
+}
+function fmtMoney2(v) {
+  if (v === undefined || v === null) return "—";
+  return `₹${Math.abs(v).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 function getPresetMonths(preset) {
-    const today = new Date();
-    const y = today.getFullYear();
-    const m = today.getMonth();
-    
-    let startMonthStr, endMonthStr;
-    
-    const fmt = (year, monthIdx) => {
-        return `${year}-${String(monthIdx + 1).padStart(2, '0')}`;
-    };
-    
-    if (preset === "month") {
-        startMonthStr = fmt(y, m);
-        endMonthStr = fmt(y, m);
-    } else if (preset === "quarter") {
-        const qMonth = Math.floor(m / 3) * 3;
-        startMonthStr = fmt(y, qMonth);
-        endMonthStr = fmt(y, qMonth + 2);
-    } else if (preset === "fy") {
-        const fyStartYear = m >= 3 ? y : y - 1;
-        startMonthStr = fmt(fyStartYear, 3); // April
-        endMonthStr = fmt(fyStartYear + 1, 2); // March
-    } else {
-        startMonthStr = fmt(y, m);
-        endMonthStr = fmt(y, m);
-    }
-    
-    return { start_month: startMonthStr, end_month: endMonthStr };
+  const today = new Date();
+  const y = today.getFullYear();
+  const m = today.getMonth();
+  const fmt = (year, monthIdx) => `${year}-${String(monthIdx + 1).padStart(2, '0')}`;
+
+  if (preset === "quarter") {
+    const qMonth = Math.floor(m / 3) * 3;
+    return { start_month: fmt(y, qMonth), end_month: fmt(y, qMonth + 2) };
+  }
+  if (preset === "fy") {
+    const fyStartYear = m >= 3 ? y : y - 1;
+    return { start_month: fmt(fyStartYear, 3), end_month: fmt(fyStartYear + 1, 2) };
+  }
+  return { start_month: fmt(y, m), end_month: fmt(y, m) };
+}
+
+function monthLabel(yyyy_mm, withYear = true) {
+  if (!yyyy_mm) return '';
+  const [y, m] = yyyy_mm.split('-').map(Number);
+  const d = new Date(y, m - 1, 1);
+  return new Intl.DateTimeFormat('en-GB', { month: 'short', ...(withYear ? { year: 'numeric' } : {}) }).format(d);
+}
+function monthEnd(yyyy_mm) {
+  const [y, m] = yyyy_mm.split('-').map(Number);
+  return new Date(y, m, 0).getDate();
+}
+
+function ChangeIndicator({ pct }) {
+  if (pct === null || pct === undefined) return null;
+  const arrow = pct >= 0 ? '▲' : '▼';
+  return <span className={pct >= 0 ? 'text-accent-700' : 'text-neutral-700'}>{arrow} {Math.abs(pct).toFixed(1)}% vs prev period</span>;
+}
+
+function changePct(value, prev) {
+  if (value === null || value === undefined || prev === null || prev === undefined) return null;
+  if (prev === 0) return value > 0 ? 100 : value < 0 ? -100 : 0;
+  return ((value - prev) / Math.abs(prev)) * 100;
 }
 
 export default function PLReport() {
-    const { user } = useAuth();
-    const lockedStore = user && !user.is_owner ? user.store_name : null;
-    const [loading, setLoading] = useState(false);
-    const [data, setData] = useState(null);
-    const [error, setError] = useState(null);
+  const { user } = useAuth();
+  const { isOnline } = useSyncStatus();
+  const lockedStore = user && !user.is_owner ? user.store_name : null;
 
-    const [preset, setPreset] = useState("fy"); // Default FY
-    const [months, setMonths] = useState(getPresetMonths("fy"));
+  const [preset, setPreset] = useState("month");
+  const [months, setMonths] = useState(getPresetMonths("month"));
+  const [selectedStore, setSelectedStore] = useState(lockedStore || "");
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [queueCount, setQueueCount] = useState(null);
 
-    const [costCentres, setCostCentres] = useState([]);
-    const [selectedStore, setSelectedStore] = useState(lockedStore || "Combined");
+  useEffect(() => {
+    if (lockedStore) setSelectedStore(lockedStore);
+  }, [lockedStore]);
 
-    useEffect(() => {
-        if (lockedStore) setSelectedStore(lockedStore);
-    }, [lockedStore]);
+  useEffect(() => {
+    fetch('/api/dashboard/stats')
+      .then(res => res.json())
+      .then(d => setQueueCount(d.queue_count ?? 0))
+      .catch(() => {});
+  }, []);
 
-    useEffect(() => {
-        fetchCostCentres();
-    }, []);
-    
-    useEffect(() => {
-        if (preset !== "custom") {
-            setMonths(getPresetMonths(preset));
+  useEffect(() => {
+    if (!months.start_month || !months.end_month) return;
+    setLoading(true);
+    fetch(`${API_BASE}/api/reporting/profit-loss?start_month=${months.start_month}&end_month=${months.end_month}`)
+      .then(res => res.json().then(json => ({ ok: res.ok, json })))
+      .then(({ ok, json }) => {
+        if (!ok) throw new Error(json.detail || "Failed to fetch P&L report");
+        setData(json);
+        setError(null);
+      })
+      .catch(err => setError(err.message))
+      .finally(() => setLoading(false));
+  }, [months]);
+
+  const handlePreset = (p) => {
+    setPreset(p);
+    if (p !== "custom") setMonths(getPresetMonths(p));
+  };
+
+  // A staff account's response is a different, single-store shape
+  // ({current, previous}) with no stores/combined/unallocated keys at all.
+  const activeData = useMemo(() => {
+    if (!data) return null;
+    if (lockedStore) return data.current;
+    if (!selectedStore) return data.combined;
+    if (selectedStore === "Unallocated") return data.unallocated;
+    return data.stores.find(s => s.store === selectedStore);
+  }, [data, lockedStore, selectedStore]);
+
+  const activePrevData = useMemo(() => {
+    if (!data || !data.previous_period.is_data_complete) return null;
+    if (lockedStore) return data.previous;
+    if (!selectedStore) return data.combined_previous;
+    if (selectedStore === "Unallocated") return data.unallocated_previous;
+    return data.stores_previous.find(s => s.store === selectedStore);
+  }, [data, lockedStore, selectedStore]);
+
+  const missingStores = activeData?.missing_stores || [];
+
+  const now = new Date();
+  const monthKicker = new Intl.DateTimeFormat('en-US', { month: 'long', year: 'numeric' }).format(now).toUpperCase();
+  const storeLabel = selectedStore ? selectedStore.toUpperCase() : 'ALL STORES';
+  const storeLabelStatement = selectedStore ? selectedStore : 'All stores combined';
+  const periodLabelMap = { month: 'THIS MONTH', quarter: 'THIS QUARTER', fy: 'THIS FINANCIAL YEAR' };
+  const periodLabel = periodLabelMap[preset] || `${monthLabel(months.start_month, false)} – ${monthLabel(months.end_month)}`.toUpperCase();
+  const dateRangeFull = months.start_month && months.end_month
+    ? `1 ${monthLabel(months.start_month, false)} – ${monthEnd(months.end_month)} ${monthLabel(months.end_month)}`
+    : '';
+
+  const netSalesChange = changePct(activeData?.revenue?.net_sales, activePrevData?.revenue?.net_sales);
+  const grossProfitChange = changePct(activeData?.gross_profit, activePrevData?.gross_profit);
+  const netProfitChange = changePct(activeData?.net_profit, activePrevData?.net_profit);
+  const grossMargin = activeData?.gross_profit != null && activeData?.revenue?.net_sales ? (activeData.gross_profit / activeData.revenue.net_sales) * 100 : null;
+  const netMargin = activeData?.net_profit != null && activeData?.revenue?.net_sales ? (activeData.net_profit / activeData.revenue.net_sales) * 100 : null;
+
+  const storeCards = useMemo(() => {
+    if (!data || lockedStore || selectedStore) return [];
+    return PL_STORES.map(name => data.stores.find(s => s.store === name)).filter(Boolean);
+  }, [data, lockedStore, selectedStore]);
+
+  return (
+    <div className="min-h-screen bg-bg pb-24">
+      <TopBar
+        title="Reports"
+        kicker={monthKicker}
+        rightContent={
+          <div className={`flex items-center gap-1.5 h-9 px-3 rounded-full border shrink-0 ${isOnline === false ? 'border-accent text-accent-700' : 'border-divider text-neutral-700'}`}>
+            {isOnline === false ? <WifiOff className="w-3.5 h-3.5" /> : <Wifi className="w-3.5 h-3.5" />}
+            <span className="text-xs font-medium whitespace-nowrap">
+              {isOnline === false ? 'Offline' : 'Online'}{queueCount > 0 ? ` · ${queueCount} saved` : ''}
+            </span>
+          </div>
         }
-    }, [preset]);
-    
-    useEffect(() => {
-        if (months.start_month && months.end_month) {
-            fetchReport();
-        }
-    }, [months]);
+      />
+      <ReportTabs />
 
-    const fetchCostCentres = async () => {
-        try {
-            const res = await fetch(`${API_BASE}/api/reporting/inspect/cost-centres`);
-            if (res.ok) {
-                const json = await res.json();
-                setCostCentres(json);
-            }
-        } catch (err) {}
-    };
+      <div className="max-w-md mx-auto px-4">
+        {!lockedStore && (
+          <div className="flex gap-2 overflow-x-auto py-4 -mx-1 px-1" style={{ scrollbarWidth: 'none' }}>
+            <button
+              onClick={() => setSelectedStore('')}
+              className={`shrink-0 px-3.5 h-9 rounded-full border text-sm transition-colors ${!selectedStore ? 'border-accent text-accent-700 bg-accent/8' : 'border-divider text-text hover:border-text/45'}`}
+            >
+              All stores
+            </button>
+            {PL_STORES.map(name => (
+              <button
+                key={name}
+                onClick={() => setSelectedStore(name)}
+                className={`shrink-0 px-3.5 h-9 rounded-full border text-sm whitespace-nowrap transition-colors ${selectedStore === name ? 'border-accent text-accent-700 bg-accent/8' : 'border-divider text-text hover:border-text/45'}`}
+              >
+                {name}
+              </button>
+            ))}
+          </div>
+        )}
 
-    const fetchReport = async () => {
-        try {
-            setLoading(true);
-            const res = await fetch(`${API_BASE}/api/reporting/profit-loss?start_month=${months.start_month}&end_month=${months.end_month}`);
-            const json = await res.json();
-            if (!res.ok) {
-                throw new Error(json.detail || "Failed to fetch P&L Report");
-            }
-            
-            setData(json);
-            setError(null);
-        } catch (err) {
-            setError(err.message);
-            setData(null);
-        } finally {
-            setLoading(false);
-        }
-    };
-
-    const handleCustomMonthChange = (type, val) => {
-        setPreset("custom");
-        setMonths(prev => ({ ...prev, [type]: val }));
-    };
-
-    // A staff account's response is already scoped to one store server-side
-    // (a different, single-store shape -- {current, previous} -- with no
-    // stores/combined/unallocated keys at all), so it skips the
-    // Combined/Unallocated/per-store branching entirely.
-    const getActiveData = () => {
-        if (!data) return null;
-        if (lockedStore) return data.current;
-        if (selectedStore === "Combined") return data.combined;
-        if (selectedStore === "Unallocated") return data.unallocated;
-        return data.stores.find(s => s.store === selectedStore);
-    };
-
-    const getActivePreviousData = () => {
-        if (!data || !data.previous_period.is_data_complete) return null;
-        if (lockedStore) return data.previous;
-        if (selectedStore === "Combined") return data.combined_previous;
-        if (selectedStore === "Unallocated") return data.unallocated_previous;
-        return data.stores_previous.find(s => s.store === selectedStore);
-    };
-
-    const activeData = getActiveData();
-    const activePreviousData = getActivePreviousData();
-
-    const missingStores = activeData?.missing_stores || [];
-    const isMissingStock = missingStores.length > 0;
-
-    const renderKPICard = (title, value, prevValue) => {
-        const hasValue = value !== null && value !== undefined;
-        let changePct = null;
-
-        if (hasValue && prevValue !== null && prevValue !== undefined) {
-            const diff = value - prevValue;
-            changePct = prevValue !== 0 ? (diff / Math.abs(prevValue)) * 100 : (value > 0 ? 100 : 0);
-        }
-
-        // getActivePreviousData() only ever returns null because the previous
-        // period's own Tally sync is incomplete (P&L always has *a* previous
-        // month range to compare against) -- say so explicitly instead of
-        // just omitting the comparison with no explanation.
-        const previousIncomplete = changePct === null && data?.previous_period?.is_data_complete === false;
-
-        return (
-            <div className="bg-white dark:bg-gray-800 p-6 rounded-2xl border border-gray-200 dark:border-gray-700 shadow-sm relative overflow-hidden group">
-                <p className="text-sm font-semibold text-gray-500 uppercase tracking-wide">{title}</p>
-                <h2 className={`text-3xl lg:text-4xl font-black mt-2 tracking-tight ${!hasValue ? 'text-gray-400' : 'text-gray-900 dark:text-white'}`}>
-                    {hasValue ? formatCurrency(value) : '—'}
-                </h2>
-                {changePct !== null && (
-                    <div className="mt-4 flex items-center gap-2">
-                        <span className={`flex items-center text-sm font-semibold px-2 py-1 rounded-lg ${
-                            changePct > 0 ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' :
-                            changePct < 0 ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' :
-                            'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-400'
-                        }`}>
-                            {changePct > 0 ? <TrendingUp className="w-3 h-3 mr-1" /> :
-                             changePct < 0 ? <TrendingDown className="w-3 h-3 mr-1" /> :
-                             <RefreshCw className="w-3 h-3 mr-1" />}
-                            {changePct > 0 ? '+' : ''}{changePct.toFixed(1)}%
-                        </span>
-                        <span className="text-xs font-medium text-gray-400">vs Prev Period</span>
-                    </div>
-                )}
-                {previousIncomplete && (
-                    <p className="mt-4 text-xs italic text-gray-400">vs Prev Period unavailable -- that period's Tally sync is incomplete</p>
-                )}
-            </div>
-        );
-    };
-
-    return (
-        <div className="w-full flex flex-col min-h-screen pb-20">
-            <ReportTabs />
-            <div className="p-6 max-w-7xl mx-auto space-y-6 w-full flex-1">
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                    <div>
-                        <h1 className="text-3xl font-bold text-gray-900 dark:text-white tracking-tight">Profit &amp; Loss</h1>
-                        <p className="text-gray-500 dark:text-gray-400 mt-1">Store-wise revenue, expenses, and profitability.</p>
-                    </div>
-                    
-                    <div className="flex flex-wrap items-center gap-3">
-                        <div className="relative">
-                            <Store className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-                            {lockedStore ? (
-                                <div className="pl-9 pr-4 py-2 border border-gray-300 dark:border-gray-700 rounded-xl bg-white dark:bg-gray-800 text-sm shadow-sm">
-                                    {lockedStore}
-                                </div>
-                            ) : (
-                            <select
-                                value={selectedStore}
-                                onChange={(e) => setSelectedStore(e.target.value)}
-                                className="pl-9 pr-4 py-2 border border-gray-300 dark:border-gray-700 rounded-xl bg-white dark:bg-gray-800 text-sm focus:ring-2 focus:ring-blue-500 shadow-sm appearance-none cursor-pointer"
-                            >
-                                <option value="Combined">Combined (All Stores)</option>
-                                <option value="Unallocated">Unallocated</option>
-                                {costCentres.map(c => (
-                                    <option key={c.name} value={c.name}>{c.name}</option>
-                                ))}
-                            </select>
-                            )}
-                        </div>
-                        
-                        <div className="flex bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-xl p-1 shadow-sm overflow-x-auto max-w-[calc(100vw-3rem)]">
-                            {PRESETS.map(p => (
-                                <button
-                                    key={p.value}
-                                    onClick={() => setPreset(p.value)}
-                                    className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors whitespace-nowrap ${preset === p.value ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-400' : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'}`}
-                                >
-                                    {p.label}
-                                </button>
-                            ))}
-                        </div>
-                    </div>
-                </div>
-                
-                {preset === "custom" && (
-                    <div className="flex items-center gap-4 bg-gray-50 dark:bg-gray-800/50 p-4 rounded-xl border border-gray-200 dark:border-gray-800 flex-wrap">
-                        <div className="flex flex-col">
-                            <label className="text-xs text-gray-500 font-medium mb-1">Start Month</label>
-                            <input type="month" value={months.start_month} onChange={(e) => handleCustomMonthChange("start_month", e.target.value)} className="px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-900 text-sm" />
-                        </div>
-                        <div className="flex flex-col">
-                            <label className="text-xs text-gray-500 font-medium mb-1">End Month</label>
-                            <input type="month" value={months.end_month} onChange={(e) => handleCustomMonthChange("end_month", e.target.value)} className="px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-900 text-sm" />
-                        </div>
-                    </div>
-                )}
-                
-                {error && (
-                    <div className="flex items-center gap-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800/50 p-4 rounded-xl text-red-700 dark:text-red-400">
-                        <AlertCircle className="w-5 h-5 flex-shrink-0" />
-                        <p className="text-sm font-medium">{error}</p>
-                    </div>
-                )}
-                
-                {data && data.is_data_complete === false && !error && (
-                    <div className="flex items-center gap-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/50 p-4 rounded-xl text-amber-700 dark:text-amber-400">
-                        <AlertCircle className="w-5 h-5 flex-shrink-0" />
-                        <p className="text-sm font-medium">Incomplete Reporting Data. Please run Tally Sync for this period to view accurate records.</p>
-                    </div>
-                )}
-
-                {isMissingStock && (
-                    <div className="flex items-start gap-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800/50 p-4 rounded-xl text-red-700 dark:text-red-400">
-                        <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
-                        <div>
-                            <p className="text-sm font-bold">{selectedStore === "Combined" ? "Combined P&L Incomplete" : "Stock data incomplete"}</p>
-                            <p className="text-sm mt-1">Stock data is missing for: <span className="font-semibold capitalize">{missingStores.join(', ')}</span></p>
-                        </div>
-                    </div>
-                )}
-                
-                {loading && !data && (
-                    <div className="flex justify-center items-center py-12">
-                        <RefreshCw className="h-8 w-8 text-blue-500 animate-spin" />
-                    </div>
-                )}
-
-                {activeData && (
-                    <>
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                            {renderKPICard('Net Sales', activeData.revenue.net_sales, activePreviousData?.revenue.net_sales)}
-                            {renderKPICard('Gross Profit', activeData.gross_profit, activePreviousData?.gross_profit)}
-                            {renderKPICard('Net Profit', activeData.net_profit, activePreviousData?.net_profit)}
-                        </div>
-                        
-                        <div className="bg-white dark:bg-gray-800 rounded-2xl border border-gray-200 dark:border-gray-700 shadow-sm overflow-hidden mt-6 max-w-4xl">
-                            <div className="p-6 border-b border-gray-100 dark:border-gray-800">
-                                <h2 className="text-xl font-bold text-gray-900 dark:text-white uppercase tracking-wider">Profit &amp; Loss Statement</h2>
-                            </div>
-                            
-                            <div className="p-6">
-                                <div className="space-y-6 text-sm">
-                                    {/* Revenue */}
-                                    <div>
-                                        <h3 className="font-bold text-gray-900 dark:text-white mb-2 uppercase tracking-wide text-xs">Revenue</h3>
-                                        <div className="flex justify-between py-1 border-b border-gray-100 dark:border-gray-800">
-                                            <span className="text-gray-700 dark:text-gray-300 pl-4">Net Sales</span>
-                                            <span className="font-medium text-gray-900 dark:text-white">{formatCurrency(activeData.revenue.net_sales)}</span>
-                                        </div>
-                                    </div>
-                                    
-                                    {/* COGS */}
-                                    <div>
-                                        <h3 className="font-bold text-gray-900 dark:text-white mb-2 uppercase tracking-wide text-xs">Cost of Goods Sold</h3>
-                                        <div className="flex justify-between py-1 border-b border-gray-100 dark:border-gray-800">
-                                            <span className="text-gray-700 dark:text-gray-300 pl-4">Opening Stock</span>
-                                            <span className="text-gray-900 dark:text-gray-300">{formatCurrency(activeData.cost_of_goods_sold.opening_stock)}</span>
-                                        </div>
-                                        <div className="flex justify-between py-1 border-b border-gray-100 dark:border-gray-800">
-                                            <span className="text-gray-700 dark:text-gray-300 pl-4">Net Purchases</span>
-                                            <span className="text-gray-900 dark:text-gray-300">{formatCurrency(activeData.cost_of_goods_sold.net_purchases)}</span>
-                                        </div>
-                                        <div className="flex justify-between py-1 border-b border-gray-100 dark:border-gray-800">
-                                            <span className="text-gray-700 dark:text-gray-300 pl-4">Less: Closing Stock</span>
-                                            <span className="text-gray-900 dark:text-gray-300">{activeData.cost_of_goods_sold.closing_stock !== null ? `(${formatCurrency(activeData.cost_of_goods_sold.closing_stock)})` : '—'}</span>
-                                        </div>
-                                        <div className="flex justify-between py-2 border-b-2 border-gray-200 dark:border-gray-700 font-bold bg-gray-50/50 dark:bg-gray-800/50 pl-4 pr-1 mt-1">
-                                            <span className="text-gray-900 dark:text-white">Cost of Goods Sold</span>
-                                            <span className="text-gray-900 dark:text-white">{formatCurrency(activeData.cost_of_goods_sold.cogs)}</span>
-                                        </div>
-                                    </div>
-                                    
-                                    {/* Gross Profit */}
-                                    <div className="flex justify-between py-3 border-b border-gray-300 dark:border-gray-600 font-black text-base bg-blue-50/30 dark:bg-blue-900/10 px-2 rounded-lg">
-                                        <span className="text-gray-900 dark:text-white">Gross Profit</span>
-                                        <span className="text-gray-900 dark:text-white">{formatCurrency(activeData.gross_profit)}</span>
-                                    </div>
-
-                                    {/* Expenses */}
-                                    <div>
-                                        <h3 className="font-bold text-gray-900 dark:text-white mb-2 uppercase tracking-wide text-xs">Expenses</h3>
-                                        <div className="flex justify-between py-1 border-b border-gray-100 dark:border-gray-800">
-                                            <span className="text-gray-700 dark:text-gray-300 pl-4">Direct Expenses</span>
-                                            <span className="text-gray-900 dark:text-gray-300">{activeData.expenses.direct_expenses !== 0 ? formatCurrency(activeData.expenses.direct_expenses) : '—'}</span>
-                                        </div>
-                                        <div className="flex justify-between py-1 border-b border-gray-100 dark:border-gray-800">
-                                            <span className="text-gray-700 dark:text-gray-300 pl-4">Indirect Expenses</span>
-                                            <span className="text-gray-900 dark:text-gray-300">{activeData.expenses.indirect_expenses !== 0 ? formatCurrency(activeData.expenses.indirect_expenses) : '—'}</span>
-                                        </div>
-                                        <div className="flex justify-between py-2 border-b-2 border-gray-200 dark:border-gray-700 font-bold bg-gray-50/50 dark:bg-gray-800/50 pl-4 pr-1 mt-1">
-                                            <span className="text-gray-900 dark:text-white">Total Expenses</span>
-                                            <span className="text-gray-900 dark:text-white">{formatCurrency((activeData.expenses.direct_expenses || 0) + (activeData.expenses.indirect_expenses || 0))}</span>
-                                        </div>
-                                    </div>
-
-                                    {/* Net Profit */}
-                                    <div className="flex justify-between py-4 font-black text-lg bg-green-50/50 dark:bg-green-900/20 px-4 rounded-xl border border-green-100 dark:border-green-800/50">
-                                        <span className="text-gray-900 dark:text-white uppercase tracking-wider">Net Profit</span>
-                                        <span className="text-gray-900 dark:text-white">{formatCurrency(activeData.net_profit)}</span>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
-                        {selectedStore === "Combined" && data.stores.length > 0 && (
-                            <div className="bg-white dark:bg-gray-800 rounded-2xl border border-gray-200 dark:border-gray-700 shadow-sm overflow-hidden flex flex-col mt-6">
-                                <div className="p-5 border-b border-gray-100 dark:border-gray-800">
-                                    <h2 className="text-lg font-bold text-gray-900 dark:text-white">Store Comparison</h2>
-                                </div>
-                                <div className="overflow-x-auto">
-                                    <table className="w-full text-left border-collapse min-w-[600px]">
-                                        <thead>
-                                            <tr className="border-b border-gray-200 dark:border-gray-700 bg-gray-50/50 dark:bg-gray-800/50">
-                                                <th className="p-4 text-xs font-semibold text-gray-500 uppercase tracking-wider">Store</th>
-                                                <th className="p-4 text-xs font-semibold text-gray-500 uppercase tracking-wider text-right">Net Sales</th>
-                                                <th className="p-4 text-xs font-semibold text-gray-500 uppercase tracking-wider text-right">Purchases</th>
-                                                <th className="p-4 text-xs font-semibold text-gray-500 uppercase tracking-wider text-right">Gross Profit</th>
-                                                <th className="p-4 text-xs font-semibold text-gray-500 uppercase tracking-wider text-right">Net Profit</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
-                                            {data.stores.map((s, idx) => (
-                                                <tr key={idx} className="hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors">
-                                                    <td className="p-4 text-sm font-medium text-gray-900 dark:text-white flex items-center gap-2">
-                                                        {s.store}
-                                                        {s.missing_stores?.length > 0 && (
-                                                            <span className="w-2 h-2 rounded-full bg-red-500" title="Missing Stock Data" />
-                                                        )}
-                                                    </td>
-                                                    <td className="p-4 text-sm text-gray-600 dark:text-gray-300 text-right">{formatCurrency(s.revenue.net_sales)}</td>
-                                                    <td className="p-4 text-sm text-gray-600 dark:text-gray-300 text-right">{formatCurrency(s.cost_of_goods_sold.net_purchases)}</td>
-                                                    <td className="p-4 text-sm font-medium text-gray-900 dark:text-gray-100 text-right">{formatCurrency(s.gross_profit)}</td>
-                                                    <td className="p-4 text-sm font-bold text-gray-900 dark:text-white text-right">{formatCurrency(s.net_profit)}</td>
-                                                </tr>
-                                            ))}
-                                            <tr className="bg-gray-50 dark:bg-gray-800 border-t-2 border-gray-200 dark:border-gray-700">
-                                                <td className="p-4 text-sm font-bold text-gray-900 dark:text-white">Combined</td>
-                                                <td className="p-4 text-sm font-bold text-gray-900 dark:text-white text-right">{formatCurrency(data.combined.revenue.net_sales)}</td>
-                                                <td className="p-4 text-sm font-bold text-gray-900 dark:text-white text-right">{formatCurrency(data.combined.cost_of_goods_sold.net_purchases)}</td>
-                                                <td className="p-4 text-sm font-black text-gray-900 dark:text-white text-right">{formatCurrency(data.combined.gross_profit)}</td>
-                                                <td className="p-4 text-sm font-black text-gray-900 dark:text-white text-right">{formatCurrency(data.combined.net_profit)}</td>
-                                            </tr>
-                                        </tbody>
-                                    </table>
-                                </div>
-                            </div>
-                        )}
-                    </>
-                )}
-            </div>
+        <div className="flex gap-2 overflow-x-auto pb-4 -mx-1 px-1" style={{ scrollbarWidth: 'none' }}>
+          {PRESETS.map(p => (
+            <button
+              key={p.value}
+              onClick={() => handlePreset(p.value)}
+              className={`shrink-0 px-3.5 h-9 rounded-full border text-sm whitespace-nowrap transition-colors ${preset === p.value ? 'border-accent text-accent-700 bg-accent/8' : 'border-divider text-text hover:border-text/45'}`}
+            >
+              {p.label}
+            </button>
+          ))}
         </div>
-    );
+
+        {preset === "custom" && (
+          <div className="grid grid-cols-2 gap-3 pb-4">
+            <div>
+              <label className="text-xs text-neutral-600 mb-1 block">From month</label>
+              <input
+                type="month"
+                value={months.start_month}
+                onChange={e => setMonths(prev => ({ ...prev, start_month: e.target.value }))}
+                className="w-full h-10 px-3 rounded-md border border-divider bg-bg text-text text-sm focus:outline-none focus:border-accent"
+              />
+            </div>
+            <div>
+              <label className="text-xs text-neutral-600 mb-1 block">To month</label>
+              <input
+                type="month"
+                value={months.end_month}
+                onChange={e => setMonths(prev => ({ ...prev, end_month: e.target.value }))}
+                className="w-full h-10 px-3 rounded-md border border-divider bg-bg text-text text-sm focus:outline-none focus:border-accent"
+              />
+            </div>
+          </div>
+        )}
+
+        {error && (
+          <div className="flex items-start gap-2 border border-accent rounded-md p-3 mb-4">
+            <AlertTriangle className="w-4 h-4 text-accent-700 shrink-0 mt-0.5" />
+            <p className="text-accent-700 text-xs leading-snug">{error}</p>
+          </div>
+        )}
+
+        {loading ? (
+          <p className="text-sm text-neutral-600 text-center py-16">Loading&hellip;</p>
+        ) : error || !activeData ? null : (
+          <>
+            {data?.is_data_complete === false && (
+              <div className="flex items-start gap-2 border border-accent rounded-md p-3 mb-4">
+                <AlertTriangle className="w-4 h-4 text-accent-700 shrink-0 mt-0.5" />
+                <p className="text-accent-700 text-xs leading-snug">
+                  Reporting data for this period may be incomplete &mdash; run a Tally sync to make sure everything is up to date.
+                </p>
+              </div>
+            )}
+            {missingStores.length > 0 && (
+              <div className="flex items-start gap-2 border border-accent rounded-md p-3 mb-4">
+                <AlertTriangle className="w-4 h-4 text-accent-700 shrink-0 mt-0.5" />
+                <p className="text-accent-700 text-xs leading-snug">
+                  Stock data is missing for {missingStores.join(', ')} &mdash; gross/net profit can't be computed until it syncs.
+                </p>
+              </div>
+            )}
+
+            {/* Summary */}
+            <div className="text-[10.5px] tracking-[0.12em] uppercase text-accent-700">{storeLabel} · {periodLabel}{preset === 'custom' ? ` · ${dateRangeFull}` : ''}</div>
+            <div className="text-sm text-neutral-700 mt-2">Net sales</div>
+            <div className="font-heading text-[40px] leading-tight mt-1">{fmtMoney(activeData.revenue.net_sales)}</div>
+            {netSalesChange !== null && <div className="text-sm mt-1.5"><ChangeIndicator pct={netSalesChange} /></div>}
+
+            <div className="border-t border-divider my-5" />
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <div className="text-sm text-neutral-700">Gross profit{grossMargin !== null ? ` · ${grossMargin.toFixed(1)}%` : ''}</div>
+                <div className="font-heading font-semibold text-2xl mt-1">{activeData.gross_profit !== null ? fmtMoney(activeData.gross_profit) : '—'}</div>
+                {grossProfitChange !== null && <div className="text-xs mt-1"><ChangeIndicator pct={grossProfitChange} /></div>}
+              </div>
+              <div>
+                <div className="text-sm text-neutral-700">Net profit{netMargin !== null ? ` · ${netMargin.toFixed(1)}%` : ''}</div>
+                <div className="font-heading font-semibold text-2xl mt-1">{activeData.net_profit !== null ? fmtMoney(activeData.net_profit) : '—'}</div>
+                {netProfitChange !== null && <div className="text-xs mt-1"><ChangeIndicator pct={netProfitChange} /></div>}
+              </div>
+            </div>
+
+            <div className="border-t border-divider my-5" />
+
+            {/* Statement */}
+            <h3 className="font-heading font-semibold text-xl">Profit &amp; loss statement</h3>
+            <p className="text-sm text-neutral-600 mt-1 mb-4">{storeLabelStatement} · {dateRangeFull}</p>
+
+            <div className="text-[10.5px] tracking-[0.12em] uppercase text-accent-700 mb-1">Revenue</div>
+            <div className="flex justify-between py-2 border-b border-divider">
+              <span className="text-[15px]">Net sales</span>
+              <span className="text-[15px]">{fmtMoney2(activeData.revenue.net_sales)}</span>
+            </div>
+
+            <div className="text-[10.5px] tracking-[0.12em] uppercase text-accent-700 mt-4 mb-1">Cost of goods sold</div>
+            <div className="flex justify-between py-2 border-b border-divider">
+              <span className="text-[15px]">Opening stock</span>
+              <span className="text-[15px]">{activeData.cost_of_goods_sold.opening_stock !== null ? fmtMoney2(activeData.cost_of_goods_sold.opening_stock) : '—'}</span>
+            </div>
+            <div className="flex justify-between py-2 border-b border-divider">
+              <span className="text-[15px]">Net purchases</span>
+              <span className="text-[15px]">{fmtMoney2(activeData.cost_of_goods_sold.net_purchases)}</span>
+            </div>
+            <div className="flex justify-between py-2 border-b border-divider">
+              <span className="text-[15px]">Less: Closing stock</span>
+              <span className="text-[15px]">{activeData.cost_of_goods_sold.closing_stock !== null ? `(${fmtMoney2(activeData.cost_of_goods_sold.closing_stock)})` : '—'}</span>
+            </div>
+            <div className="flex justify-between py-2 font-semibold">
+              <span className="text-[15px]">Cost of goods sold</span>
+              <span className="text-[15px]">{activeData.cost_of_goods_sold.cogs !== null ? fmtMoney2(activeData.cost_of_goods_sold.cogs) : '—'}</span>
+            </div>
+
+            <div className="flex justify-between items-baseline border border-accent rounded-md px-4 py-3 mt-4">
+              <span className="font-heading text-lg">Gross profit</span>
+              <span className="font-heading font-semibold text-xl">{activeData.gross_profit !== null ? fmtMoney2(activeData.gross_profit) : '—'}</span>
+            </div>
+
+            <div className="text-[10.5px] tracking-[0.12em] uppercase text-accent-700 mt-5 mb-1">Expenses</div>
+            <div className="flex justify-between py-2 border-b border-divider font-medium">
+              <span className="text-[15px]">Direct expenses</span>
+              <span className="text-[15px]">{activeData.expenses.direct_expenses !== 0 ? fmtMoney2(activeData.expenses.direct_expenses) : '—'}</span>
+            </div>
+            {(activeData.expenses.direct_expenses_items || []).map(item => (
+              <div key={item.ledger_name} className="flex justify-between py-1.5 pl-4 text-neutral-700">
+                <span className="text-sm">{item.ledger_name}</span>
+                <span className="text-sm">{fmtMoney2(item.amount)}</span>
+              </div>
+            ))}
+            <div className="flex justify-between py-2 border-b border-divider font-medium mt-1">
+              <span className="text-[15px]">Indirect expenses</span>
+              <span className="text-[15px]">{activeData.expenses.indirect_expenses !== 0 ? fmtMoney2(activeData.expenses.indirect_expenses) : '—'}</span>
+            </div>
+            {(activeData.expenses.indirect_expenses_items || []).map(item => (
+              <div key={item.ledger_name} className="flex justify-between py-1.5 pl-4 text-neutral-700">
+                <span className="text-sm">{item.ledger_name}</span>
+                <span className="text-sm">{fmtMoney2(item.amount)}</span>
+              </div>
+            ))}
+            <div className="flex justify-between py-2 font-semibold mt-1">
+              <span className="text-[15px]">Total expenses</span>
+              <span className="text-[15px]">{fmtMoney2((activeData.expenses.direct_expenses || 0) + (activeData.expenses.indirect_expenses || 0))}</span>
+            </div>
+
+            <div className="flex justify-between items-baseline border border-accent rounded-md px-4 py-3 mt-4">
+              <span className="font-heading text-lg">Net profit</span>
+              <span className="font-heading font-semibold text-xl text-accent-700">{activeData.net_profit !== null ? fmtMoney2(activeData.net_profit) : '—'}</span>
+            </div>
+
+            {/* Store comparison */}
+            {storeCards.length > 0 && (
+              <>
+                <div className="border-t border-divider my-5" />
+                <h3 className="font-heading font-semibold text-xl">Store comparison</h3>
+                <p className="text-sm text-neutral-600 mt-1 mb-4">Tap a store to see its statement</p>
+
+                <div className="flex flex-col gap-3">
+                  {storeCards.map(s => (
+                    <button
+                      key={s.store}
+                      onClick={() => setSelectedStore(s.store)}
+                      className="text-left border border-divider rounded-md p-4 hover:border-accent transition-colors"
+                    >
+                      <div className="flex justify-between items-baseline gap-3">
+                        <span className="text-[15px]">{s.store}</span>
+                        <div className="text-right shrink-0">
+                          <div className="text-xs text-neutral-700">Net profit</div>
+                          <div className={`font-heading font-semibold text-lg ${s.net_profit > 0 ? 'text-accent-700' : ''}`}>
+                            {s.net_profit !== null ? (s.net_profit < 0 ? '− ' : '') + fmtMoney(Math.abs(s.net_profit)) : '—'}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="border-t border-divider my-2.5" />
+                      <div className="grid grid-cols-3 gap-2 text-sm">
+                        <div>
+                          <div className="text-neutral-700 text-xs">Net sales</div>
+                          <div>{fmtMoney(s.revenue.net_sales)}</div>
+                        </div>
+                        <div>
+                          <div className="text-neutral-700 text-xs">Purchases</div>
+                          <div>{fmtMoney(s.cost_of_goods_sold.net_purchases)}</div>
+                        </div>
+                        <div>
+                          <div className="text-neutral-700 text-xs">Gross profit</div>
+                          <div>{s.gross_profit !== null ? fmtMoney(s.gross_profit) : '—'}</div>
+                        </div>
+                      </div>
+                    </button>
+                  ))}
+
+                  <div className="text-left border border-accent bg-accent/8 rounded-md p-4">
+                    <div className="flex justify-between items-baseline gap-3">
+                      <span className="text-[15px] font-semibold">Combined</span>
+                      <div className="text-right shrink-0">
+                        <div className="text-xs text-neutral-700">Net profit</div>
+                        <div className="font-heading font-semibold text-lg text-accent-700">
+                          {data.combined.net_profit !== null ? fmtMoney(data.combined.net_profit) : '—'}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="border-t border-divider my-2.5" />
+                    <div className="grid grid-cols-3 gap-2 text-sm">
+                      <div>
+                        <div className="text-neutral-700 text-xs">Net sales</div>
+                        <div>{fmtMoney(data.combined.revenue.net_sales)}</div>
+                      </div>
+                      <div>
+                        <div className="text-neutral-700 text-xs">Purchases</div>
+                        <div>{fmtMoney(data.combined.cost_of_goods_sold.net_purchases)}</div>
+                      </div>
+                      <div>
+                        <div className="text-neutral-700 text-xs">Gross profit</div>
+                        <div>{data.combined.gross_profit !== null ? fmtMoney(data.combined.gross_profit) : '—'}</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
 }

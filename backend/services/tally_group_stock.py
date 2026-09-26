@@ -4,45 +4,42 @@ def fetch_stock_balances_from_db(start_month: str, end_month: str) -> Dict[str, 
     """
     Fetches the monthly stock snapshot from SQLite.
     start_month and end_month should be in 'YYYY-MM' format.
-    Raises Exception if data is missing or incomplete for either boundary.
-    """
+
+    Returns whatever stores it has data for -- a store whose opening or
+    closing ledger is missing for either boundary month is simply omitted
+    from the result, rather than this raising and taking the whole report
+    down. calculate_pl_for_store already has its own per-store handling for
+    exactly this (see its `missing_stores` list and the None-cogs/None-
+    gross_profit fallback) -- this used to raise instead, which meant one
+    store's stock sync lagging behind (e.g. Tally offline for a while)
+    blanked out the ENTIRE P&L, including the other stores' fully-available
+    Sales/Purchases/Expenses figures, and the frontend's own ready-built
+    per-store "stock data missing" banner never got a chance to render."""
     from backend.database import get_db
     bals = {}
-    
+
     required_ledgers = {"stock mahagun", "stock gulshan", "stock vvip"}
-    
+
     with get_db() as conn:
         cursor = conn.cursor()
-        
-        # Check completeness for start_month
+
         cursor.execute("SELECT ledger_name, opening_balance FROM reporting_monthly_stock WHERE year_month = ?", (start_month,))
-        start_rows = cursor.fetchall()
-        start_data = {r['ledger_name']: r['opening_balance'] for r in start_rows}
-        
-        if not required_ledgers.issubset(set(start_data.keys())):
-            missing = required_ledgers - set(start_data.keys())
-            raise Exception(f"Stock data for the requested months is incomplete. Missing ledgers {missing} in {start_month}. Please run Reporting Sync for this period.")
-            
-        # Check completeness for end_month
+        start_data = {r['ledger_name']: r['opening_balance'] for r in cursor.fetchall()}
+
         cursor.execute("SELECT ledger_name, closing_balance FROM reporting_monthly_stock WHERE year_month = ?", (end_month,))
-        end_rows = cursor.fetchall()
-        end_data = {r['ledger_name']: r['closing_balance'] for r in end_rows}
-        
-        if not required_ledgers.issubset(set(end_data.keys())):
-            missing = required_ledgers - set(end_data.keys())
-            raise Exception(f"Stock data for the requested months is incomplete. Missing ledgers {missing} in {end_month}. Please run Reporting Sync for this period.")
-            
+        end_data = {r['ledger_name']: r['closing_balance'] for r in cursor.fetchall()}
+
         for ledger in required_ledgers:
+            if ledger not in start_data or ledger not in end_data:
+                continue
+
             store_key = ledger.replace("stock ", "").strip()
             # Normalize signs just like Tally (if they were stored natively from Tally, they might already be negative)
             # Actually, the sync script stores the raw values from Tally XML (which are negative).
             # We must apply the same normalization: presentation_stock = -signed_tally_amount
-            op_val = start_data[ledger]
-            cl_val = end_data[ledger]
-            
             bals[store_key] = {
-                'opening': -op_val,
-                'closing': -cl_val
+                'opening': -start_data[ledger],
+                'closing': -end_data[ledger]
             }
-            
+
     return bals

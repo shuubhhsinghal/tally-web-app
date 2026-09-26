@@ -296,6 +296,14 @@ def test_purchase_item_connect_timeout_clears_delivery_uncertain(mock_post):
 
 @patch('backend.routers.bank_statement.tally_transport.post', new_callable=AsyncMock)
 def test_bank_statement_timeout_flags_every_row_in_batch(mock_post):
+    # Each transaction in the batch is now attempted individually (see
+    # bank_statement.py's /post) -- a Timeout is genuinely ambiguous for the
+    # ONE voucher it happened on, so that voucher is marked FAILED with
+    # delivery_uncertain left set (matching flush_offline_queue's own
+    # handling of the same exception), rather than left PENDING for an
+    # automatic retry that could duplicate an already-delivered voucher.
+    # Other transactions in the batch are attempted independently and are
+    # not assumed to share the same fate.
     mock_post.side_effect = requests.exceptions.Timeout()
     res = client.post("/api/bank-statement/post", json={
         "transactions": [
@@ -311,7 +319,7 @@ def test_bank_statement_timeout_flags_every_row_in_batch(mock_post):
         rows = [dict(r) for r in cursor.fetchall()]
     assert len(rows) == 2
     for row in rows:
-        assert row["status"] == "PENDING"
+        assert row["status"] == "FAILED"
         assert _delivery_uncertain(row) is True
 
 

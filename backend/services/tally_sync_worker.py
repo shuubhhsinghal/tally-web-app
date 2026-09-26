@@ -364,6 +364,39 @@ async def flush_offline_queue():
                 print(f"Queue item {item['id']} skipped and marked FAILED: {error_msg}")
                 continue
 
+            # A voucher queued while a required master (e.g. a UOM auto-
+            # queued for a MISSING dependency) was still unresolved always
+            # has a *lower* queue id than that master -- it was saved first,
+            # for durability, before the dependency was even discovered. So
+            # plain id-ascending processing would otherwise try to send this
+            # voucher in the very same pass its own dependency is still
+            # waiting to sync. Re-check each recorded dependency's real
+            # state right now rather than trusting insertion order.
+            pending_deps = item_payload.get("_pending_dependencies")
+            if pending_deps:
+                from backend.database import get_master_dependency_state
+                dep_failed_msg = None
+                still_waiting = False
+                for dep in pending_deps:
+                    dep_state, dep_err = get_master_dependency_state(dep.get("type"), dep.get("name"), None)
+                    if dep_state == "CONFIRMED":
+                        continue
+                    elif dep_state in ("FAILED", "CONFLICT"):
+                        dep_failed_msg = f"Cannot post: {str(dep.get('type', '')).lower()} '{dep.get('name')}' {'failed to sync' if dep_state == 'FAILED' else 'has a conflicting definition'} to Tally."
+                        break
+                    else:
+                        # Still PENDING/SYNCED_WAITING_CONFIRMATION/MISSING --
+                        # its own queue entry (a later id) hasn't synced yet.
+                        still_waiting = True
+                if dep_failed_msg:
+                    update_queue_status(item["id"], "FAILED", dep_failed_msg)
+                    print(f"Queue item {item['id']} skipped and marked FAILED: {dep_failed_msg}")
+                    failed += 1
+                    continue
+                if still_waiting:
+                    print(f"Queue item {item['id']} deferred: still waiting on {pending_deps}")
+                    continue
+
             try:
                 root = ET.fromstring(sanitize_tally_xml(item["xml_data"]))
                 voucher_count = len(root.findall('.//VOUCHER'))

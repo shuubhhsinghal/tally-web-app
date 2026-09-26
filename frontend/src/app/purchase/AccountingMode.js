@@ -7,6 +7,8 @@ import { TextArea } from '@/components/ui/TextArea';
 import { useUI } from '@/context/UIContext';
 import { useRouter } from 'next/navigation';
 
+import { MasterAutocomplete } from '@/components/ui/MasterAutocomplete';
+
 export function AccountingMode({ onPostSuccess }) {
   const router = useRouter();
   const { showToast } = useUI();
@@ -87,18 +89,17 @@ export function AccountingMode({ onPostSuccess }) {
         required
       />
 
-      <Select 
-        label="Supplier"
-        name="supplier"
-        value={formData.supplier}
-        onChange={handleChange}
-        required
-      >
-        <option value="">Select supplier...</option>
-        {meta.suppliers.map(s => (
-          <option key={s} value={s}>{s}</option>
-        ))}
-      </Select>
+      <div className="space-y-1.5">
+        <label className="text-[13px] font-body text-neutral-600 font-medium">Supplier</label>
+        <MasterAutocomplete
+          value={formData.supplier}
+          onChange={(val) => setFormData(prev => ({ ...prev, supplier: val }))}
+          placeholder="Select supplier..."
+          confirmed={meta.suppliers}
+          createLabel="supplier"
+          inputClassName="bg-transparent border-divider"
+        />
+      </div>
 
       <Input 
         label="Total Amount"

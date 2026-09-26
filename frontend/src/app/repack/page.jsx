@@ -3,9 +3,11 @@ import { useState, useEffect } from 'react';
 import { Input } from '@/components/ui/Input';
 import { Button } from '@/components/ui/Button';
 import { Select } from '@/components/ui/Select';
+import { MasterAutocomplete } from '@/components/ui/MasterAutocomplete';
+import TopBar from '@/components/layout/TopBar';
 import { useUI } from '@/context/UIContext';
 import { useAuth } from '@/context/AuthContext';
-import { Trash2, PlusCircle } from 'lucide-react';
+import { Trash2, PlusCircle, Layers, Plus, ChevronDown } from 'lucide-react';
 
 export default function RepackPage() {
   const { showToast } = useUI();
@@ -144,9 +146,14 @@ export default function RepackPage() {
       });
       const execData = await execRes.json();
       if (!execRes.ok) throw new Error(execData.detail || 'Failed to execute repack');
-      
-      showToast(`Success: ${execData.message}`, 'success');
-      
+
+      if (execData.status === 'failed') {
+        showToast(execData.message, 'error');
+        return;
+      }
+
+      showToast(execData.message, 'success');
+
       setFormData({
         ...formData,
         conversion_id: '',
@@ -182,99 +189,113 @@ export default function RepackPage() {
   }, [isExistingWithoutRecipe, selectedConversion]);
 
   return (
-    <div className="p-4 max-w-2xl mx-auto pb-24">
-      <h1 className="text-2xl font-bold mb-6 text-slate-800 dark:text-white">Repack & Assembly</h1>
+    <div className="min-h-screen bg-bg pb-24">
+      <TopBar 
+        title="Repack & assembly" 
+        showBack 
+        rightContent={<span className="text-[11px] font-medium text-text/60 bg-text/5 px-2 py-1 rounded border border-divider">Stock journal voucher</span>}
+      />
       
-      <form onSubmit={handleSubmit} className="space-y-6 bg-white dark:bg-slate-800 p-6 rounded-xl shadow-sm border border-slate-200 dark:border-slate-700">
-        
-        <div className="flex gap-4">
-          <div className="flex-1">
-            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Date</label>
-            <Input 
-              type="date"
-              value={formData.date}
-              onChange={(e) => setFormData({...formData, date: e.target.value})}
-              required
-              className="w-full"
-            />
-          </div>
-          <div className="flex-1">
-            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Store / Godown</label>
-            <Select
-              value={formData.store_name}
-              onChange={(e) => setFormData({...formData, store_name: e.target.value})}
-              className="w-full"
-              disabled={!!lockedStore}
-            >
-              <option value="">Select store...</option>
-              {stores.map(s => (
-                <option key={s.id} value={s.store_name}>{s.store_name}</option>
-              ))}
-            </Select>
-            <p className="text-xs text-slate-400 mt-1">Only needed when producing — not when defining a new recipe below.</p>
-          </div>
-        </div>
+      <div className="max-w-md mx-auto p-4 mt-4">
+        <form onSubmit={handleSubmit} className="space-y-6">
+          <div className="bg-surface p-4 rounded-xl border border-divider shadow-sm space-y-6">
+            
+            <div className="flex gap-4">
+              <div className="flex-1">
+                <label className="block text-sm font-medium text-text/70 mb-1.5">Date</label>
+                <Input 
+                  type="date"
+                  value={formData.date}
+                  onChange={(e) => setFormData({...formData, date: e.target.value})}
+                  required
+                  className="w-full"
+                />
+              </div>
+              <div className="flex-1">
+                <label className="block text-sm font-medium text-text/70 mb-1.5">Store / godown</label>
+                <MasterAutocomplete
+                  value={formData.store_name}
+                  onChange={(val) => setFormData({...formData, store_name: val})}
+                  placeholder="Select store"
+                  confirmed={stores.map(s => s.store_name)}
+                  createLabel="store"
+                  inputClassName="w-full flex items-center gap-2.5 min-h-[48px] border border-divider rounded-md hover:border-text/45 transition-colors text-left bg-transparent text-text font-body shadow-sm"
+                  disabled={!!lockedStore}
+                />
+                <p className="text-[11px] text-text/60 mt-2 leading-snug">Only needed when producing — not when defining a new recipe.</p>
+              </div>
+            </div>
 
-        <div>
-          <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Finished Product</label>
-          <Select 
-            value={formData.conversion_id}
-            onChange={(e) => setFormData({...formData, conversion_id: e.target.value})}
-            required
-            className="w-full"
-          >
-            <option value="">Select finished product...</option>
-            {conversions.map(c => {
-               const hasRecipe = c.components && c.components.length > 0;
-               return (
-                 <option key={c.id} value={c.id}>
-                   {c.finished_stock_item} {!hasRecipe ? '(No Recipe)' : ''} {c.status !== 'ACTIVE' ? '(Pending)' : ''}
-                 </option>
-               );
-            })}
-            <option value="new" className="font-semibold text-indigo-600">+ Create New Product</option>
-          </Select>
-        </div>
+            <div>
+              <label className="block text-sm font-medium text-text/70 mb-1.5">Finished product</label>
+              <div className="relative">
+                <MasterAutocomplete
+                  value={formData.conversion_id === 'new' ? '+ Create new product' : (selectedConversion?.finished_stock_item || '')}
+                  onChange={(val) => {
+                    const found = conversions.find(c => c.finished_stock_item === val);
+                    if (found) {
+                      setFormData({...formData, conversion_id: found.id.toString(), new_product_name: ''});
+                    }
+                  }}
+                  placeholder="Select finished product"
+                  confirmed={conversions.map(c => c.finished_stock_item)}
+                  createLabel="product"
+                  icon={Layers}
+                  inputClassName="w-full flex items-center gap-2.5 min-h-[48px] pr-10 border border-divider rounded-md hover:border-text/45 transition-colors text-left bg-transparent text-text font-body shadow-sm"
+                />
+                <ChevronDown className="w-4 h-4 text-neutral-500 absolute right-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+              </div>
+
+              <button 
+                type="button" 
+                onClick={() => setFormData({...formData, conversion_id: 'new', new_product_name: ''})}
+                className="flex items-center gap-2 mt-4 text-[14px] font-heading font-semibold text-accent-700 hover:text-accent-800 transition-colors"
+              >
+                <Plus className="w-4 h-4 shrink-0" />
+                Create new product
+              </button>
+            </div>
+          </div>
+          
+          <p className="text-[13px] text-text/60 text-center px-4">
+            Pick what you&apos;re packing or assembling to see its recipe and how much stock it will use.
+          </p>
 
         {(formData.conversion_id === 'new' || isExistingWithoutRecipe) && (
-          <div className="p-4 bg-slate-50 dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-700 space-y-4">
+          <div className="p-5 bg-surface rounded-xl border border-accent shadow-sm space-y-6 mt-6">
             <div>
-              <h3 className="text-sm font-semibold text-slate-800 dark:text-slate-200">
-                {isExistingWithoutRecipe ? 'Configure Missing Recipe' : 'Define a New Product'}
+              <h3 className="text-[22px] font-heading font-semibold text-text">
+                {isExistingWithoutRecipe ? 'Configure missing recipe' : 'Define a new product'}
               </h3>
-              <p className="text-xs text-slate-500 mt-0.5">
-                Name the item you&apos;re making, then list what goes into <strong>one</strong> of it.
+              <p className="text-[13px] text-text/70 mt-1">
+                Name the item you&apos;re making, then list what goes into <em>one</em> of it.
               </p>
             </div>
 
             {formData.conversion_id === 'new' && (
               <div>
-                <label className="block text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">What are you making?</label>
+                <label className="block text-[13px] font-medium text-text/60 mb-2">What are you making?</label>
                 <Input
                   type="text"
                   placeholder="e.g. Beetroot Chips 300G"
                   value={formData.new_product_name}
                   onChange={(e) => setFormData({...formData, new_product_name: e.target.value})}
                   required
-                  className="text-sm"
+                  className="w-full h-[48px] bg-transparent text-[15px]"
                 />
               </div>
             )}
 
             <div className="pt-2">
-              <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1 uppercase tracking-wide">
+              <label className="block text-[10.5px] font-bold text-text/60 mb-1 uppercase tracking-[0.08em]">
                 What goes into one {formData.new_product_name || selectedConversion?.finished_stock_item || 'unit'}?
               </label>
-              <p className="text-xs text-slate-500 mb-2">For each ingredient, pick the item and how much of it is used.</p>
+              <p className="text-[13px] text-text/70 mb-4">For each ingredient, pick the item and how much of it is used.</p>
+              
               <div className="space-y-3">
                 {components.map((comp, idx) => (
-                  <div key={idx} className="flex items-center gap-2">
-                    {/* Input/Select both hardcode w-full internally, so a width
-                        class passed via their own className prop can lose to
-                        that default depending on Tailwind's generated class
-                        order. Wrapping each in its own sized container makes
-                        w-full resolve against a wrapper we actually control. */}
-                    <div className="w-16 shrink-0">
+                  <div key={idx} className="flex items-center gap-3">
+                    <div className="w-[72px] shrink-0">
                       <Input
                         type="number"
                         step="0.0001"
@@ -282,64 +303,69 @@ export default function RepackPage() {
                         value={comp.quantity}
                         onChange={(e) => handleComponentChange(idx, 'quantity', e.target.value)}
                         required
-                        className="text-sm"
+                        className="h-11 text-center font-mono text-[14px]"
                       />
                     </div>
-                    <span className="text-xs font-mono w-8 text-slate-500 shrink-0">{comp.unit || '—'}</span>
-                    <span className="text-xs text-slate-400 shrink-0">of</span>
-                    <div className="flex-1 min-w-0">
-                      <Select
+                    {comp.unit && (
+                      <span className="text-[13px] font-mono text-text/60 shrink-0">
+                        {comp.unit}
+                      </span>
+                    )}
+                    <span className="text-[13px] text-text/60 shrink-0">
+                      of
+                    </span>
+                    <div className="relative flex-1 min-w-0">
+                      <MasterAutocomplete
                         value={comp.item_name}
-                        onChange={(e) => handleComponentChange(idx, 'item_name', e.target.value)}
-                        required
-                        className="text-sm"
-                      >
-                        <option value="">Select ingredient...</option>
-                        {stockItems.map(item => (
-                          <option key={item.name} value={item.name}>{item.name}</option>
-                        ))}
-                      </Select>
+                        onChange={(val) => handleComponentChange(idx, 'item_name', val)}
+                        placeholder="Select ingredient"
+                        confirmed={stockItems.map(item => item.name)}
+                        createLabel="ingredient"
+                        inputClassName="w-full flex items-center gap-2.5 h-11 pr-9 border border-divider rounded-md hover:border-text/45 transition-colors text-left bg-transparent text-text font-body text-[14px] shadow-sm"
+                      />
+                      <ChevronDown className="w-4 h-4 text-neutral-500 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                     </div>
-
-                    <button type="button" onClick={() => removeComponent(idx)} className="text-red-400 hover:text-red-600 p-1" disabled={components.length === 1}>
-                      <Trash2 className="w-4 h-4" />
+                    <button type="button" onClick={() => removeComponent(idx)} className="text-text/40 hover:text-red-500 p-1 transition-colors shrink-0" disabled={components.length === 1}>
+                      <Trash2 className="w-5 h-5" strokeWidth={1.5} />
                     </button>
                   </div>
                 ))}
               </div>
 
-              <Button type="button" variant="secondary" onClick={addComponent} className="mt-3 text-xs flex items-center gap-1 text-indigo-600">
-                <PlusCircle className="w-4 h-4" /> Add Another Ingredient
-              </Button>
+              <button
+                type="button"
+                onClick={addComponent}
+                className="w-full h-11 flex items-center justify-center gap-2 mt-4 rounded-md border border-dashed border-accent text-[14px] font-medium text-accent-700 hover:bg-accent/5 transition-colors"
+              >
+                <Plus className="w-4 h-4 shrink-0" />
+                Add another ingredient
+              </button>
+
+              {(() => {
+                const validRows = components.filter(c => c.item_name && c.quantity);
+                if (validRows.length === 0) return null;
+                const productLabel = formData.new_product_name || selectedConversion?.finished_stock_item || 'this item';
+                return (
+                  <div className="mt-5 p-4 rounded-lg border border-divider bg-bg">
+                    <p className="text-[14px] text-text/80">
+                      Making <span className="font-semibold text-text">1 PCS of {productLabel}</span> will use:
+                    </p>
+                    <ul className="text-[13px] font-mono text-text/70 space-y-1 mt-3">
+                      {validRows.map((c, idx) => (
+                        <li key={idx}>{c.quantity} {c.unit} — {c.item_name}</li>
+                      ))}
+                    </ul>
+                  </div>
+                );
+              })()}
             </div>
-
-            {components.some(c => c.item_name && c.quantity) && (
-              <div className="p-3 bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700">
-                <p className="text-xs text-slate-500">
-                  Making <strong>1 Pcs of {formData.new_product_name || selectedConversion?.finished_stock_item || 'this product'}</strong> will use:
-                </p>
-                <ul className="text-sm font-mono text-slate-700 dark:text-slate-300 mt-1 space-y-0.5">
-                  {components.filter(c => c.item_name && c.quantity).map((c, i) => (
-                    <li key={i}>{c.quantity} {c.unit} — {c.item_name}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
-
-            <Button
-              type="submit"
-              disabled={loading || !formData.new_product_name || components.some(c => !c.item_name || !c.quantity)}
-              className="w-full mt-4 py-3 text-sm shadow-sm"
-            >
-              {loading ? 'Saving...' : 'Save Recipe'}
-            </Button>
           </div>
         )}
 
         {selectedConversion && !isExistingWithoutRecipe && (
-          <>
+          <div className="p-4 bg-surface rounded-xl border border-divider shadow-sm mt-6">
             <div>
-              <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Quantity Produced</label>
+              <label className="block text-[13px] font-medium text-text/70 mb-2">Quantity Produced</label>
               <div className="flex items-center gap-2">
                 <Input 
                   type="number"
@@ -348,21 +374,21 @@ export default function RepackPage() {
                   value={formData.dest_qty}
                   onChange={(e) => setFormData({...formData, dest_qty: e.target.value})}
                   required
-                  className="w-full text-lg font-medium"
+                  className="w-full h-[48px] text-lg font-medium bg-transparent"
                 />
-                <span className="font-mono text-sm text-slate-500">{selectedConversion.output_unit}</span>
+                <span className="font-mono text-sm text-text/60 shrink-0">{selectedConversion.output_unit}</span>
               </div>
             </div>
 
             {formData.dest_qty && (
-              <div className="p-4 bg-slate-50 dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-700 mt-4">
-                <p className="text-sm text-slate-600 dark:text-slate-400 mb-3 font-bold uppercase tracking-wider">Production Summary</p>
-                <div className="space-y-2 mb-3 border-b border-slate-200 dark:border-slate-700 pb-3">
-                  <p className="font-semibold text-slate-800 dark:text-slate-200">
+              <div className="mt-5 p-4 rounded-lg border border-divider bg-bg">
+                <p className="text-[10.5px] text-text/60 mb-3 font-bold uppercase tracking-[0.08em]">Production Summary</p>
+                <div className="space-y-2 mb-3 border-b border-divider pb-3">
+                  <p className="font-semibold text-text">
                     {formData.dest_qty} × {selectedConversion.finished_stock_item}
                   </p>
-                  <p className="text-xs text-slate-500">Components to consume:</p>
-                  <ul className="text-sm font-mono text-slate-600 dark:text-slate-400 space-y-1">
+                  <p className="text-xs text-text/60">Components to consume:</p>
+                  <ul className="text-[13px] font-mono text-text/70 space-y-1">
                     {selectedConversion.components?.map(c => (
                       <li key={c.id}>
                         {(parseFloat(formData.dest_qty) * c.quantity_per_finished_unit).toFixed(4)} {c.component_unit} — {c.component_item_name}
@@ -370,22 +396,47 @@ export default function RepackPage() {
                     ))}
                   </ul>
                 </div>
-                <p className="text-xs text-slate-500">
+                <p className="text-[11px] text-text/50">
                   Total Cost will be calculated automatically based on live Godown valuation in Tally.
                 </p>
               </div>
             )}
-
-            <Button 
-              type="submit" 
-              disabled={loading || !formData.store_name || !formData.conversion_id || !formData.dest_qty}
-              className="w-full mt-6 py-4 text-lg shadow-sm bg-green-600 hover:bg-green-700 text-white"
-            >
-              {loading ? 'Processing...' : 'Repack & Post to Tally'}
-            </Button>
-          </>
+          </div>
         )}
-      </form>
+
+        <div className="fixed bottom-0 left-0 right-0 bg-surface border-t border-divider pb-safe z-40">
+          <div className="p-4 flex flex-col gap-3 max-w-md mx-auto">
+            {(formData.conversion_id === 'new' || isExistingWithoutRecipe) ? (
+              <>
+                <Button
+                  type="submit"
+                  disabled={loading || !formData.new_product_name || components.some(c => !c.item_name || !c.quantity)}
+                  className="w-full h-[52px]"
+                >
+                  {loading ? 'Saving...' : 'Save recipe'}
+                </Button>
+                <button
+                  type="button"
+                  onClick={() => setFormData({...formData, conversion_id: '', new_product_name: ''})}
+                  disabled={loading}
+                  className="w-full h-[52px] flex items-center justify-center rounded-md font-heading font-semibold text-[17px] border border-divider text-text hover:bg-text/4 transition-colors"
+                >
+                  Cancel
+                </button>
+              </>
+            ) : (
+              <Button 
+                type="submit" 
+                disabled={loading || !formData.store_name || !formData.conversion_id || !formData.dest_qty}
+                className="w-full h-[52px]"
+              >
+                {loading ? 'Processing...' : 'Repack & Post to Tally'}
+              </Button>
+            )}
+          </div>
+        </div>
+        </form>
+      </div>
     </div>
   );
 }

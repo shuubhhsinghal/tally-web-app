@@ -2,7 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 from backend.main import app
 from backend.database import get_db, queue_operation, update_queue_status, set_delivery_uncertain
-from backend.services.reporting_purchase_service import get_unsynced_purchases, get_pending_purchases_trend
+from backend.services.reporting_purchase_service import get_unsynced_purchases, get_queue_purchases_trend, calculate_purchases, get_purchase_bills, get_supplier_purchase_analysis
 
 client = TestClient(app)
 
@@ -121,7 +121,7 @@ def test_pending_purchases_trend_groups_by_date_and_nets_returns():
     _queue_accounting_purchase(1000.0, "20260115", cost_center="Mahagun")
     _queue_debit_note([{"name": "Item A", "qty": 1, "uom": "PCS", "rate": 300.0, "amount": 300.0}], "20260115", adjustment_store="Mahagun")
 
-    result = get_pending_purchases_trend("20260101", "20260131")
+    result = get_queue_purchases_trend("20260101", "20260131")
     assert len(result) == 1
     assert result[0]["date"] == "20260115"
     assert result[0]["Mahagun"] == 700.0
@@ -131,7 +131,7 @@ def test_pending_purchases_trend_groups_by_date_and_nets_returns():
 def test_pending_purchases_trend_excludes_delivery_uncertain():
     qid = _queue_accounting_purchase(1000.0, "20260115")
     set_delivery_uncertain(qid, True)
-    result = get_pending_purchases_trend("20260101", "20260131")
+    result = get_queue_purchases_trend("20260101", "20260131")
     assert result == []
 
 
@@ -164,6 +164,16 @@ from backend.services.reporting_purchase_service import get_purchase_bills, get_
 
 
 def _seed_confirmed_purchase(supplier, amount, date, voucher_number="V-1"):
+    # Represents a purchase that went through this app and has since been
+    # confirmed by Tally -- which now means it has BOTH a SYNCED queue row
+    # (the summary total's actual source for a VCHTYPE=Purchase voucher,
+    # see _PURCHASE_QUEUE_OWNED_VOUCHER_EXCLUSION_SQL) and a real
+    # reporting_vouchers row (Bills'/Supplier-analysis' source, which still
+    # reads confirmed data directly and isn't affected by that exclusion).
+    payload = {"supplier": supplier, "invoice_number": voucher_number, "amount": amount, "tally_date": date, "cost_center": None, "narration": ""}
+    qid = queue_operation("POST_VOUCHER", "<ENVELOPE></ENVELOPE>", payload, f"Purchase Invoice: {voucher_number} from {supplier}")
+    update_queue_status(qid, "SYNCED")
+
     with get_db() as conn:
         conn.execute("INSERT OR IGNORE INTO ledgers (name, parent) VALUES (?, 'Purchase Accounts')", ("Purchases",))
         cur = conn.execute(
@@ -256,28 +266,28 @@ def _queue_stock_transfer(total_amount, tally_date, from_store="Mahagun", to_sto
 
 def test_pending_stock_transfer_increases_receiver_decreases_sender():
     _queue_stock_transfer(2000.0, "20260115", from_store="Mahagun", to_store="Gulshan")
-    result_gulshan = get_pending_purchases_trend("20260101", "20260131", cost_centre="Gulshan")
+    result_gulshan = get_queue_purchases_trend("20260101", "20260131", cost_centre="Gulshan")
     assert result_gulshan[0]["Combined"] == 2000.0
-    result_mahagun = get_pending_purchases_trend("20260101", "20260131", cost_centre="Mahagun")
+    result_mahagun = get_queue_purchases_trend("20260101", "20260131", cost_centre="Mahagun")
     assert result_mahagun[0]["Combined"] == -2000.0
 
 
 def test_pending_stock_transfer_nets_to_zero_combined():
     _queue_stock_transfer(2000.0, "20260115")
-    result = get_pending_purchases_trend("20260101", "20260131")
+    result = get_queue_purchases_trend("20260101", "20260131")
     assert result[0]["Combined"] == 0.0
 
 
 def test_stock_transfer_physical_leg_ignored():
     _queue_stock_transfer(2000.0, "20260115", leg="Physical")
-    result = get_pending_purchases_trend("20260101", "20260131")
+    result = get_queue_purchases_trend("20260101", "20260131")
     assert result == []
 
 
 def test_pending_stock_transfer_excludes_delivery_uncertain():
     qid = _queue_stock_transfer(2000.0, "20260115")
     set_delivery_uncertain(qid, True)
-    result = get_pending_purchases_trend("20260101", "20260131")
+    result = get_queue_purchases_trend("20260101", "20260131")
     assert result == []
 
 
@@ -296,3 +306,79 @@ def test_purchases_endpoint_includes_pending_stock_transfer():
     resp = client.get("/api/reporting/purchases", params={"start_date": "20260101", "end_date": "20260131", "cost_centre": "Gulshan"})
     assert resp.status_code == 200
     assert resp.json()["summary"]["net_purchases"] == 2000.0
+
+
+# --- A SYNCED (already live in Tally) purchase must not vanish while
+# waiting for the separate reporting sync to re-confirm it, and must not be
+# double counted once that sync does eventually catch up. ---
+
+def test_synced_purchase_is_included_in_queue_purchases_trend():
+    # The exact gap this guards against: before this fix, only PENDING rows
+    # were counted here, so a purchase that posted live and immediately
+    # flipped to SYNCED disappeared from every report total until the next
+    # ~30-minute reporting sync.
+    qid = _queue_accounting_purchase(500.0, "20260115")
+    update_queue_status(qid, "SYNCED")
+
+    result = get_queue_purchases_trend("20260101", "20260131")
+    assert result == [{"date": "20260115", "Combined": 500.0, "Combined_invoices": 1, "Mahagun": 500.0}]
+
+
+def test_synced_purchase_is_not_double_counted_once_reporting_sync_catches_up():
+    # Once the separate reporting sync eventually re-pulls the same Purchase
+    # voucher from Tally into reporting_ledger_entries, calculate_purchases
+    # must exclude it (it's a VCHTYPE=Purchase voucher) so the queue-sourced
+    # count above is the only place it's ever counted -- never both.
+    with get_db() as conn:
+        conn.execute("INSERT OR IGNORE INTO ledgers (name, parent, cost_centre) VALUES ('Purchases', 'Purchase Accounts', 0)")
+        conn.commit()
+
+    qid = _queue_accounting_purchase(500.0, "20260115")
+    update_queue_status(qid, "SYNCED")
+
+    with get_db() as conn:
+        conn.execute("""
+            INSERT INTO reporting_vouchers (tally_guid, date, voucher_type, party_ledger_name)
+            VALUES ('guid-V-purch-1', '20260115', 'Purchase', 'Test Supplier')
+        """)
+        voucher_id = conn.execute("SELECT id FROM reporting_vouchers WHERE tally_guid = 'guid-V-purch-1'").fetchone()[0]
+        conn.execute(
+            "INSERT INTO reporting_ledger_entries (voucher_id, ledger_name, amount, is_deemed_positive) VALUES (?, ?, ?, ?)",
+            (voucher_id, "Purchases", -500.0, 1),
+        )
+        conn.commit()
+
+    assert calculate_purchases("20260101", "20260131") == 0.0  # excluded -- still only counted via the queue
+
+    resp = client.get("/api/reporting/purchases", params={"start_date": "20260101", "end_date": "20260131"})
+    data = resp.json()
+    assert data["summary"]["net_purchases"] == 500.0  # not 1000.0
+
+
+def test_synced_purchase_still_shown_in_bills_and_supplier_analysis_from_confirmed_data():
+    # Bills/Supplier-analysis deliberately were NOT switched to the
+    # permanent-queue-exclusion model (see
+    # _PURCHASE_QUEUE_OWNED_VOUCHER_EXCLUSION_SQL's docstring): they still
+    # read a Purchase/Debit Note straight from confirmed data once it's
+    # really there, since that's the only place GST/item-level bill detail
+    # exists. This just confirms that path still works after the summary's
+    # exclusion was added elsewhere.
+    with get_db() as conn:
+        conn.execute("INSERT OR IGNORE INTO ledgers (name, parent, cost_centre) VALUES ('Purchases', 'Purchase Accounts', 0)")
+        conn.execute("""
+            INSERT INTO reporting_vouchers (tally_guid, date, voucher_number, voucher_type, party_ledger_name)
+            VALUES ('guid-V-purch-2', '20260116', 'INV-9', 'Purchase', 'Test Supplier')
+        """)
+        voucher_id = conn.execute("SELECT id FROM reporting_vouchers WHERE tally_guid = 'guid-V-purch-2'").fetchone()[0]
+        conn.execute(
+            "INSERT INTO reporting_ledger_entries (voucher_id, ledger_name, amount, is_deemed_positive) VALUES (?, ?, ?, ?)",
+            (voucher_id, "Purchases", -700.0, 1),
+        )
+        conn.commit()
+
+    bills = get_purchase_bills("20260101", "20260131")
+    assert any(b["voucher_number"] == "INV-9" and b["net_purchases"] == 700.0 for b in bills["bills"])
+
+    suppliers = get_supplier_purchase_analysis("20260101", "20260131")
+    names = {s["supplier_name"]: s for s in suppliers["suppliers"]}
+    assert names["Test Supplier"]["net_purchases"] == 700.0

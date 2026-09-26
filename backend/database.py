@@ -149,6 +149,7 @@ def init_db():
                 daily_amount REAL NOT NULL,
                 start_date TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'active',
+                queue_id INTEGER REFERENCES offline_queue(id),
                 created_by TEXT,
                 created_at TEXT NOT NULL
             )
@@ -217,6 +218,7 @@ def init_db():
                 file_bytes BLOB NOT NULL,
                 batch_id TEXT,
                 batch_claimed_at DATETIME,
+                group_id TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -396,6 +398,26 @@ def init_db():
             )
         """)
 
+        # --- Bank Statement Drafts (Review Inbox) -- an analyzed statement
+        # waiting for its transactions to be mapped to ledgers and pushed to
+        # Tally. draft_data holds {"transactions": [...]}, the same shape
+        # bank_statement.py's /post endpoint already accepts. status mirrors
+        # purchase_drafts' PROCESSING/READY/FAILED -- extraction runs as a
+        # background task (a PDF's Gemini/Qwen call can take minutes), so the
+        # draft exists (and shows up in Review) before its data is ready.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS bank_statement_drafts (
+                id TEXT PRIMARY KEY,
+                bank_ledger_name TEXT NOT NULL,
+                transaction_count INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'READY',
+                error_message TEXT,
+                draft_data TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+
         # --- Supplier Column Mappings ---
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS supplier_column_mappings (
@@ -454,6 +476,11 @@ def init_db():
             cursor.execute("ALTER TABLE loans ADD COLUMN received_into_ledger TEXT")
         except sqlite3.OperationalError:
             pass # Column exists
+
+        try:
+            cursor.execute("ALTER TABLE loans ADD COLUMN queue_id INTEGER REFERENCES offline_queue(id)")
+        except sqlite3.OperationalError:
+            pass # Column exists
             
         try:
             cursor.execute("ALTER TABLE reporting_vouchers ADD COLUMN reference TEXT")
@@ -496,7 +523,26 @@ def init_db():
             pass
 
         try:
+            # Which "send action" (a lone message, or a multi-select album
+            # delivered together in one webhook call) this image belongs to --
+            # lets bulk sends of several invoices get partitioned into one
+            # draft per invoice instead of merged into one giant draft.
+            cursor.execute("ALTER TABLE whatsapp_image_queue ADD COLUMN group_id TEXT")
+        except sqlite3.OperationalError:
+            pass
+
+        try:
             cursor.execute("ALTER TABLE purchase_rates ADD COLUMN source_queue_id INTEGER")
+        except sqlite3.OperationalError:
+            pass # Column exists
+
+        try:
+            cursor.execute("ALTER TABLE bank_statement_drafts ADD COLUMN status TEXT NOT NULL DEFAULT 'READY'")
+        except sqlite3.OperationalError:
+            pass # Column exists
+
+        try:
+            cursor.execute("ALTER TABLE bank_statement_drafts ADD COLUMN error_message TEXT")
         except sqlite3.OperationalError:
             pass # Column exists
 
@@ -521,6 +567,30 @@ def init_db():
             cursor.execute("ALTER TABLE purchase_rate_pending_entries ADD COLUMN source_type TEXT NOT NULL DEFAULT 'purchase'")
         except sqlite3.OperationalError:
             pass # Column exists
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS stock_counts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                store TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'draft',
+                started_at TEXT NOT NULL,
+                completed_at TEXT,
+                created_by TEXT
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS stock_count_lines (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                stock_count_id INTEGER NOT NULL REFERENCES stock_counts(id) ON DELETE CASCADE,
+                item_name TEXT NOT NULL,
+                uom TEXT,
+                qty REAL NOT NULL,
+                rate REAL NOT NULL DEFAULT 0,
+                UNIQUE(stock_count_id, item_name)
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_stock_count_lines_count_id ON stock_count_lines (stock_count_id)")
 
         _init_reporting_db(cursor)
 
@@ -873,6 +943,29 @@ def is_master_pending_sync(state: str) -> bool:
     return state.upper() in ("PENDING", "SYNCED_WAITING_CONFIRMATION", "QUEUED", "IN_PROGRESS", "OFFLINE_QUEUED")
 
 
+def set_queue_pending_dependencies(queue_id: int, dependencies: list):
+    """Records which (entity_type, name) master dependencies a queued
+    POST_VOUCHER is still waiting on. The sync worker uses this to re-check
+    each dependency's actual state immediately before attempting delivery,
+    rather than trusting queue insertion order -- a master auto-queued to
+    resolve a MISSING dependency (e.g. a UOM) always gets a *later* queue id
+    than the voucher that needed it, since the voucher is queued first for
+    durability, so plain id-ascending processing would try to send the
+    voucher before its own just-queued dependency has synced."""
+    if not dependencies:
+        return
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT payload FROM offline_queue WHERE id = ?", (queue_id,))
+        row = cursor.fetchone()
+        if not row:
+            return
+        payload = json.loads(row['payload']) if row['payload'] else {}
+        payload['_pending_dependencies'] = dependencies
+        cursor.execute("UPDATE offline_queue SET payload = ? WHERE id = ?", (json.dumps(payload), queue_id))
+        conn.commit()
+
+
 def queue_master_operation(entity_type: str, name: str, operation_type: str, xml_data: str, payload: dict):
     normalized_name, display_name = normalize_master_name(name)
     
@@ -1204,6 +1297,93 @@ def get_purchase_rate(item_name: str) -> float:
             return tally_rate
         else:
             return app_rate
+
+# --- Stock Count (physical inventory count & valuation) ---
+
+def create_stock_count(store: str, created_by: str = None) -> int:
+    now = datetime.now().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO stock_counts (store, status, started_at, created_by)
+            VALUES (?, 'draft', ?, ?)
+        """, (store, now, created_by))
+        conn.commit()
+        return cursor.lastrowid
+
+def get_stock_count(count_id: int) -> Optional[dict]:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM stock_counts WHERE id = ?", (count_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+def list_stock_counts() -> List[dict]:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT sc.*, COALESCE(SUM(scl.qty * scl.rate), 0) AS total_value
+            FROM stock_counts sc
+            LEFT JOIN stock_count_lines scl ON scl.stock_count_id = sc.id
+            GROUP BY sc.id
+            ORDER BY sc.started_at DESC
+        """)
+        return [dict(row) for row in cursor.fetchall()]
+
+def get_stock_count_lines(count_id: int) -> List[dict]:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM stock_count_lines WHERE stock_count_id = ? ORDER BY id", (count_id,))
+        return [dict(row) for row in cursor.fetchall()]
+
+def upsert_stock_count_line(count_id: int, item_name: str, qty: float, rate: float, uom: str = None) -> dict:
+    """Adding the same item to a count twice updates its qty/rate rather than
+    creating a duplicate row -- lets a user re-add/re-scan an item they've
+    already counted without producing two lines for it."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO stock_count_lines (stock_count_id, item_name, uom, qty, rate)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(stock_count_id, item_name) DO UPDATE SET
+                qty=excluded.qty,
+                rate=excluded.rate,
+                uom=COALESCE(excluded.uom, stock_count_lines.uom)
+        """, (count_id, item_name, uom, qty, rate))
+        conn.commit()
+        cursor.execute("SELECT * FROM stock_count_lines WHERE stock_count_id = ? AND item_name = ?", (count_id, item_name))
+        return dict(cursor.fetchone())
+
+def update_stock_count_line(count_id: int, line_id: int, qty: float = None, rate: float = None) -> Optional[dict]:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM stock_count_lines WHERE id = ? AND stock_count_id = ?", (line_id, count_id))
+        existing = cursor.fetchone()
+        if not existing:
+            return None
+        new_qty = qty if qty is not None else existing['qty']
+        new_rate = rate if rate is not None else existing['rate']
+        cursor.execute("UPDATE stock_count_lines SET qty = ?, rate = ? WHERE id = ?", (new_qty, new_rate, line_id))
+        conn.commit()
+        cursor.execute("SELECT * FROM stock_count_lines WHERE id = ?", (line_id,))
+        return dict(cursor.fetchone())
+
+def delete_stock_count_line(count_id: int, line_id: int) -> bool:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM stock_count_lines WHERE id = ? AND stock_count_id = ?", (line_id, count_id))
+        conn.commit()
+        return cursor.rowcount > 0
+
+def complete_stock_count(count_id: int) -> Optional[dict]:
+    now = datetime.now().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE stock_counts SET status = 'completed', completed_at = ? WHERE id = ?", (now, count_id))
+        conn.commit()
+        cursor.execute("SELECT * FROM stock_counts WHERE id = ?", (count_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
 
 def record_pending_purchase_rate_entry(item_name: str, rate: float, purchase_date: str, supplier: str,
                                         voucher_number: str, qty: float, unit: str, source_queue_id: int = None,
@@ -2172,15 +2352,16 @@ def delete_session(token: str):
 
 def create_loan(lender_name: str, ledger_name: str, principal_amount: float,
                  total_repayment_amount: float, daily_amount: float,
-                 start_date: str, received_into_ledger: str, created_by: str) -> dict:
+                 start_date: str, received_into_ledger: str, created_by: str,
+                 queue_id: Optional[int] = None) -> dict:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO loans (lender_name, ledger_name, principal_amount, total_repayment_amount,
-                                daily_amount, start_date, received_into_ledger, created_by, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                daily_amount, start_date, received_into_ledger, created_by, created_at, queue_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (lender_name, ledger_name, principal_amount, total_repayment_amount,
-              daily_amount, start_date, received_into_ledger, created_by, datetime.now().isoformat()))
+              daily_amount, start_date, received_into_ledger, created_by, datetime.now().isoformat(), queue_id))
         conn.commit()
         return get_loan_by_id(cursor.lastrowid)
 
@@ -2288,7 +2469,7 @@ def get_ledger_current_balance(ledger_name: str) -> float:
             JOIN reporting_vouchers rv ON rle.voucher_id = rv.id
             WHERE rle.ledger_name = ?
               AND rv.voucher_type != 'Receipt'
-              AND NOT (rv.voucher_type = 'Journal' AND rv.narration LIKE 'Interest accrued to%')
+              AND NOT (rv.voucher_type = 'Journal' AND COALESCE(rv.narration, '') LIKE 'Interest accrued to%')
         """, (ledger_name,))
         movement = cursor.fetchone()['movement']
 
@@ -2463,10 +2644,24 @@ def record_interest_accrual(loan_id: int, period_start: str, period_end: str, am
         return cursor.lastrowid
 
 def get_active_loans_for_interest_accrual() -> list:
-    """Loans that have a known interest amount to accrue. No status filter --
+    """Loans that have a known interest amount to accrue. No tenure filter --
     compute_pending_interest_accruals already returns [] on its own once a
-    loan's full tenure has been accrued, so this can just always look, cheaply."""
+    loan's full tenure has been accrued, so this can just always look, cheaply.
+
+    Also excludes a loan whose own disbursement (Receipt) voucher is still
+    pending delivery (Tally was offline when the loan was taken) or was
+    rejected by Tally -- accruing interest on principal that was never
+    actually confirmed received would post real Interest Journal vouchers
+    against a loan that may not really exist. `queue_id IS NULL` covers loans
+    created before this column existed -- always included, matching the
+    behaviour this app has always had for them."""
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM loans WHERE total_repayment_amount > principal_amount")
+        cursor.execute("""
+            SELECT * FROM loans
+            WHERE total_repayment_amount > principal_amount
+              AND (queue_id IS NULL OR EXISTS (
+                    SELECT 1 FROM offline_queue WHERE id = loans.queue_id AND status = 'SYNCED'
+                  ))
+        """)
         return [dict(row) for row in cursor.fetchall()]

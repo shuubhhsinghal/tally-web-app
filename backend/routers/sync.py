@@ -2,6 +2,7 @@ from fastapi import APIRouter
 from backend.services.tally_sync_worker import flush_offline_queue
 from backend.services.tally_reporting_sync import async_sync_cost_centres, async_sync_vouchers
 from backend.connector.manager import connector_manager
+from backend.database import get_db
 
 router = APIRouter()
 
@@ -42,4 +43,9 @@ def sync_status():
     # alive" (which can stay true even if Tally is closed while the laptop
     # and connector script keep running). Still a plain in-memory read, no
     # network round-trip from this side.
-    return {"online": connector_manager.is_tally_reachable()}
+    last_synced_at = None
+    with get_db() as conn:
+        row = conn.execute("SELECT MAX(synced_at) as ts FROM reporting_sync_history").fetchone()
+        if row:
+            last_synced_at = row["ts"]
+    return {"online": connector_manager.is_tally_reachable(), "last_synced_at": last_synced_at}

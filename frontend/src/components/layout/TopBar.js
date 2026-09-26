@@ -3,105 +3,147 @@
 import React, { useState, useEffect } from 'react';
 import { useTheme } from 'next-themes';
 import { useRouter } from 'next/navigation';
-import { Moon, Sun, ArrowLeft, Wifi, WifiOff, RefreshCw, LogOut } from 'lucide-react';
+import { ArrowLeft, Wifi, WifiOff, Layers, Settings as SettingsIcon, Moon, LogOut, ChevronRight } from 'lucide-react';
 import { useUI } from '@/context/UIContext';
 import { useAuth } from '@/context/AuthContext';
 import { useSyncStatus } from '@/context/SyncStatusContext';
 
-export default function TopBar({ title, showBack = false, onBack }) {
+// The account sheet (avatar tap) replaces what used to be three separate
+// header icons (manual sync, theme toggle, logout) -- manual sync now lives
+// on the Queue page's own Sync Now action instead, matching the design.
+export default function TopBar({ title, kicker, showBack = false, onBack, rightContent }) {
   const { theme, setTheme } = useTheme();
   const router = useRouter();
-  const { showToast, showConfirmDialog } = useUI();
+  const { showConfirmDialog } = useUI();
   const { user, logout } = useAuth();
-  const { isOnline, isSyncing, triggerManualSync } = useSyncStatus();
+  const { isOnline } = useSyncStatus();
   const [mounted, setMounted] = useState(false);
+  const [acctOpen, setAcctOpen] = useState(false);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setMounted(true);
   }, []);
 
-  const handleManualSync = async () => {
-    try {
-      const data = await triggerManualSync();
-      if (data) {
-        const hasIssue = data.status !== 'success' || (data.failed_months && data.failed_months.length > 0);
-        showToast(data.message || 'Manual sync triggered', hasIssue ? 'error' : 'success');
-      } else {
-        showToast('Failed to trigger manual sync', 'error');
-      }
-    } catch (e) {
-      showToast(e.message || 'Error triggering sync', 'error');
-    }
-  };
+  // Matches the design system's connection indicator: calm/neutral while
+  // connected, accent (the one "needs attention" color) while offline or
+  // still connecting -- not a semantic red/green/yellow traffic light.
+  const connNeutral = isOnline === true;
+  const initial = (user?.name || '?').charAt(0).toUpperCase();
+
+  const goTo = (path) => { setAcctOpen(false); router.push(path); };
 
   return (
-    <div className="sticky top-0 z-30 bg-white/80 dark:bg-gray-900/80 backdrop-blur-md border-b border-gray-100 dark:border-gray-800">
-      <div className="flex items-center justify-between h-14 px-4 max-w-md mx-auto">
-        
-        {/* Left Section -- sized to its own content (a lone back button is
-            much narrower than the status block shown when there's no back
-            button) rather than flex-1, so it doesn't claim a full third of
-            the header and starve the title next to it. */}
-        <div className="flex items-center justify-start">
+    <>
+      <div className="sticky top-0 z-30 bg-bg/90 backdrop-blur-md border-b border-divider">
+        <div className="flex items-center gap-3 h-16 px-4 max-w-md mx-auto">
+
           {showBack ? (
-            <button 
-              onClick={() => onBack ? onBack() : router.back()} 
-              className="p-2 -ml-2 text-gray-900 dark:text-gray-100 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-full transition-colors"
+            <button
+              onClick={() => onBack ? onBack() : router.back()}
+              className="w-10 h-10 -ml-1 flex items-center justify-center rounded-full text-text hover:bg-text/6 transition-colors shrink-0"
             >
               <ArrowLeft className="w-6 h-6" />
             </button>
           ) : (
-            <div className="flex flex-col">
-              <div className="flex items-center gap-2">
-                <div className={`w-2.5 h-2.5 rounded-full ${isOnline === null ? 'bg-yellow-500 animate-pulse' : isOnline ? 'bg-green-500' : 'bg-red-500'}`} />
-                <span className="text-xs font-semibold text-gray-500 dark:text-gray-400">
-                  {isOnline === null ? 'Connecting...' : isOnline ? 'Tally connected' : 'Tally offline'}
-                </span>
-              </div>
-              {user && (
-                <span className="text-[10px] text-gray-400 dark:text-gray-500 ml-4 truncate max-w-[90px]">
-                  {user.name}{!user.is_owner && user.store_name ? ` · ${user.store_name}` : ''}
-                </span>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Center Title */}
-        <h1 className="text-lg font-bold text-gray-900 dark:text-white truncate px-2 text-center flex-1">
-          {title}
-        </h1>
-
-        {/* Right Section -- same reasoning as the left one above. */}
-        <div className="flex items-center justify-end gap-1">
-          <button
-            onClick={handleManualSync}
-            disabled={isSyncing}
-            className="p-2 text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-full transition-colors disabled:opacity-50"
-            aria-label="Manual Sync"
-          >
-            <RefreshCw className={`w-5 h-5 ${isSyncing ? 'animate-spin' : ''}`} />
-          </button>
-          {mounted && (
             <button
-              onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-              className="p-2 text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-full transition-colors"
-              aria-label="Toggle Theme"
+              onClick={() => setAcctOpen(true)}
+              aria-label="Account, masters and settings"
+              className="w-10 h-10 flex items-center justify-center rounded-full border border-accent text-accent-700 font-heading font-semibold text-[17px] hover:bg-accent/10 transition-colors shrink-0"
             >
-              {theme === 'dark' ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
+              {initial}
             </button>
           )}
-          <button
-            onClick={() => showConfirmDialog({ title: 'Log out?', onConfirm: logout })}
-            className="p-2 -mr-2 text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-full transition-colors"
-            aria-label="Log out"
-          >
-            <LogOut className="w-5 h-5" />
-          </button>
-        </div>
 
+          <div className="flex-1 min-w-0">
+            {kicker && (
+              <div className="text-[10.5px] tracking-[0.12em] uppercase text-neutral-700 truncate">{kicker}</div>
+            )}
+            <h1 className="font-heading font-semibold text-[22px] leading-tight truncate">{title}</h1>
+          </div>
+
+          {rightContent ? rightContent : (
+            <div className={`flex items-center gap-1.5 h-9 px-3 rounded-full border shrink-0 ${connNeutral ? 'border-divider text-neutral-700' : 'border-accent text-accent-700'}`}>
+              {isOnline === false ? <WifiOff className="w-3.5 h-3.5" /> : <Wifi className="w-3.5 h-3.5" />}
+              <span className="text-xs font-medium whitespace-nowrap">
+                {isOnline === null ? 'Connecting…' : isOnline ? 'Online' : 'Offline'}
+              </span>
+            </div>
+          )}
+
+        </div>
       </div>
-    </div>
+
+      {/* Account sheet */}
+      {mounted && acctOpen && (
+        <>
+          <div className="fixed inset-0 bg-black/40 z-40 transition-opacity" onClick={() => setAcctOpen(false)} />
+          <div className="fixed bottom-0 left-0 right-0 z-50 bg-surface border-t border-divider rounded-t-lg shadow-lg pb-safe animate-in slide-in-from-bottom-full">
+            <div className="flex items-center gap-3.5 px-5 py-4 border-b border-divider">
+              <span className="w-12 h-12 rounded-full border border-accent text-accent-700 font-heading font-semibold text-xl flex items-center justify-center shrink-0">
+                {initial}
+              </span>
+              <div className="min-w-0">
+                <div className="font-heading font-semibold text-lg truncate">{user?.name}</div>
+                <div className="text-sm text-neutral-700 truncate">
+                  {user?.is_owner ? 'Owner' : 'Staff'}{user?.store_name ? ` · ${user.store_name}` : ''}
+                </div>
+              </div>
+            </div>
+
+            <button
+              onClick={() => goTo('/masters')}
+              className="w-full flex items-center gap-3.5 px-5 py-4 border-b border-divider hover:bg-text/4 transition-colors text-left"
+            >
+              <Layers className="w-5 h-5 text-neutral-700 shrink-0" />
+              <div className="flex-1 min-w-0">
+                <div className="text-[15px]">Masters overview</div>
+                <div className="text-xs text-neutral-600">Ledgers, items and cost centres from Tally</div>
+              </div>
+              <ChevronRight className="w-4 h-4 text-neutral-500 shrink-0" />
+            </button>
+
+            <button
+              onClick={() => goTo('/settings')}
+              className="w-full flex items-center gap-3.5 px-5 py-4 border-b border-divider hover:bg-text/4 transition-colors text-left"
+            >
+              <SettingsIcon className="w-5 h-5 text-neutral-700 shrink-0" />
+              <div className="flex-1 min-w-0">
+                <div className="text-[15px]">Settings</div>
+                <div className="text-xs text-neutral-600">Password, AI item matching and team</div>
+              </div>
+              <ChevronRight className="w-4 h-4 text-neutral-500 shrink-0" />
+            </button>
+
+            <div className="flex items-center gap-3.5 px-5 py-4 border-b border-divider">
+              <Moon className="w-5 h-5 text-neutral-700 shrink-0" />
+              <div className="flex-1 text-[15px]">Appearance</div>
+              <div className="flex border border-divider rounded-md p-0.5 gap-0.5">
+                <button
+                  onClick={() => setTheme('light')}
+                  className={`px-3.5 h-8 text-sm rounded-[3px] transition-colors ${theme === 'light' ? 'border border-accent text-accent-700' : 'text-neutral-700 hover:bg-text/5'}`}
+                >
+                  Light
+                </button>
+                <button
+                  onClick={() => setTheme('dark')}
+                  className={`px-3.5 h-8 text-sm rounded-[3px] transition-colors ${theme === 'dark' ? 'border border-accent text-accent-700' : 'text-neutral-700 hover:bg-text/5'}`}
+                >
+                  Dark
+                </button>
+              </div>
+            </div>
+
+            <button
+              onClick={() => { setAcctOpen(false); showConfirmDialog({ title: 'Log out?', onConfirm: logout }); }}
+              className="w-full flex items-center gap-3.5 px-5 py-4 text-accent-700 hover:bg-text/4 transition-colors text-left"
+            >
+              <LogOut className="w-5 h-5 shrink-0" />
+              <span className="text-[15px]">Log out</span>
+            </button>
+          </div>
+        </>
+      )}
+    </>
   );
 }

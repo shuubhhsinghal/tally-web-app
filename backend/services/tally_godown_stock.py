@@ -102,5 +102,11 @@ async def get_godown_stock(item_name: str, godown_name: str) -> dict:
                     "amount": amt
                 }
                 
-    raise Exception(f"Stock Item '{item_name}' has no stock in Godown '{godown_name}'.")
+    # The item simply has no closing-balance line in this godown's summary --
+    # that's a normal "zero stock here" result, not a Tally/parsing error, so
+    # callers doing a `stock["qty"] < required` sufficiency check (repack.py,
+    # stock_transfer.py) get a clean "Insufficient stock" message instead of
+    # this being swallowed into a generic "Something went wrong" by their
+    # bare `except Exception` fallback.
+    return {"qty": 0.0, "rate": 0.0, "amount": 0.0}
 

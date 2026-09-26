@@ -1,8 +1,21 @@
 import pytest
+import requests
+from unittest.mock import AsyncMock, MagicMock
 from fastapi.testclient import TestClient
 from backend.main import app
 from backend.database import get_db
 from backend.connector.manager import connector_manager
+
+SUCCESS_XML = """<ENVELOPE>
+  <HEADER><STATUS>1</STATUS></HEADER>
+  <BODY><DATA><IMPORTRESULT><CREATED>1</CREATED><ALTERED>0</ALTERED><ERRORS>0</ERRORS></IMPORTRESULT></DATA></BODY>
+</ENVELOPE>"""
+
+REJECTED_XML = """<ENVELOPE>
+  <HEADER><STATUS>1</STATUS></HEADER>
+  <BODY><DATA><IMPORTRESULT><CREATED>0</CREATED><ALTERED>0</ALTERED><ERRORS>1</ERRORS></IMPORTRESULT>
+  <LINEERROR>Could not find Godown 'Bad Godown'</LINEERROR></DATA></BODY>
+</ENVELOPE>"""
 
 @pytest.fixture(autouse=True)
 def setup_db():
@@ -237,3 +250,107 @@ def test_execute_repack_blocks_on_insufficient_stock_when_tally_reachable(monkey
     response = client.post("/api/repack/execute", json=exec_payload)
     assert response.status_code == 400
     assert "insufficient stock" in response.json()["detail"].lower()
+
+
+def _setup_reachable_with_stock(monkeypatch, rate=100.0, stock_qty=1000.0):
+    """Common setup for the three tests below: Tally reachable, stock
+    sufficient, so execute_repack gets past its pre-checks and reaches the
+    immediate live-post attempt this test file is verifying."""
+    from backend.database import record_purchase_rate
+    record_purchase_rate("bulk chips", rate, "Test Supplier", "2026-09-01")
+
+    monkeypatch.setattr(connector_manager, "is_tally_reachable", lambda: True)
+
+    async def mock_get_godown_stock(item_name, godown_name):
+        return {"qty": stock_qty, "rate": rate, "amount": stock_qty * rate}
+
+    import backend.services.tally_godown_stock
+    monkeypatch.setattr(backend.services.tally_godown_stock, "get_godown_stock", mock_get_godown_stock)
+
+    payload = {
+        "new_product_name": "Test Live Post Item " + str(id(monkeypatch)),
+        "output_unit": "PCS",
+        "components": [
+            {"item_name": "Bulk Chips", "unit": "KGS", "quantity": 0.3},
+        ]
+    }
+    conv_id = client.post("/api/repack/product", json=payload).json()["conversion_id"]
+    return conv_id
+
+
+def test_execute_repack_attempts_immediate_live_post_and_reports_success(monkeypatch):
+    # Previously execute_repack only ever queued the voucher and returned a
+    # blanket "success" without ever trying to actually reach Tally within
+    # the request -- delivery only happened up to 60s later on the
+    # background worker's next tick, with no way for the caller to find out.
+    # This verifies the fix: an immediate live-post attempt happens inline,
+    # and a genuine Tally success is reflected in both the response and the
+    # repack_operations row (not left PENDING for the background worker).
+    conv_id = _setup_reachable_with_stock(monkeypatch)
+
+    mock_resp = MagicMock()
+    mock_resp.text = SUCCESS_XML
+    monkeypatch.setattr("backend.routers.repack.tally_transport.post", AsyncMock(return_value=mock_resp))
+
+    exec_payload = {"date": "2026-09-15", "store_name": "Test Store", "conversion_id": conv_id, "dest_qty": 10.0}
+    response = client.post("/api/repack/execute", json=exec_payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "success"
+
+    with get_db() as conn:
+        op = conn.execute("SELECT status FROM repack_operations WHERE id = ?", (data["repack_id"],)).fetchone()
+        assert op["status"] == "COMPLETED"
+        q = conn.execute(
+            "SELECT status FROM offline_queue WHERE description LIKE 'Repack:%' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert q["status"] == "SYNCED"
+
+
+def test_execute_repack_reports_failed_when_tally_rejects(monkeypatch):
+    conv_id = _setup_reachable_with_stock(monkeypatch)
+
+    mock_resp = MagicMock()
+    mock_resp.text = REJECTED_XML
+    monkeypatch.setattr("backend.routers.repack.tally_transport.post", AsyncMock(return_value=mock_resp))
+
+    exec_payload = {"date": "2026-09-15", "store_name": "Test Store", "conversion_id": conv_id, "dest_qty": 10.0}
+    response = client.post("/api/repack/execute", json=exec_payload)
+    # Reported as a 200 with status "failed" (mirrors stock_transfer.py's
+    # pattern) rather than an HTTPException, since the voucher is already
+    # durably queued and its failure is visible/actionable from the queue.
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "failed"
+    assert "Bad Godown" in data["message"]
+
+    with get_db() as conn:
+        op = conn.execute("SELECT status FROM repack_operations WHERE id = ?", (data["repack_id"],)).fetchone()
+        assert op["status"] == "FAILED"
+        q = conn.execute(
+            "SELECT status FROM offline_queue WHERE description LIKE 'Repack:%' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert q["status"] == "FAILED"
+
+
+def test_execute_repack_queues_when_tally_unreachable_at_post_time(monkeypatch):
+    # Reachable at the upfront stock-check ping, but the connector drops
+    # before the actual post -- must leave the row PENDING for the
+    # background worker, not mark it FAILED.
+    conv_id = _setup_reachable_with_stock(monkeypatch)
+
+    async def _raise_connection_error(*a, **k):
+        raise requests.exceptions.ConnectionError("simulated drop")
+    monkeypatch.setattr("backend.routers.repack.tally_transport.post", _raise_connection_error)
+
+    exec_payload = {"date": "2026-09-15", "store_name": "Test Store", "conversion_id": conv_id, "dest_qty": 10.0}
+    response = client.post("/api/repack/execute", json=exec_payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "queued"
+
+    with get_db() as conn:
+        q = conn.execute(
+            "SELECT status FROM offline_queue WHERE description LIKE 'Repack:%' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert q["status"] == "PENDING"

@@ -59,10 +59,10 @@ export const UIProvider = ({ children }) => {
       {/* Global Toast */}
       {toast && (
         <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 animate-in fade-in slide-in-from-top-4">
-          <div className={`px-4 py-3 rounded-xl shadow-lg border text-sm font-medium flex items-center gap-2
-            ${toast.type === 'error' ? 'bg-red-50 dark:bg-red-950 border-red-200 dark:border-red-900 text-red-700 dark:text-red-300' : ''}
-            ${toast.type === 'success' ? 'bg-green-50 dark:bg-green-950 border-green-200 dark:border-green-900 text-green-700 dark:text-green-300' : ''}
-            ${toast.type === 'info' ? 'bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700 text-gray-900 dark:text-gray-100' : ''}
+          <div className={`px-4 py-3 rounded-md shadow-lg border text-sm font-medium flex items-center gap-2 bg-surface
+            ${toast.type === 'error' ? 'border-accent text-accent-700' : ''}
+            ${toast.type === 'success' ? 'border-divider text-text' : ''}
+            ${toast.type === 'info' ? 'border-divider text-text' : ''}
           `}>
             {toast.type === 'success' && <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>}
             {toast.type === 'error' && <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>}
@@ -74,11 +74,11 @@ export const UIProvider = ({ children }) => {
       {/* Global Action Sheet */}
       {actionSheet && (
         <>
-          <div className="fixed inset-0 bg-black/40 dark:bg-black/60 z-40 transition-opacity" onClick={hideActionSheet} />
-          <div className="fixed bottom-0 left-0 right-0 z-50 bg-white dark:bg-gray-900 rounded-t-2xl shadow-2xl pb-safe animate-in slide-in-from-bottom-full">
+          <div className="fixed inset-0 bg-black/40 z-40 transition-opacity" onClick={hideActionSheet} />
+          <div className="fixed bottom-0 left-0 right-0 z-50 bg-surface border-t border-divider rounded-t-lg shadow-lg pb-safe animate-in slide-in-from-bottom-full">
             {actionSheet.title && (
-              <div className="px-6 py-4 border-b border-gray-100 dark:border-gray-800">
-                <h3 className="text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">{actionSheet.title}</h3>
+              <div className="px-6 py-4 border-b border-divider">
+                <h3 className="text-sm font-semibold text-neutral-600 uppercase tracking-wider">{actionSheet.title}</h3>
               </div>
             )}
             <div className="p-2">
@@ -86,21 +86,21 @@ export const UIProvider = ({ children }) => {
                 <button
                   key={i}
                   onClick={() => { opt.onClick(); hideActionSheet(); }}
-                  className="w-full flex items-center gap-4 px-4 py-4 hover:bg-gray-50 dark:hover:bg-gray-800 rounded-xl transition-colors text-left"
+                  className="w-full flex items-center gap-4 px-4 py-4 hover:bg-text/5 rounded-md transition-colors text-left"
                 >
                   {opt.icon && (
-                    <div className={`flex-shrink-0 w-10 h-10 rounded-full flex items-center justify-center ${opt.colorClass || 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300'}`}>
+                    <div className={`flex-shrink-0 w-10 h-10 rounded-full flex items-center justify-center ${opt.colorClass || 'border border-divider text-neutral-600'}`}>
                       {opt.icon}
                     </div>
                   )}
-                  <span className="text-base font-medium text-gray-900 dark:text-gray-100">{opt.label}</span>
-                  <svg className="w-5 h-5 ml-auto text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
+                  <span className="text-base font-medium text-text">{opt.label}</span>
+                  <svg className="w-5 h-5 ml-auto text-neutral-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
                 </button>
               ))}
-              <div className="h-px bg-gray-100 dark:bg-gray-800 my-2 mx-2" />
+              <div className="h-px bg-divider my-2 mx-2" />
               <button
                 onClick={hideActionSheet}
-                className="w-full py-4 text-center text-base font-semibold text-gray-900 dark:text-gray-100 hover:bg-gray-50 dark:hover:bg-gray-800 rounded-xl transition-colors"
+                className="w-full py-4 text-center text-base font-semibold text-text hover:bg-text/5 rounded-md transition-colors"
               >
                 Cancel
               </button>
@@ -112,22 +112,22 @@ export const UIProvider = ({ children }) => {
       {/* Global Confirm Dialog */}
       {confirmDialog && (
         <>
-          <div className="fixed inset-0 bg-black/40 dark:bg-black/60 z-40 transition-opacity" onClick={hideConfirm} />
+          <div className="fixed inset-0 bg-black/40 z-40 transition-opacity" onClick={hideConfirm} />
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 pointer-events-none">
-            <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-xl w-full max-w-sm p-6 pointer-events-auto animate-in zoom-in-95">
-              <h3 className="text-xl font-bold text-gray-900 dark:text-white mb-2">{confirmDialog.title}</h3>
-              {confirmDialog.message && <p className="text-gray-500 dark:text-gray-400 mb-6">{confirmDialog.message}</p>}
+            <div className="bg-surface border border-divider rounded-lg shadow-lg w-full max-w-sm p-6 pointer-events-auto animate-in zoom-in-95">
+              <h3 className="font-heading font-semibold text-xl mb-2">{confirmDialog.title}</h3>
+              {confirmDialog.message && <p className="text-neutral-700 mb-6">{confirmDialog.message}</p>}
 
               <div className="flex gap-3">
                 <button
                   onClick={hideConfirm}
-                  className="flex-1 py-3 px-4 bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100 font-semibold rounded-xl"
+                  className="flex-1 py-3 px-4 border border-divider text-text font-semibold rounded-md hover:bg-text/5 transition-colors"
                 >
                   {confirmDialog.cancelText || 'Cancel'}
                 </button>
                 <button
                   onClick={() => { confirmDialog.onConfirm(); hideConfirm(); }}
-                  className={`flex-1 py-3 px-4 font-semibold rounded-xl text-white ${confirmDialog.danger ? 'bg-red-600 hover:bg-red-700' : 'bg-teal-600 hover:bg-teal-700'}`}
+                  className={`flex-1 py-3 px-4 font-semibold rounded-md border transition-colors ${confirmDialog.danger ? 'bg-red-600 hover:bg-red-700 border-red-600 text-white' : 'border-accent text-accent hover:bg-accent/12'}`}
                 >
                   {confirmDialog.confirmText || 'Confirm'}
                 </button>

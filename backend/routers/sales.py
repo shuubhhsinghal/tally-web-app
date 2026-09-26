@@ -47,6 +47,9 @@ async def preview_sales(payload: SalesRequest):
 
 @router.post("/post")
 async def post_sales(payload: SalesRequest, request: Request):
+    if payload.amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be greater than zero.")
+
     safe_ledger = escape(str(payload.ledger))
     safe_nar = escape(str(payload.narration))
 

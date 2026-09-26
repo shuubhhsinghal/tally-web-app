@@ -3,22 +3,28 @@ import { useState, useEffect } from "react";
 import TopBar from '@/components/layout/TopBar';
 import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
-import { SearchableSelect } from '@/components/ui/SearchableSelect';
 import { Button } from '@/components/ui/Button';
 import { TextArea } from '@/components/ui/TextArea';
+import { MasterAutocomplete } from '@/components/ui/MasterAutocomplete';
 import { useUI } from '@/context/UIContext';
 import { useAuth } from '@/context/AuthContext';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { User, Store, Wallet, Calendar, CloudOff, Cloud } from 'lucide-react';
 
 export default function PaymentVoucher() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { showToast } = useUI();
   const { user } = useAuth();
   const lockedStore = user && !user.is_owner ? user.store_name : null;
+  // Deep-linked from the Creditors report's "Record payment" button --
+  // pre-selects the supplier so the owner doesn't have to search for them
+  // again right after looking them up.
+  const payTo = searchParams.get('pay_to') || "";
 
   const [formData, setFormData] = useState({
-    mode: "expenses", // 'expenses' or 'others'
-    debit_ledger: "",
+    mode: payTo ? "others" : "expenses", // 'expenses' or 'others'
+    debit_ledger: payTo || "",
     credit_ledger: "",
     amount: "",
     date: "",
@@ -27,6 +33,7 @@ export default function PaymentVoucher() {
   });
   
   const [loading, setLoading] = useState(false);
+  const [successData, setSuccessData] = useState(null);
   const [meta, setMeta] = useState({ 
     expense_paid_to: [], 
     party_paid_to: [], 
@@ -47,7 +54,8 @@ export default function PaymentVoucher() {
         expense_paid_to: data.expense_paid_to || [],
         party_paid_to: data.party_paid_to || [],
         paid_from: data.paid_from || [],
-        groups: data.groups || []
+        groups: data.groups || [],
+        stores: data.stores || prev.stores
       })))
       .catch(err => console.error("Failed to load metadata", err));
   };
@@ -107,11 +115,18 @@ export default function PaymentVoucher() {
   const handlePost = async (e) => {
     e.preventDefault();
 
-    // debit_ledger no longer has native HTML5 "required" validation now that
-    // it's a SearchableSelect (a styled div, not a real <select>), so it
-    // needs an explicit check here instead.
+    if (!formData.amount || parseFloat(formData.amount) <= 0) {
+      showToast("Enter the amount", "error");
+      return;
+    }
+
     if (!formData.debit_ledger) {
       showToast("Select who this was paid to", "error");
+      return;
+    }
+
+    if (!formData.credit_ledger) {
+      showToast("Select which account this was paid from", "error");
       return;
     }
 
@@ -122,7 +137,7 @@ export default function PaymentVoucher() {
       showToast("Account is waiting to sync with Tally.", "error");
       return;
     }
-    
+
     setLoading(true);
     
     try {
@@ -145,12 +160,30 @@ export default function PaymentVoucher() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      
+      const data = await response.json();
+
       if (response.ok) {
-        showToast("Payment saved");
-        router.push('/dashboard');
+        showToast(data.message || "Payment saved");
+
+        let queueCount = null;
+        if (data.status !== 'success') {
+          try {
+            const statsRes = await fetch('/api/dashboard/stats');
+            if (statsRes.ok) queueCount = (await statsRes.json()).queue_count;
+          } catch { }
+        }
+
+        setSuccessData({
+          amount: parseFloat(formData.amount),
+          debit_ledger: formData.debit_ledger,
+          credit_ledger: formData.credit_ledger,
+          date: formData.date,
+          cost_center: formData.mode === "expenses" ? formData.cost_center : null,
+          synced: data.status === 'success',
+          queueCount
+        });
       } else {
-        showToast("Failed to post to Tally", "error");
+        showToast(data.detail || "Failed to post to Tally", "error");
       }
     } catch (error) {
       showToast("Network error while posting", "error");
@@ -158,19 +191,115 @@ export default function PaymentVoucher() {
     setLoading(false);
   };
 
+  const today = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().split('T')[0];
+  const yesterdayDate = new Date(Date.now() - 86400000 - new Date().getTimezoneOffset() * 60000);
+  const yesterday = yesterdayDate.toISOString().split('T')[0];
+
+  const getFormattedDate = (dateStr) => {
+    if (!dateStr) return "";
+    const options = { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' };
+    return new Date(dateStr).toLocaleDateString('en-GB', options);
+  };
+
+  const getShortDate = (dateStr) => {
+    if (!dateStr) return "";
+    const options = { weekday: 'short', day: 'numeric', month: 'short' };
+    return new Date(dateStr).toLocaleDateString('en-GB', options);
+  };
+
+  if (successData) {
+    return (
+      <div className="min-h-screen bg-bg flex flex-col font-body pb-6">
+        <div className="w-full max-w-xl mx-auto px-6 pt-16 pb-8 flex-1 flex flex-col">
+          {/* Top Icon & Titles */}
+          <div className="flex flex-col items-center mb-10">
+            <div className="w-16 h-16 rounded-full border border-accent flex items-center justify-center mb-4">
+              {successData.synced ? <Cloud className="w-8 h-8 text-accent-700" /> : <CloudOff className="w-8 h-8 text-accent-700" />}
+            </div>
+            <span className="text-[11px] font-bold text-accent-700 tracking-widest mb-2 uppercase">{successData.synced ? 'Sent to Tally' : 'Saved Offline'}</span>
+            <h1 className="text-[32px] font-heading font-semibold text-text mb-2">{successData.synced ? 'Sent to Tally' : 'Saved on this phone'}</h1>
+            <p className="text-[15px] text-neutral-700 text-center max-w-[280px]">
+              {successData.synced
+                ? 'This payment has been posted to Tally successfully.'
+                : `It will go to Tally automatically when you're back online.${successData.queueCount != null ? ` ${successData.queueCount} entr${successData.queueCount === 1 ? 'y is' : 'ies are'} waiting.` : ''}`}
+            </p>
+          </div>
+
+          {/* Summary Card */}
+          <div className="w-full bg-bg border-t border-divider">
+            <div className="flex justify-between py-4 border-b border-divider">
+              <span className="text-neutral-600 text-[15px]">Amount</span>
+              <span className="text-text font-semibold text-[15px]">₹{successData.amount}</span>
+            </div>
+            <div className="flex justify-between py-4 border-b border-divider">
+              <span className="text-neutral-600 text-[15px]">Paid to</span>
+              <span className="text-text font-medium text-[15px] text-right">{successData.debit_ledger}</span>
+            </div>
+            <div className="flex justify-between py-4 border-b border-divider">
+              <span className="text-neutral-600 text-[15px]">Date</span>
+              <span className="text-text font-medium text-[15px] text-right">{getShortDate(successData.date)}</span>
+            </div>
+            {successData.cost_center && (
+              <div className="flex justify-between py-4 border-b border-divider">
+                <span className="text-neutral-600 text-[15px]">Store</span>
+                <span className="text-text font-medium text-[15px] text-right">{successData.cost_center}</span>
+              </div>
+            )}
+            <div className="flex justify-between py-4 border-b border-divider">
+              <span className="text-neutral-600 text-[15px]">Paid from</span>
+              <span className="text-text font-medium text-[15px] text-right">{successData.credit_ledger}</span>
+            </div>
+            <div className="flex justify-between py-4 border-b border-divider">
+              <span className="text-neutral-600 text-[15px]">Voucher</span>
+              <span className="text-text font-medium text-[15px] text-right">Payment</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Bottom Actions */}
+        <div className="w-full max-w-xl mx-auto px-4 space-y-3 bg-bg border-t border-divider pt-6">
+          <Button
+            onClick={() => {
+              setSuccessData(null);
+              setFormData(prev => ({
+                ...prev,
+                debit_ledger: "",
+                amount: "",
+                narration: ""
+              }));
+            }}
+          >
+            Record another payment
+          </Button>
+          <Button variant="secondary" onClick={() => router.push('/dashboard')}>
+            Done
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="min-h-screen bg-gray-50 dark:bg-gray-900 pb-20">
-      <TopBar title="Record a payment" showBack />
-      
-      <div className="max-w-md mx-auto p-4 mt-4 space-y-6">
-        
+    <div className="min-h-screen bg-bg pb-20 font-body">
+      <TopBar
+        title="Record a payment"
+        showBack
+        rightContent={
+          <div className="text-[11px] px-2.5 py-1 border border-divider rounded text-neutral-700 shrink-0">
+            Payment voucher
+          </div>
+        }
+      />
+
+      <div className="p-4 mt-2 space-y-6 max-w-xl mx-auto">
+
         {/* Segmented Control */}
-        <div className="flex bg-gray-200 dark:bg-gray-800 p-1 rounded-xl w-full">
+        <div className="grid grid-cols-2 border border-divider rounded-md overflow-hidden w-full">
           <button
             type="button"
             onClick={() => handleModeChange("expenses")}
-            className={`flex-1 py-2 text-sm font-semibold rounded-lg transition-colors ${
-              formData.mode === "expenses" ? "bg-white dark:bg-gray-700 shadow-sm text-gray-900 dark:text-white" : "text-gray-500 dark:text-gray-400"
+            className={`py-2.5 text-[15px] font-heading font-semibold transition-colors ${
+              formData.mode === "expenses" ? "border border-accent text-accent-700 bg-accent/8 -m-px" : "text-text hover:bg-text/5"
             }`}
           >
             Expense
@@ -178,131 +307,180 @@ export default function PaymentVoucher() {
           <button
             type="button"
             onClick={() => handleModeChange("others")}
-            className={`flex-1 py-2 text-sm font-semibold rounded-lg transition-colors ${
-              formData.mode === "others" ? "bg-white dark:bg-gray-700 shadow-sm text-gray-900 dark:text-white" : "text-gray-500 dark:text-gray-400"
+            className={`py-2.5 text-[15px] font-heading font-semibold transition-colors ${
+              formData.mode === "others" ? "border border-accent text-accent-700 bg-accent/8 -m-px" : "text-text hover:bg-text/5"
             }`}
           >
-            Party / Other
+            Party / other
           </button>
         </div>
 
-        <form onSubmit={handlePost} className="space-y-6">
-          <Input 
-            label="Date"
-            type="date"
-            name="date"
-            value={formData.date}
-            onChange={handleChange}
-            required
-          />
-
-          <Input 
-            label="Amount"
-            type="number"
-            step="0.01"
-            name="amount"
-            placeholder="e.g. 1500"
-            value={formData.amount}
-            onChange={handleChange}
-            required
-          />
-
+        <form onSubmit={handlePost} className="space-y-7">
+          
+          {/* Date Picker Section */}
           <div className="space-y-2">
-            <SearchableSelect
-              label="Paid to"
-              value={formData.debit_ledger}
-              onChange={val => setFormData({ ...formData, debit_ledger: val })}
-              placeholder={
-                formData.mode === 'expenses'
-                  ? (meta.expense_paid_to.length === 0 ? 'No eligible cost-centre ledgers found' : 'Select expense...')
-                  : (meta.party_paid_to.length === 0 ? 'No accounts found' : 'Select party/other...')
-              }
-              options={(formData.mode === 'expenses' ? meta.expense_paid_to : meta.party_paid_to).map(l => l.name)}
-            />
-            
-            {formData.mode === "others" && !showCreateAccount && (
-              <button 
-                type="button" 
-                onClick={() => setShowCreateAccount(true)}
-                className="text-sm text-teal-600 dark:text-teal-400 font-medium hover:underline flex items-center gap-1"
+            <label className="text-[13px] font-medium text-neutral-600">Date</label>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setFormData({ ...formData, date: today })}
+                className={`px-4 py-2 text-[14px] font-medium rounded-full border transition-colors ${
+                  formData.date === today ? "bg-accent/8 border-accent text-accent-700" : "bg-bg border-divider text-neutral-700"
+                }`}
               >
-                <span>+</span> Create new account
+                Today
               </button>
-            )}
-            
-            {formData.mode === "others" && showCreateAccount && (
-              <div className="bg-gray-100 dark:bg-gray-800 p-4 rounded-xl border border-gray-200 dark:border-gray-700 space-y-4">
-                <h4 className="text-sm font-bold text-gray-900 dark:text-white">Create Account</h4>
-                <Input 
-                  label="Account Name"
-                  placeholder="e.g. Director Drawings"
-                  value={newAccount.name}
-                  onChange={(e) => setNewAccount({...newAccount, name: e.target.value})}
+              <button
+                type="button"
+                onClick={() => setFormData({ ...formData, date: yesterday })}
+                className={`px-4 py-2 text-[14px] font-medium rounded-full border transition-colors ${
+                  formData.date === yesterday ? "bg-accent/8 border-accent text-accent-700" : "bg-bg border-divider text-neutral-700"
+                }`}
+              >
+                Yesterday
+              </button>
+
+              <div className={`relative flex items-center px-4 py-2 rounded-full border ${
+                (formData.date !== today && formData.date !== yesterday) ? "bg-accent/8 border-accent text-accent-700" : "bg-bg border-divider text-neutral-700"
+              }`}>
+                <Calendar className="w-4 h-4 mr-2" />
+                <input
+                  type="date"
+                  name="date"
+                  value={formData.date}
+                  onChange={handleChange}
+                  className="bg-transparent outline-none w-28 text-[14px] font-medium cursor-pointer"
+                  required
                 />
-                <Select 
-                  label="Group"
-                  value={newAccount.group}
-                  onChange={(e) => setNewAccount({...newAccount, group: e.target.value})}
-                >
-                  <option value="">Select group...</option>
-                  {meta.groups.map(g => (
-                    <option key={g} value={g}>{g}</option>
-                  ))}
-                </Select>
-                <div className="flex gap-2">
-                  <Button type="button" variant="outline" onClick={() => setShowCreateAccount(false)} className="flex-1">
-                    Cancel
-                  </Button>
-                  <Button type="button" onClick={handleCreateAccount} disabled={creatingAccount} className="flex-1">
-                    {creatingAccount ? '...' : 'Create Account'}
-                  </Button>
-                </div>
               </div>
-            )}
+            </div>
+            <p className="text-[12px] text-neutral-600 font-medium pl-1 mt-1">
+              {getFormattedDate(formData.date)}
+            </p>
           </div>
 
-          {formData.mode === "expenses" && (
-            <Select
-              label="Store"
-              name="cost_center"
-              value={formData.cost_center}
-              onChange={handleChange}
-              required
-              disabled={!!lockedStore}
+          {/* Amount Section */}
+          <div className="space-y-2">
+            <label className="text-[13px] font-medium text-neutral-600">Amount</label>
+            <div className="relative border-b border-divider pb-2 flex items-center">
+              <span className="text-[32px] text-neutral-500 mr-2 leading-none">₹</span>
+              <input
+                type="number"
+                step="0.01"
+                name="amount"
+                placeholder="0"
+                value={formData.amount}
+                onChange={handleChange}
+                className="w-full bg-transparent outline-none text-[32px] font-heading text-text placeholder:text-neutral-400"
+                required
+              />
+            </div>
+          </div>
+
+          {/* Paid To */}
+          <div className="space-y-1.5">
+            <label className="text-[13px] font-body text-neutral-600 font-medium">Paid to</label>
+            <MasterAutocomplete
+              value={formData.debit_ledger}
+              onChange={val => setFormData({ ...formData, debit_ledger: val })}
+              placeholder={formData.mode === 'expenses' ? 'Search expenses' : 'Search party'}
+              confirmed={formData.mode === 'expenses' ? meta.expense_paid_to.map(l => l.name) : meta.party_paid_to.map(l => l.name)}
+              createLabel={formData.mode === 'expenses' ? 'expense account' : 'party'}
+              icon={User}
+              inputClassName="bg-transparent border-divider text-[15px]"
+            />
+          </div>
+
+          {/* Create Account Section */}
+          {formData.mode === "others" && !showCreateAccount && (
+            <button
+              type="button"
+              onClick={() => setShowCreateAccount(true)}
+              className="text-sm text-accent-700 font-semibold flex items-center gap-1 ml-1 -mt-3"
             >
-              <option value="">Select store...</option>
-              {meta.stores.map(s => (
-                <option key={s} value={s}>{s}</option>
-              ))}
-            </Select>
+              <span>+</span> Create new account
+            </button>
           )}
 
-          <Select 
-            label="Paid from"
-            name="credit_ledger"
-            value={formData.credit_ledger}
-            onChange={handleChange}
-            required
-          >
-            <option value="">
-              {meta.paid_from.length === 0 ? 'No bank/cash accounts found' : 'Select bank/cash...'}
-            </option>
-            {meta.paid_from.map(b => (
-              <option key={b.name} value={b.name}>{b.name} {b.is_pending ? '⏳ In Queue' : ''}</option>
-            ))}
-          </Select>
+          {formData.mode === "others" && showCreateAccount && (
+            <div className="bg-accent/8 p-4 rounded border border-accent/30 space-y-4">
+              <h4 className="text-sm font-bold text-accent-700">Create Account</h4>
+              <Input
+                label="Account Name"
+                placeholder="e.g. Director Drawings"
+                value={newAccount.name}
+                onChange={(e) => setNewAccount({...newAccount, name: e.target.value})}
+              />
+              <Select
+                label="Group"
+                value={newAccount.group}
+                onChange={(e) => setNewAccount({...newAccount, group: e.target.value})}
+              >
+                <option value="">Select group...</option>
+                {meta.groups.map(g => (
+                  <option key={g} value={g}>{g}</option>
+                ))}
+              </Select>
+              <div className="flex gap-2">
+                <Button type="button" variant="secondary" onClick={() => setShowCreateAccount(false)} className="flex-1">
+                  Cancel
+                </Button>
+                <Button type="button" onClick={handleCreateAccount} disabled={creatingAccount} className="flex-1">
+                  {creatingAccount ? '...' : 'Create Account'}
+                </Button>
+              </div>
+            </div>
+          )}
 
-          <TextArea 
-            label="Notes (Optional)"
-            name="narration"
-            placeholder="What was this payment for?"
-            value={formData.narration}
-            onChange={handleChange}
-          />
+          {/* Store */}
+          {formData.mode === "expenses" && (
+            <div className="space-y-1.5">
+              <label className="text-[13px] font-body text-neutral-600 font-medium">Store</label>
+              <MasterAutocomplete
+                value={formData.cost_center}
+                onChange={val => setFormData({ ...formData, cost_center: val })}
+                placeholder="Select store"
+                confirmed={meta.stores}
+                createLabel="store"
+                icon={Store}
+                inputClassName="bg-transparent border-divider text-[15px]"
+                disabled={!!lockedStore}
+              />
+            </div>
+          )}
 
-          <Button type="submit" disabled={loading} className="mt-8">
-            {loading ? "Saving..." : "Save payment"}
-          </Button>
+          {/* Paid From */}
+          <div className="space-y-1.5">
+            <label className="text-[13px] font-body text-neutral-600 font-medium">Paid from</label>
+            <MasterAutocomplete
+              value={formData.credit_ledger}
+              onChange={val => setFormData({ ...formData, credit_ledger: val })}
+              placeholder="Select bank or cash"
+              confirmed={meta.paid_from.map(l => l.name)}
+              createLabel="account"
+              icon={Wallet}
+              inputClassName="bg-transparent border-divider text-[15px]"
+            />
+          </div>
+
+          {/* Notes */}
+          <div className="space-y-1.5 pt-2">
+            <label className="text-[13px] font-body text-neutral-600 font-medium">Notes (optional)</label>
+            <textarea
+              name="narration"
+              placeholder=""
+              value={formData.narration}
+              onChange={handleChange}
+              className="w-full bg-transparent border border-divider rounded px-4 py-3 outline-none focus:border-accent text-[15px] text-text"
+              rows={2}
+            />
+          </div>
+
+          <div className="pt-6">
+            <Button type="submit" disabled={loading}>
+              {loading ? "Saving..." : "Save payment"}
+            </Button>
+          </div>
         </form>
       </div>
     </div>

@@ -15,6 +15,7 @@ export const useSyncStatus = () => useContext(SyncStatusContext);
 export function SyncStatusProvider({ children }) {
   const [isOnline, setIsOnline] = useState(null);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [lastSyncedAt, setLastSyncedAt] = useState(null);
 
   useEffect(() => {
     const checkSync = async () => {
@@ -26,6 +27,7 @@ export function SyncStatusProvider({ children }) {
         if (res.ok) {
           const data = await res.json();
           setIsOnline(data.online !== false);
+          if (data.last_synced_at) setLastSyncedAt(data.last_synced_at);
         } else {
           setIsOnline(false);
         }
@@ -55,7 +57,7 @@ export function SyncStatusProvider({ children }) {
   }, []);
 
   return (
-    <SyncStatusContext.Provider value={{ isOnline, isSyncing, triggerManualSync }}>
+    <SyncStatusContext.Provider value={{ isOnline, isSyncing, lastSyncedAt, triggerManualSync }}>
       {children}
     </SyncStatusContext.Provider>
   );

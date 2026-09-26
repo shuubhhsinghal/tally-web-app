@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from backend.main import app
 from backend.database import (
     get_db, init_db, compute_pending_interest_accruals, get_ledger_current_balance,
-    compute_current_month_pending_interest,
+    compute_current_month_pending_interest, get_active_loans_for_interest_accrual,
 )
 from backend.services.loan_interest_accrual import post_pending_interest_accruals
 
@@ -131,6 +131,34 @@ def test_create_loan_rejects_zero_amount():
         "number_of_days": 90, "start_date": "2026-01-01", "received_into_ledger": "Cash Mahagun",
     })
     assert res.status_code == 400
+
+
+@patch('backend.routers.loans.tally_transport.post', new_callable=AsyncMock)
+def test_rejected_receipt_voucher_does_not_create_an_orphaned_loan(mock_post):
+    # A Tally-side rejection of the loan's own Receipt voucher must not leave
+    # a `loans` row behind: the interest-accrual background job has no idea
+    # the receipt failed (it only checks total_repayment_amount >
+    # principal_amount) and would otherwise start posting real monthly
+    # interest against a loan whose principal was never actually received.
+    mock_post.return_value.text = (
+        "<ENVELOPE><BODY><DATA><IMPORTRESULT><CREATED>0</CREATED><ALTERED>0</ALTERED><ERRORS>1</ERRORS></IMPORTRESULT>"
+        "<LINEERROR>Could not find ledger 'Cash Mahagun'</LINEERROR></DATA></BODY></ENVELOPE>"
+    )
+    mock_post.return_value.status_code = 200
+    _seed_ledger("Loan - Rejected Lender")
+
+    res = client.post("/api/loans", json={
+        "lender_name": "Rejected Lender", "principal_amount": 100000.0, "daily_amount": 1200.0,
+        "number_of_days": 100, "start_date": "2026-10-20", "received_into_ledger": "Cash Mahagun",
+    })
+    assert res.status_code == 400
+
+    with get_db() as conn:
+        rows = conn.execute("SELECT * FROM loans WHERE lender_name = 'Rejected Lender'").fetchall()
+    assert rows == []
+
+    row = _latest_queue_row("Loan Received:%")
+    assert row["status"] == "FAILED"
 
 
 def test_create_loan_requires_received_into_ledger():
@@ -344,6 +372,11 @@ def test_compute_current_month_pending_interest_previews_a_future_dated_loans_ow
 @patch('backend.services.loan_interest_accrual.queue_operation')
 def test_post_pending_interest_accruals_shares_the_lender_ledger(mock_queue_operation):
     mock_queue_operation.side_effect = lambda *a, **k: 999
+    # Pre-seeded as already-confirmed so the loan's own Receipt voucher goes
+    # through the real delivery path (mocked to succeed below) and lands
+    # SYNCED, instead of stalling on "pending_master_dependency" for a brand
+    # new ledger -- interest only ever accrues once that's confirmed.
+    _seed_ledger("Loan - Repeat Lender")
 
     with patch('backend.routers.loans.tally_transport.post', new_callable=AsyncMock) as mock_post:
         mock_post.return_value.text = "<ENVELOPE><BODY><DATA><IMPORTRESULT><CREATED>1</CREATED><ALTERED>0</ALTERED><ERRORS>0</ERRORS></IMPORTRESULT></DATA></BODY></ENVELOPE>"
@@ -370,3 +403,68 @@ def test_post_pending_interest_accruals_skips_loans_without_known_interest(mock_
 
     posted = post_pending_interest_accruals(as_of=date(2026, 12, 1))
     assert posted == 0
+
+
+# --- Interest accrual must never run ahead of a confirmed disbursement ---
+
+def test_loan_pending_delivery_does_not_accrue_interest_yet():
+    # Ledger not pre-seeded -- the receipt voucher stalls on
+    # "pending_master_dependency" and never actually reaches Tally, so the
+    # loan's own queue row stays PENDING. Interest must not accrue on
+    # principal that hasn't been confirmed received.
+    result = _create_loan(lender_name="Not Yet Synced Lender", principal=100000.0, daily_amount=1200.0, number_of_days=100, start_date="2026-10-20")
+    assert result["status"] == "queued"
+
+    active = get_active_loans_for_interest_accrual()
+    assert result["loan"]["id"] not in [l["id"] for l in active]
+
+    posted = post_pending_interest_accruals(as_of=date(2026, 11, 5))
+    assert posted == 0
+
+
+@patch('backend.routers.loans.tally_transport.post', new_callable=AsyncMock)
+def test_loan_becomes_eligible_once_its_receipt_voucher_syncs(mock_post):
+    # Same loan as above, but once the background worker (simulated here by
+    # directly flipping the queue row) confirms delivery, it must become
+    # eligible for interest starting from its actual start_date -- not from
+    # whenever it happened to sync.
+    mock_post.return_value.text = "<ENVELOPE><BODY><DATA><IMPORTRESULT><CREATED>1</CREATED><ALTERED>0</ALTERED><ERRORS>0</ERRORS></IMPORTRESULT></DATA></BODY></ENVELOPE>"
+    mock_post.return_value.status_code = 200
+    _seed_ledger("Loan - Now Synced Lender")
+
+    result = _create_loan(lender_name="Now Synced Lender", principal=100000.0, daily_amount=1200.0, number_of_days=100, start_date="2026-10-20")
+    assert result["status"] == "success"
+
+    active = get_active_loans_for_interest_accrual()
+    assert result["loan"]["id"] in [l["id"] for l in active]
+
+    posted = post_pending_interest_accruals(as_of=date(2026, 11, 5))
+    assert posted == 1
+    with get_db() as conn:
+        row = conn.execute("SELECT amount FROM loan_interest_accruals WHERE loan_id = ?", (result["loan"]["id"],)).fetchone()
+    assert row["amount"] == 2400.0  # full Oct 20-31 period, same as if it had synced immediately
+
+
+def test_loan_whose_receipt_was_rejected_does_not_accrue_interest():
+    # Defense in depth for the interest-accrual query itself, independent of
+    # the /api/loans endpoint no longer creating a loan row on an outright
+    # rejection: a loan whose linked queue row is FAILED (however that came
+    # to be) must never be picked up for accrual.
+    with get_db() as conn:
+        conn.execute("""
+            INSERT INTO offline_queue (operation_type, payload, xml_data, status, description, created_at, updated_at)
+            VALUES ('POST_VOUCHER', '{}', '<ENVELOPE/>', 'FAILED', 'Loan Received: 100000.0 from Rejected Ledger Lender', datetime('now'), datetime('now'))
+        """)
+        failed_queue_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.commit()
+
+    from backend.database import create_loan
+    loan = create_loan(
+        lender_name="Rejected Ledger Lender", ledger_name="Loan - Rejected Ledger Lender",
+        principal_amount=100000.0, total_repayment_amount=120000.0, daily_amount=1200.0,
+        start_date="2026-10-20", received_into_ledger="Cash Mahagun", created_by="Owner",
+        queue_id=failed_queue_id,
+    )
+
+    active = get_active_loans_for_interest_accrual()
+    assert loan["id"] not in [l["id"] for l in active]

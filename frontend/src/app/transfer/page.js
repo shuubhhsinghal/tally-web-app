@@ -2,16 +2,29 @@
 import { useState, useEffect } from "react";
 import TopBar from '@/components/layout/TopBar';
 import { Input } from '@/components/ui/Input';
-import { Select } from '@/components/ui/Select';
+import { MasterAutocomplete } from '@/components/ui/MasterAutocomplete';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { useUI } from '@/context/UIContext';
+import { useSyncStatus } from '@/context/SyncStatusContext';
+import { numberToWordsIndian } from '@/utils/numberToWords';
 import { useRouter } from 'next/navigation';
 import { TextArea } from '@/components/ui/TextArea';
+import { Building2, WifiOff } from 'lucide-react';
+
+function ReviewRow({ label, value }) {
+  return (
+    <div className="flex justify-between gap-4 py-3.5 border-b border-divider text-[15px]">
+      <span className="text-text/70 shrink-0">{label}</span>
+      <span className="text-right text-text">{value || '—'}</span>
+    </div>
+  );
+}
 
 export default function FundTransfer() {
   const router = useRouter();
   const { showToast } = useUI();
+  const { isOnline } = useSyncStatus();
 
   const [formData, setFormData] = useState({
     amount: "",
@@ -102,42 +115,49 @@ export default function FundTransfer() {
   };
 
   if (preview) {
+    const amtStr = parseFloat(preview.amount).toLocaleString('en-IN');
+    const amtWords = numberToWordsIndian(parseFloat(preview.amount));
+    const formattedDate = new Date(formData.date).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+
     return (
-      <div className="min-h-screen bg-gray-50 dark:bg-gray-900 pb-20">
-        <TopBar title="Confirm" />
-        <div className="max-w-md mx-auto p-4 space-y-6 mt-4">
-          <Card className="flex flex-col gap-4">
-            <div className="text-center">
-              <p className="text-xs font-semibold text-gray-500 uppercase">Amount</p>
-              <p className="text-3xl font-black text-gray-900 dark:text-white">₹ {preview.amount}</p>
-            </div>
-            <div className="h-px bg-gray-100 dark:bg-gray-800 my-2" />
-            <div className="flex justify-between items-center bg-gray-50 dark:bg-gray-800 p-3 rounded-lg border border-gray-100 dark:border-gray-700">
-              <div className="flex flex-col flex-1 truncate">
-                <p className="text-[10px] font-bold text-gray-400 uppercase">From</p>
-                <p className="text-sm font-bold text-red-600 truncate pr-2">{preview.from_account}</p>
-              </div>
-              <svg className="w-5 h-5 text-gray-300 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" /></svg>
-              <div className="flex flex-col items-end flex-1 truncate">
-                <p className="text-[10px] font-bold text-gray-400 uppercase">To</p>
-                <p className="text-sm font-bold text-green-600 truncate pl-2">{preview.to_account}</p>
-              </div>
-            </div>
-            <div className="mt-2">
-              <p className="text-xs font-semibold text-gray-500 uppercase">Notes</p>
-              <p className="text-sm font-medium text-gray-900 dark:text-white mt-1">
-                {preview.narration || `Transferred INR ${preview.amount} from ${preview.from_account} to ${preview.to_account}`}
-              </p>
-            </div>
-          </Card>
+      <div className="min-h-screen bg-bg pb-40">
+        <TopBar 
+          title="Review transfer" 
+          showBack 
+          onBack={() => setPreview(null)} 
+          rightContent={<span className="text-[11px] font-medium text-text/60 bg-text/5 px-2 py-1 rounded border border-divider">Step 2 of 2</span>}
+        />
+        
+        <div className="max-w-md mx-auto px-5 pt-8">
+          <div className="text-[10.5px] tracking-[0.12em] uppercase text-accent-700 font-bold mb-4">Check before saving</div>
+          <div className="text-[44px] font-heading font-black text-text leading-none">₹{amtStr}</div>
+          <div className="text-[14px] font-body text-text/70 italic mt-2 mb-8">Rupees {amtWords} only</div>
           
-          <div className="flex gap-3">
-            <Button variant="secondary" onClick={() => setPreview(null)} disabled={posting}>
-              Back
+          <div className="border-t border-divider" />
+          <ReviewRow label="Date" value={formattedDate} />
+          <ReviewRow label="From account" value={preview.from_account} />
+          <ReviewRow label="To account" value={preview.to_account} />
+          <ReviewRow label="Notes" value={preview.narration || "—"} />
+        </div>
+
+        <div className="fixed bottom-0 left-0 right-0 bg-surface border-t border-divider pb-safe animate-in slide-in-from-bottom-full z-40">
+          {!isOnline && (
+            <div className="px-5 py-3 border-b border-divider flex gap-3 text-sm text-text/70 bg-bg">
+              <WifiOff className="w-4 h-4 shrink-0 mt-0.5 text-accent-700" />
+              <p>You're offline. This entry will be saved on this phone and sent to Tally when you reconnect.</p>
+            </div>
+          )}
+          <div className="p-4 flex flex-col gap-3 max-w-md mx-auto">
+            <Button onClick={handlePost} disabled={posting} className="w-full h-[52px]">
+              {posting ? "Saving..." : "Confirm & save transfer"}
             </Button>
-            <Button onClick={handlePost} disabled={posting} className="flex-1">
-              {posting ? "Sending..." : "Send to Tally"}
-            </Button>
+            <button
+              onClick={() => setPreview(null)}
+              disabled={posting}
+              className="w-full h-12 flex items-center justify-center rounded-md font-heading font-semibold text-[17px] border border-divider text-text hover:bg-text/4 transition-colors"
+            >
+              Edit
+            </button>
           </div>
         </div>
       </div>
@@ -145,7 +165,7 @@ export default function FundTransfer() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 dark:bg-gray-900 pb-20">
+    <div className="min-h-screen bg-bg pb-20">
       <TopBar title="Move money" showBack />
       
       <div className="max-w-md mx-auto p-4 mt-4">
@@ -173,31 +193,31 @@ export default function FundTransfer() {
             required
           />
 
-          <Select 
-            label="From account"
-            name="from_account"
-            value={formData.from_account}
-            onChange={handleChange}
-            required
-          >
-            <option value="">Select source account...</option>
-            {accounts.map((a) => (
-              <option key={a} value={a}>{a}</option>
-            ))}
-          </Select>
+          <div className="space-y-1.5">
+            <label className="block text-sm font-medium text-text/70">From account</label>
+            <MasterAutocomplete
+              value={formData.from_account}
+              onChange={(val) => setFormData({ ...formData, from_account: val })}
+              placeholder="Select source account..."
+              confirmed={accounts}
+              createLabel="account"
+              icon={Building2}
+              inputClassName="w-full flex items-center gap-2.5 min-h-[56px] border border-divider rounded-md hover:border-text/45 transition-colors text-left bg-transparent text-text font-body shadow-sm"
+            />
+          </div>
 
-          <Select 
-            label="To account"
-            name="to_account"
-            value={formData.to_account}
-            onChange={handleChange}
-            required
-          >
-            <option value="">Select destination account...</option>
-            {accounts.map((a) => (
-              <option key={a} value={a}>{a}</option>
-            ))}
-          </Select>
+          <div className="space-y-1.5">
+            <label className="block text-sm font-medium text-text/70">To account</label>
+            <MasterAutocomplete
+              value={formData.to_account}
+              onChange={(val) => setFormData({ ...formData, to_account: val })}
+              placeholder="Select destination account..."
+              confirmed={accounts}
+              createLabel="account"
+              icon={Building2}
+              inputClassName="w-full flex items-center gap-2.5 min-h-[56px] border border-divider rounded-md hover:border-text/45 transition-colors text-left bg-transparent text-text font-body shadow-sm"
+            />
+          </div>
 
           <TextArea 
             label="Notes (Optional)"

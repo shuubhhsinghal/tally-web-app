@@ -1,13 +1,21 @@
 import os
+import io
+import json
+import uuid
+import datetime
+import base64
+import traceback
 import pandas as pd
 import pypdf
+import pypdfium2 as pdfium
 import requests
 from io import BytesIO
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks
 from starlette.concurrency import run_in_threadpool
 from typing import Optional, List, Dict, Any
 from google import genai
 from google.genai import types
+from openai import OpenAI
 from pydantic import BaseModel, Field, ValidationError
 from json_repair import repair_json
 
@@ -18,10 +26,17 @@ from backend.database import (
 )
 from backend.services.tally_response import parse_tally_response
 from backend.connector.transport import tally_transport
+from backend.services.extraction_v4.extraction_engine import OPENROUTER_BASE_URL
+from backend.services.extraction_v4.retry import call_with_retry, get_extraction_provider
 
 router = APIRouter()
 
 class TransactionPayload(BaseModel):
+    transactions: List[Dict[str, Any]]
+    bank_ledger_name: str
+    draft_id: Optional[str] = None
+
+class BankStatementDraftPayload(BaseModel):
     transactions: List[Dict[str, Any]]
     bank_ledger_name: str
 
@@ -36,6 +51,28 @@ class BankStatementExtractionResponseV1(BaseModel):
     # wrapping object, matching the pattern extraction_v4/extraction_engine.py
     # already uses successfully (PrintTranscriptionResponseV4.items).
     transactions: List[BankTransactionRowV1]
+
+def _parse_txn_json(raw_text: str) -> Optional[list]:
+    """Shared response parsing for both providers: strips markdown fences,
+    repairs near-valid JSON, and returns the 'transactions' list or None if
+    the response can't be read as one -- lets the caller retry once with a
+    stricter prompt."""
+    res_text = raw_text.strip()
+    if res_text.startswith("```json"):
+        res_text = res_text[7:-3].strip()
+    elif res_text.startswith("```"):
+        res_text = res_text[3:-3].strip()
+
+    try:
+        data = repair_json(res_text, return_objects=True)
+    except Exception:
+        return None
+
+    if not isinstance(data, dict):
+        return None
+    transactions = data.get("transactions")
+    return transactions if isinstance(transactions, list) else None
+
 
 def _call_gemini_bank_extraction(client, pdf_path: str, is_retry: bool = False) -> Optional[list]:
     """Uploads the PDF and asks Gemini for a transaction list, returning the
@@ -60,38 +97,133 @@ def _call_gemini_bank_extraction(client, pdf_path: str, is_retry: bool = False) 
                 "Re-read the statement carefully and return ONLY valid JSON matching the schema above."
             )
 
-        response = client.models.generate_content(
+        response = call_with_retry(lambda: client.models.generate_content(
             model='gemini-3.5-flash-lite',
             contents=[uploaded_file, prompt],
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=BankStatementExtractionResponseV1,
             ),
-        )
+        ))
         u = response.usage_metadata
         if u:
             print(f"[GEMINI TOKENS] bank statement extraction: prompt={u.prompt_token_count} output={u.candidates_token_count} total={u.total_token_count}", flush=True)
 
-        res_text = response.text.strip()
-        if res_text.startswith("```json"):
-            res_text = res_text[7:-3].strip()
-        elif res_text.startswith("```"):
-            res_text = res_text[3:-3].strip()
-
-        try:
-            data = repair_json(res_text, return_objects=True)
-        except Exception:
-            return None
-
-        if not isinstance(data, dict):
-            return None
-        transactions = data.get("transactions")
-        return transactions if isinstance(transactions, list) else None
+        return _parse_txn_json(response.text)
     finally:
         try:
             client.files.delete(name=uploaded_file.name)
         except Exception:
             pass
+
+
+def _render_pdf_pages_to_images(pdf_path: str, dpi: int = 200) -> list[bytes]:
+    """Rasterizes every page of a PDF to a JPEG. Used for the Qwen path only
+    -- Gemini reads the PDF natively, but Qwen's vision input is images, and
+    sending page images (rather than a raw text-layer dump) preserves the
+    statement's actual table layout, so the model reads each amount off its
+    real Date/Narration/Withdrawal/Deposit column instead of guessing from
+    text-extraction reading order. Mirrors how extraction_v4's item pipeline
+    reads invoice images for the same reason."""
+    pdf = pdfium.PdfDocument(pdf_path)
+    scale = dpi / 72
+    images = []
+    try:
+        for page in pdf:
+            bitmap = page.render(scale=scale)
+            buf = io.BytesIO()
+            bitmap.to_pil().convert("RGB").save(buf, format="JPEG", quality=90)
+            images.append(buf.getvalue())
+            page.close()
+    finally:
+        pdf.close()
+    return images
+
+
+def _build_qwen_bank_prompt(is_retry: bool = False) -> str:
+    prompt = (
+        "You are a precise OCR transcription assistant reading a bank statement. "
+        "You are receiving one or more page image(s) of the statement, which may span multiple "
+        "pages -- treat page 2 and beyond as a continuation of page 1, covering every page.\n\n"
+        "Extract every real transaction row from the table into a 'transactions' array of objects. "
+        "Each object MUST have the following exact keys:\n"
+        "- 'date': string (format YYYY-MM-DD)\n"
+        "- 'narration': string (the transaction description/particulars column, as printed)\n"
+        "- 'amount': a pure JSON number, the absolute value without commas or currency symbols "
+        "(correct: 1234.56, incorrect: \"1,234.56\")\n"
+        "- 'type': string, strictly 'DEBIT' if the amount is printed in the Withdrawal/Debit "
+        "column, or 'CREDIT' if printed in the Deposit/Credit column\n\n"
+        "DO NOT extract as a transaction: the running/closing 'Balance' column value, 'Opening "
+        "Balance', 'Closing Balance', 'B/F' (brought forward), 'C/F' (carried forward), or any "
+        "page/statement summary or total row. Only extract actual dated transaction rows.\n\n"
+        "EXAMPLE -- a row with Date=05-04-2024, Narration=\"UPI/mmt/123/Zomato\", Withdrawal=1,234.50, "
+        "Deposit=(blank), Balance=45,210.00 (the Balance column is ignored):\n"
+        "{\"date\": \"2024-04-05\", \"narration\": \"UPI/mmt/123/Zomato\", \"amount\": 1234.50, \"type\": \"DEBIT\"}\n\n"
+        "Return ONLY a valid JSON object of the exact shape "
+        "{\"transactions\": [{\"date\": \"...\", \"narration\": \"...\", \"amount\": 0.0, \"type\": \"...\"}]}. "
+        "Do not include markdown formatting like ```json."
+    )
+    if is_retry:
+        prompt += (
+            "\n\nWARNING: The previous response could not be read as a valid transaction list. "
+            "Re-read the statement carefully and return ONLY valid JSON matching the schema above."
+        )
+    return prompt
+
+
+def _call_qwen_bank_extraction(images: list[bytes], is_retry: bool = False) -> Optional[list]:
+    """Qwen equivalent of _call_gemini_bank_extraction, via OpenRouter. Sends
+    rasterized page images (see _render_pdf_pages_to_images) rather than the
+    raw PDF, matching the vision-based approach extraction_v4 already uses
+    for Qwen item extraction."""
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        raise ValueError("OPENROUTER_API_KEY not configured")
+
+    model = os.getenv("QWEN_MODEL", "qwen/qwen3.5-flash-02-23")
+    client = OpenAI(api_key=api_key, base_url=OPENROUTER_BASE_URL, timeout=90.0)
+
+    prompt = _build_qwen_bank_prompt(is_retry)
+    image_parts = [
+        {
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{base64.b64encode(img).decode()}"},
+        }
+        for img in images
+    ]
+
+    response = call_with_retry(lambda: client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": image_parts + [{"type": "text", "text": prompt}]}],
+        response_format={"type": "json_object"},
+        extra_body={"reasoning": {"enabled": False}},
+        # No max_tokens cap here (unlike the item-extraction calls) -- a
+        # month's bank statement can run into hundreds of transactions,
+        # and truncating mid-JSON would silently fail parsing and burn
+        # the one retry. Item tables stay capped since they're bounded
+        # to a single invoice's row count.
+    ))
+    u = response.usage
+    if u:
+        print(f"[QWEN TOKENS] bank statement extraction: prompt={u.prompt_tokens} output={u.completion_tokens} total={u.total_tokens}", flush=True)
+
+    return _parse_txn_json(response.choices[0].message.content)
+
+
+def _call_bank_extraction(pdf_path: str, is_retry: bool = False) -> Optional[list]:
+    """Provider dispatch, mirroring extraction_v4/extraction_engine.py's
+    call_item_extraction_v4 -- reads the same shared "extraction_provider"
+    Settings toggle so switching providers there also switches bank
+    statement extraction, with no separate toggle for this feature."""
+    if get_extraction_provider() == "qwen":
+        images = _render_pdf_pages_to_images(pdf_path)
+        return _call_qwen_bank_extraction(images, is_retry)
+
+    api_key = os.environ.get("GEMINI_API_KEY")
+    # Explicit timeout -- without one, a stalled request can hang the
+    # background extraction thread indefinitely instead of failing.
+    client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=60000))
+    return _call_gemini_bank_extraction(client, pdf_path, is_retry)
 
 @router.get("/mappings/banks")
 def get_mapped_banks():
@@ -181,104 +313,26 @@ def get_tally_ledgers():
     except Exception:
         return {}
 
-@router.post("/create-ledger")
-async def create_tally_ledger(payload: dict):
-    name = payload.get("name")
-    parent = payload.get("parent", "Indirect Expenses")
-    cc_flag = "Yes" if payload.get("cost_center") else "No"
-    
-    xml_data = f"""<ENVELOPE>
-      <HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
-      <BODY>
-        <IMPORTDATA>
-          <REQUESTDESC><REPORTNAME>All Masters</REPORTNAME></REQUESTDESC>
-          <REQUESTDATA>
-            <TALLYMESSAGE xmlns:UDF="TallyUDF">
-              <LEDGER ACTION="Create" NAME="{sanitize_xml(name)}">
-                <NAME>{sanitize_xml(name)}</NAME>
-                <PARENT>{sanitize_xml(parent)}</PARENT>
-                <ISCOSTCAPP>{cc_flag}</ISCOSTCAPP>
-              </LEDGER>
-            </TALLYMESSAGE>
-          </REQUESTDATA>
-        </IMPORTDATA>
-      </BODY>
-    </ENVELOPE>"""
-    
-    xml_bytes = xml_data.encode('utf-8')
-    
-    # 1. Pre-send cache check
-    from backend.database import check_master_exists_locally, normalize_master_name, MasterConflictException
-    try:
-        norm, _ = normalize_master_name(name)
-        if check_master_exists_locally('LEDGER', norm, {"parent": parent}):
-            return {"status": "success", "message": f"Ledger '{name}' already exists (idempotent)."}
-    except MasterConflictException as e:
-        raise HTTPException(status_code=409, detail=str(e))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    
-    try:
-        response = await tally_transport.post(xml_bytes, timeout=4)
-        parsed = parse_tally_response(response.text, "CREATE_LEDGER")
-        if not parsed["is_success"]:
-            raise HTTPException(status_code=400, detail=f"Tally rejected the ledger creation: {parsed['error_message']}")
-            
-        from backend.services.tally_response import is_already_exists_success
-        from backend.services.tally_verification import verify_tally_master_definition, VerificationResult
-        
-        insert_name = name
-        if is_already_exists_success(parsed, "CREATE_LEDGER"):
-            ver_res, canonical = await verify_tally_master_definition("LEDGER", name, {"parent": parent})
-            if ver_res == VerificationResult.UNVERIFIABLE:
-                raise HTTPException(status_code=400, detail="Master already exists in Tally, but its definition could not be verified. Refresh masters and try again.")
-            elif ver_res == VerificationResult.CONFLICT:
-                raise HTTPException(status_code=409, detail="Master already exists in Tally with a conflicting definition.")
-            insert_name = canonical['name']
-            
-        # 1. LOCAL INJECTION: Update cache ONLY after confirmation
-        try:
-            with get_db() as conn:
-                conn.execute(
-                    "INSERT OR IGNORE INTO ledgers (name, parent, cost_centre) VALUES (?, ?, ?)",
-                    (insert_name, parent, payload.get("cost_center", False))
-                )
-                conn.commit()
-        except Exception as e:
-            print(f"Local ledger insert failed: {e}")
-            
-        return {"status": "success", "message": f"Ledger {insert_name} created in Tally."}
-    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
-        from backend.database import queue_master_operation, MasterFailedException
-        try:
-            res = await run_in_threadpool(queue_master_operation, "LEDGER", name, "CREATE_LEDGER", xml_data, payload)
-            if res.get("status") == "exists_confirmed":
-                return {"status": "success", "message": f"Ledger '{name}' already confirmed."}
-            elif res.get("status") in ("exists_pending", "exists_pending_concurrent"):
-                return {"status": "success", "message": f"Ledger '{name}' already pending."}
-        except MasterConflictException as e:
-            raise HTTPException(status_code=409, detail=str(e))
-        except MasterFailedException as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        except Exception as e:
-            print(f"Unexpected error: {e}")
-            raise HTTPException(status_code=500, detail="Something went wrong. Please try again.")
-            
-        return {"status": "queued", "message": f"Ledger {name} saved to offline queue."}
-    except HTTPException:
-        raise
+@router.get("/accounts")
+def get_bank_accounts():
+    from backend.services.reporting_bank_service import list_bank_accounts
+    return {"accounts": list_bank_accounts()}
 
-@router.post("/upload")
-def upload_bank_statement(
-    file: UploadFile = File(...),
-    bank_ledger_name: str = Form(...),
-    password: Optional[str] = Form(None)
-):
-    contents = file.file.read()
-    ext = os.path.splitext(file.filename)[1].lower()
-    
+@router.get("/transactions")
+def get_bank_transactions(ledger: str, start_date: str, end_date: str):
+    from backend.services.reporting_bank_service import get_bank_ledger_movements
+    return get_bank_ledger_movements(ledger, start_date, end_date)
+
+def _extract_bank_statement_transactions(contents: bytes, filename: str, bank_ledger_name: str) -> dict:
+    """The actual parsing work -- for a PDF this includes the slow Gemini/Qwen
+    call -- split out of upload_bank_statement so it can run in a background
+    task instead of blocking the request. `contents` for a PDF is expected to
+    already be decrypted (upload_bank_statement's synchronous password check
+    below handles that before ever getting here)."""
+    ext = os.path.splitext(filename)[1].lower()
+
     json_txns = []
-    
+
     if ext in ['.xlsx', '.xls']:
         try:
             df = pd.read_excel(BytesIO(contents), header=None)
@@ -364,36 +418,16 @@ def upload_bank_statement(
 
     elif ext == '.pdf':
         import tempfile
-        temp_dir = tempfile.gettempdir()
-        temp_path = os.path.join(temp_dir, f"temp_{file.filename}")
+        temp_path = os.path.join(tempfile.gettempdir(), f"temp_{uuid.uuid4().hex}_{filename}")
         with open(temp_path, "wb") as f:
             f.write(contents)
-            
-        try:
-            reader = pypdf.PdfReader(temp_path)
-            if reader.is_encrypted:
-                if not password or not reader.decrypt(password):
-                    os.remove(temp_path)
-                    raise HTTPException(status_code=403, detail="PDF is encrypted. Password required.")
-                    
-            unlocked_pdf_path = os.path.join(temp_dir, f"unlocked_{file.filename}")
-            writer = pypdf.PdfWriter()
-            for page in reader.pages:
-                writer.add_page(page)
-            with open(unlocked_pdf_path, "wb") as f:
-                writer.write(f)
-                
-            api_key = os.environ.get("GEMINI_API_KEY")
-            # Explicit timeout -- without one, a stalled request can hang the
-            # background extraction thread indefinitely instead of failing.
-            client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=60000))
 
-            json_txns = _call_gemini_bank_extraction(client, unlocked_pdf_path, is_retry=False)
+        try:
+            json_txns = _call_bank_extraction(temp_path, is_retry=False)
             if not json_txns:
-                json_txns = _call_gemini_bank_extraction(client, unlocked_pdf_path, is_retry=True)
+                json_txns = _call_bank_extraction(temp_path, is_retry=True)
             if not json_txns:
                 raise HTTPException(status_code=400, detail="Could not read transactions from this PDF. Try a clearer scan or a different format.")
-
         except HTTPException:
             raise
         except Exception as e:
@@ -402,8 +436,6 @@ def upload_bank_statement(
         finally:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
-            if 'unlocked_pdf_path' in locals() and os.path.exists(unlocked_pdf_path):
-                os.remove(unlocked_pdf_path)
     else:
         raise HTTPException(status_code=400, detail="Invalid file extension. Please upload .xlsx, .xls, or .pdf")
 
@@ -501,6 +533,176 @@ def upload_bank_statement(
         txn['transfer_match'] = find_transfer_match(txn, bank_ledger_name, own_bank_ledgers)
 
     return {"transactions": transactions, "skipped_count": skipped_count}
+
+
+def _process_bank_statement_draft(draft_id: str, contents: bytes, filename: str, bank_ledger_name: str):
+    """Runs in the background (kicked off by upload_bank_statement) so a long
+    PDF's Gemini/Qwen extraction doesn't block the request -- fills in the
+    PROCESSING draft it already created, mirroring purchase_drafts.py's
+    process_async_extraction."""
+    now = datetime.datetime.now().isoformat()
+    try:
+        result = _extract_bank_statement_transactions(contents, filename, bank_ledger_name)
+        transactions = result["transactions"]
+        if not transactions:
+            raise HTTPException(status_code=400, detail="No transactions were found in this statement.")
+
+        draft_data = json.dumps({"transactions": transactions})
+        with get_db() as conn:
+            conn.cursor().execute("""
+                UPDATE bank_statement_drafts
+                SET status = 'READY', transaction_count = ?, draft_data = ?, updated_at = ?
+                WHERE id = ?
+            """, (len(transactions), draft_data, now, draft_id))
+            conn.commit()
+    except HTTPException as e:
+        with get_db() as conn:
+            conn.cursor().execute("""
+                UPDATE bank_statement_drafts
+                SET status = 'FAILED', error_message = ?, updated_at = ?
+                WHERE id = ?
+            """, (str(e.detail), now, draft_id))
+            conn.commit()
+    except Exception as e:
+        print(f"Bank statement async extraction failed: {e}")
+        traceback.print_exc()
+        with get_db() as conn:
+            conn.cursor().execute("""
+                UPDATE bank_statement_drafts
+                SET status = 'FAILED', error_message = ?, updated_at = ?
+                WHERE id = ?
+            """, (str(e), now, draft_id))
+            conn.commit()
+
+
+@router.post("/upload")
+def upload_bank_statement(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    bank_ledger_name: str = Form(...),
+    password: Optional[str] = Form(None)
+):
+    """Creates a PROCESSING draft and returns immediately -- the actual
+    parsing (slow for a PDF) runs in the background and fills the draft in
+    once done. The one thing that must stay synchronous is the password
+    check: the user needs to be prompted for it right away, not after
+    waiting on a background job that was doomed to fail without it."""
+    contents = file.file.read()
+    ext = os.path.splitext(file.filename)[1].lower()
+
+    if ext not in ['.xlsx', '.xls', '.pdf']:
+        raise HTTPException(status_code=400, detail="Invalid file extension. Please upload .xlsx, .xls, or .pdf")
+
+    if ext == '.pdf':
+        import tempfile
+        temp_path = os.path.join(tempfile.gettempdir(), f"temp_{uuid.uuid4().hex}_{file.filename}")
+        with open(temp_path, "wb") as f:
+            f.write(contents)
+        try:
+            reader = pypdf.PdfReader(temp_path)
+            if reader.is_encrypted:
+                if not password or not reader.decrypt(password):
+                    raise HTTPException(status_code=403, detail="PDF is encrypted. Password required.")
+                # Re-save decrypted so the background task never needs the
+                # password again.
+                writer = pypdf.PdfWriter()
+                for page in reader.pages:
+                    writer.add_page(page)
+                buf = BytesIO()
+                writer.write(buf)
+                contents = buf.getvalue()
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    draft_id = str(uuid.uuid4())
+    now = datetime.datetime.now().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO bank_statement_drafts
+            (id, bank_ledger_name, transaction_count, status, draft_data, created_at, updated_at)
+            VALUES (?, ?, 0, 'PROCESSING', '{}', ?, ?)
+        """, (draft_id, bank_ledger_name, now, now))
+        conn.commit()
+
+    background_tasks.add_task(_process_bank_statement_draft, draft_id, contents, file.filename, bank_ledger_name)
+
+    return {"id": draft_id, "status": "PROCESSING"}
+
+@router.get("/drafts")
+def list_bank_statement_drafts():
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, bank_ledger_name, transaction_count, status, error_message, draft_data, created_at, updated_at
+            FROM bank_statement_drafts
+            ORDER BY created_at DESC
+        """)
+        rows = cursor.fetchall()
+
+    drafts = []
+    for row in rows:
+        draft = dict(row)
+        raw = draft.pop('draft_data', None)
+        unmapped_count = 0
+        if raw:
+            try:
+                txns = json.loads(raw).get("transactions") or []
+                unmapped_count = sum(1 for t in txns if t.get("unmapped") or t.get("missing_cost_center"))
+            except Exception:
+                pass
+        draft['unmapped_count'] = unmapped_count
+        drafts.append(draft)
+
+    return {"drafts": drafts}
+
+@router.get("/drafts/{draft_id}")
+def get_bank_statement_draft(draft_id: str):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM bank_statement_drafts WHERE id = ?", (draft_id,))
+        row = cursor.fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Draft not found")
+
+    draft = dict(row)
+    try:
+        draft['draft_data'] = json.loads(draft['draft_data'])
+    except Exception:
+        draft['draft_data'] = {"transactions": []}
+
+    return draft
+
+@router.put("/drafts/{draft_id}")
+def update_bank_statement_draft(draft_id: str, payload: BankStatementDraftPayload):
+    now = datetime.datetime.now().isoformat()
+    draft_data = json.dumps({"transactions": payload.transactions})
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE bank_statement_drafts
+            SET bank_ledger_name = ?, transaction_count = ?, draft_data = ?, updated_at = ?
+            WHERE id = ?
+        """, (payload.bank_ledger_name, len(payload.transactions), draft_data, now, draft_id))
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Draft not found")
+        conn.commit()
+
+    return {"message": "Draft updated"}
+
+@router.delete("/drafts/{draft_id}")
+def delete_bank_statement_draft(draft_id: str):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM bank_statement_drafts WHERE id = ?", (draft_id,))
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Draft not found")
+        conn.commit()
+
+    return {"message": "Draft deleted"}
 
 @router.post("/post")
 async def post_to_tally(payload: TransactionPayload):
@@ -601,21 +803,9 @@ async def post_to_tally(payload: TransactionPayload):
             "description": desc
         })
 
-    # Queue-First Architecture: Insert individually first
-    queue_ids = []
-    xml_lines = [
-        '<ENVELOPE>',
-        '  <HEADER>',
-        '    <TALLYREQUEST>Import Data</TALLYREQUEST>',
-        '  </HEADER>',
-        '  <BODY>',
-        '    <IMPORTDATA>',
-        '      <REQUESTDESC>',
-        '        <REPORTNAME>Vouchers</REPORTNAME>',
-        '      </REQUESTDESC>',
-        '      <REQUESTDATA>'
-    ]
-    
+    # Queue-First Architecture: each transaction is its own independent
+    # voucher, saved as its own PENDING row up front.
+    queued_items = []  # (queue_id, single_envelope, description)
     for pv in prepared_vouchers:
         single_envelope = f"""<ENVELOPE>
   <HEADER>
@@ -631,61 +821,87 @@ async def post_to_tally(payload: TransactionPayload):
     </IMPORTDATA>
   </BODY>
 </ENVELOPE>"""
-        # Save as PENDING
         qid = queue_operation("POST_VOUCHER", single_envelope, pv["payload"], pv["description"])
-        queue_ids.append(qid)
-        
-        # Prepare combined for online send
-        xml_lines.append(pv['xml_block'])
+        queued_items.append((qid, single_envelope, pv["description"]))
 
-    xml_lines.extend([
-        '      </REQUESTDATA>',
-        '    </IMPORTDATA>',
-        '  </BODY>',
-        '</ENVELOPE>'
-    ])
-    
-    xml_data = "\n".join(xml_lines).encode('utf-8')
-    
-    try:
-        for qid in queue_ids:
+    # The vouchers are now durably in the offline queue regardless of whether
+    # the Tally send below succeeds -- this statement no longer needs review,
+    # so its draft (if it came from one) can come off the Review inbox now.
+    if payload.draft_id:
+        with get_db() as conn:
+            conn.cursor().execute("DELETE FROM bank_statement_drafts WHERE id = ?", (payload.draft_id,))
+            conn.commit()
+
+    # Attempted one voucher at a time (not one combined multi-TALLYMESSAGE
+    # import) and checked with the same parse_tally_response every other
+    # feature uses -- previously this batched all N vouchers into a single
+    # request and did a crude `"<LINEERROR>" in response.text` check that,
+    # on ANY single line error, blanket-marked every queued row (including
+    # ones Tally had already actually CREATED) as FAILED. Since FAILED rows
+    # are never retried by the background worker, a user who then retried or
+    # re-uploaded the statement would duplicate every voucher that had
+    # actually succeeded. Attempting individually gives each transaction its
+    # own accurate outcome, exactly like every other multi-voucher feature.
+    synced_count = 0
+    queued_count = 0
+    failed_descriptions = []
+
+    for idx, (qid, envelope, desc) in enumerate(queued_items):
+        try:
             set_delivery_uncertain(qid, True)
-        response = await tally_transport.post(xml_data, timeout=5)
-        if "<LINEERROR>" in response.text:
-            for qid in queue_ids:
-                set_delivery_uncertain(qid, False)
-                update_queue_status(qid, "FAILED", "Tally rejected the vouchers. See response for details.")
-            raise HTTPException(status_code=400, detail="Tally rejected the vouchers.")
+            response = await tally_transport.post(envelope.encode('utf-8'), timeout=10)
+            parsed = parse_tally_response(response.text, "POST_VOUCHER")
 
-        for qid in queue_ids:
+            if not parsed["is_success"]:
+                set_delivery_uncertain(qid, False)
+                update_queue_status(qid, "FAILED", parsed["error_message"])
+                failed_descriptions.append(f"{desc}: {parsed['error_message']}")
+                continue
+
             set_delivery_uncertain(qid, False)
             update_queue_status(qid, "SYNCED")
-        return {"status": "success", "message": "Successfully posted to Tally"}
-
-    except requests.exceptions.ConnectTimeout:
-        # The connection itself never established (Tally's address is unreachable)
-        # -- as safe as ConnectionError, nothing was ever sent.
-        for qid in queue_ids:
+            synced_count += 1
+        except (requests.exceptions.ConnectTimeout, requests.exceptions.ConnectionError):
+            # Tally is unreachable -- this item and every remaining one stay
+            # PENDING for the background worker, rather than each paying a
+            # separate connection timeout.
             set_delivery_uncertain(qid, False)
-        return {"status": "queued", "message": f"{len(queue_ids)} individual vouchers saved to offline queue."}
-    except requests.exceptions.Timeout:
-        # Ambiguous: connection was established and the request was sent, but no
-        # response came back in time -- Tally may have processed this batch before
-        # the response was lost. Leave delivery_uncertain set on every row in this
-        # batch (already persisted above) so a manual retry is blocked until
-        # someone verifies in Tally directly.
-        return {"status": "queued", "message": f"{len(queue_ids)} individual vouchers saved to offline queue."}
-    except requests.exceptions.ConnectionError:
-        # Request never reached Tally at all -- safe to clear and leave PENDING.
-        for qid in queue_ids:
-            set_delivery_uncertain(qid, False)
-        return {"status": "queued", "message": f"{len(queue_ids)} individual vouchers saved to offline queue."}
-    except HTTPException:
-        raise
-    except Exception as e:
-        for qid in queue_ids:
+            queued_count += len(queued_items) - idx
+            break
+        except requests.exceptions.Timeout:
+            # Genuinely ambiguous for this one voucher only -- leave
+            # delivery_uncertain set (already persisted above) so a manual
+            # retry is blocked until someone verifies it in Tally directly.
+            # Other transactions in this batch are unaffected and keep going.
+            update_queue_status(qid, "FAILED", "Delivery status is unknown from an earlier Tally submission. Verify this voucher in Tally before attempting any manual retry.")
+            failed_descriptions.append(f"{desc}: delivery uncertain, verify in Tally")
+        except Exception as e:
             update_queue_status(qid, "FAILED", str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+            failed_descriptions.append(f"{desc}: {e}")
+
+    if failed_descriptions and synced_count == 0 and queued_count == 0:
+        overall_status = "failed"
+    elif failed_descriptions or queued_count:
+        overall_status = "partial"
+    else:
+        overall_status = "success"
+
+    message_parts = []
+    if synced_count:
+        message_parts.append(f"{synced_count} posted to Tally")
+    if queued_count:
+        message_parts.append(f"{queued_count} saved to offline queue")
+    if failed_descriptions:
+        message_parts.append(f"{len(failed_descriptions)} rejected by Tally")
+    message = ", ".join(message_parts) or "Nothing to post."
+
+    return {
+        "status": overall_status,
+        "message": message,
+        "synced_count": synced_count,
+        "queued_count": queued_count,
+        "failed": failed_descriptions,
+    }
 
 
 class MergeTransferRequest(BaseModel):

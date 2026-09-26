@@ -10,6 +10,73 @@ from backend.services.auth_helpers import resolve_view_store_filter
 
 router = APIRouter()
 
+# Best-effort structured view of an offline_queue row for the activity feed --
+# each transaction type's payload shape was mapped out from the routers that
+# actually post it (sales.py, purchase.py, purchase_item.py, payment.py,
+# loans.py, bank_statement.py). Falls back to (None, None, None) for types
+# not worth parsing here (transfers, stock transfers, repack, master
+# creation) -- the frontend just shows the raw description for those,
+# unchanged from before this feed existed.
+def _parse_activity_row(operation_type: str, description: str, payload_str: str):
+    """Returns (party, amount, sub_label, type_label), any of which may be None."""
+    if operation_type != 'POST_VOUCHER' or not payload_str:
+        return None, None, None, None
+    try:
+        payload = json.loads(payload_str)
+    except (json.JSONDecodeError, TypeError):
+        return None, None, None, None
+    if not isinstance(payload, dict):
+        return None, None, None, None
+
+    def _num(key):
+        try:
+            return float(payload.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    if description.startswith("Sales:"):
+        ledger = payload.get('ledger') or ''
+        party = "Cash sale (walk-in)" if ledger.strip().lower() == 'cash' else ledger
+        return party, _num('amount'), payload.get('cost_center'), 'Sale'
+
+    if description.startswith("Purchase Invoice:"):
+        return payload.get('supplier'), -_num('amount'), 'Credit', 'Purchase'
+
+    if description.startswith("Purchase Item Invoice:"):
+        items = payload.get('items') or []
+        items_total = sum(float(i.get('amount') or 0) for i in items)
+        gst_total = _num('cgst') + _num('sgst') + _num('igst') + _num('rounding_off')
+        return payload.get('supplier'), -(items_total + gst_total), 'Credit', 'Purchase'
+
+    if description.startswith("Purchase Return (Debit Note):"):
+        adjustment = payload.get('adjustment') or {}
+        items = adjustment.get('items') or []
+        amount = sum(float(i.get('qty') or 0) * float(i.get('rate') or 0) for i in items)
+        return payload.get('supplier'), amount, 'Credit', 'Purchase return'
+
+    if description.startswith("Payment:"):
+        return payload.get('debit_ledger'), -_num('amount'), payload.get('credit_ledger'), 'Payment'
+
+    if description.startswith("Journal:"):
+        return payload.get('credit_ledger'), _num('amount'), payload.get('debit_ledger'), 'Journal'
+
+    if description.startswith("Loan Received:"):
+        return payload.get('lender_name'), _num('principal_amount'), payload.get('received_into_ledger'), 'Loan received'
+
+    if description.startswith("Bank Stmt:") and not description.startswith("Bank Stmt Transfer:"):
+        bank_ledger = payload.get('bank_ledger_name')
+        is_receipt = payload.get('debit_ledger') == bank_ledger
+        amount = _num('amount')
+        # The counterparty is whichever side of the entry isn't the bank
+        # ledger -- credit_ledger for a receipt (money coming in from them),
+        # debit_ledger for a payment (money going out to them). This payload
+        # never actually has a top-level 'ledger' key, so reading that (as
+        # this used to) always returned None.
+        party = payload.get('credit_ledger') if is_receipt else payload.get('debit_ledger')
+        return party, (amount if is_receipt else -amount), bank_ledger, ('Receipt' if is_receipt else 'Payment')
+
+    return None, None, None, None
+
 @router.get("/stats")
 def get_dashboard_stats(request: Request):
     # A staff account only ever sees its own store's figures here -- the
@@ -19,6 +86,7 @@ def get_dashboard_stats(request: Request):
     queue_count = 0
     cache_count = 0
     failed_count = 0
+    review_count = 0
 
     # 1. Check SQLite Queue
     try:
@@ -45,22 +113,38 @@ def get_dashboard_stats(request: Request):
             row = cursor.fetchone()
             if row:
                 failed_count = row['count']
+
+            cursor.execute("SELECT COUNT(*) as count FROM purchase_drafts WHERE status != 'POSTED'")
+            row = cursor.fetchone()
+            if row:
+                review_count = row['count']
+
+            cursor.execute("SELECT COUNT(*) as count FROM bank_statement_drafts")
+            row = cursor.fetchone()
+            if row:
+                review_count += row['count']
     except Exception as e:
         print(f"Error fetching stats: {e}")
 
     # 2. Today's sales -- Tally-confirmed (from the reporting sync) plus
-    # anything still sitting in the offline queue, so the figure doesn't
-    # silently drop whenever Tally is unreachable. Deliberately excludes
+    # every sale this app itself has posted, PENDING or already SYNCED, so
+    # the figure doesn't silently drop whenever Tally is unreachable, and
+    # doesn't temporarily vanish for the up-to-30-minutes between a sale
+    # posting live and the separate reporting sync re-confirming it (see
+    # calculate_sales' and get_queue_sales_trend's docstrings -- the two are
+    # a matching pair: calculate_sales permanently excludes VCHTYPE=Sales
+    # vouchers, counted here from the queue instead). Deliberately excludes
     # FAILED entries -- those need a fix/retry before they count as a real
     # sale, and get surfaced separately via failed_count instead.
     today_sales = 0.0
     today_sales_pending_count = 0
     try:
-        from backend.services.reporting_sales_service import calculate_sales, get_unsynced_sales
+        from backend.services.reporting_sales_service import calculate_sales, get_unsynced_sales, get_queue_sales_trend
         today_str = datetime.now().strftime("%Y%m%d")
         confirmed = calculate_sales(today_str, today_str, store_filter)
         unsynced = get_unsynced_sales(today_str, today_str, store_filter)
-        today_sales = round(confirmed + unsynced['pending_amount'], 2)
+        queue_amount = sum(row['Combined'] for row in get_queue_sales_trend(today_str, today_str, store_filter))
+        today_sales = round(confirmed + queue_amount, 2)
         today_sales_pending_count = unsynced['pending_count']
     except Exception as e:
         print(f"Error computing today's sales: {e}")
@@ -77,7 +161,8 @@ def get_dashboard_stats(request: Request):
         "failed_count": failed_count,
         "today_sales": today_sales,
         "today_sales_pending_count": today_sales_pending_count,
-        "tally_online": tally_online
+        "tally_online": tally_online,
+        "review_count": review_count
     }
 
 @router.get("/activity")
@@ -104,12 +189,22 @@ def get_recent_activity(
             where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
             params.append(limit)
             cursor.execute(
-                f"SELECT id, operation_type, status, description, created_at, is_hidden "
+                f"SELECT id, operation_type, status, description, created_at, is_hidden, payload "
                 f"FROM offline_queue {where} ORDER BY id DESC LIMIT ?",
                 params
             )
             rows = cursor.fetchall()
-            return [dict(row) for row in rows]
+            results = []
+            for row in rows:
+                item = dict(row)
+                payload_str = item.pop('payload', None)
+                party, amount, sub_label, type_label = _parse_activity_row(item['operation_type'], item['description'] or '', payload_str)
+                item['party'] = party
+                item['amount'] = amount
+                item['sub_label'] = sub_label
+                item['type_label'] = type_label
+                results.append(item)
+            return results
     except Exception as e:
         print(f"Error fetching activity: {e}")
         return []
@@ -237,11 +332,22 @@ def get_queue_page(
                 fetch_limit = min(limit, QUEUE_PAGE_CAP - offset)
                 cursor.execute(
                     f"SELECT offline_queue.id, offline_queue.operation_type, offline_queue.status, "
-                    f"offline_queue.description, offline_queue.created_at, offline_queue.is_hidden "
+                    f"offline_queue.description, offline_queue.created_at, offline_queue.is_hidden, "
+                    f"offline_queue.error_message, offline_queue.payload "
                     f"FROM offline_queue WHERE {where} ORDER BY offline_queue.id DESC LIMIT ? OFFSET ?",
                     params + [fetch_limit, offset]
                 )
-                items = [dict(row) for row in cursor.fetchall()]
+                rows = cursor.fetchall()
+                items = []
+                for row in rows:
+                    row_item = dict(row)
+                    payload_str = row_item.pop('payload', None)
+                    party, amount, sub_label, type_label = _parse_activity_row(row_item['operation_type'], row_item['description'] or '', payload_str)
+                    row_item['party'] = party
+                    row_item['amount'] = amount
+                    row_item['sub_label'] = sub_label
+                    row_item['type_label'] = type_label
+                    items.append(row_item)
             return {"items": items, "total": total, "page": page, "limit": limit}
     except HTTPException:
         raise
@@ -795,4 +901,3 @@ def _rebuild_sales_voucher(item_id: int, p: dict):
     except Exception as e:
         print(f"Unexpected error: {e}")
         raise HTTPException(status_code=500, detail="Something went wrong. Please try again.")
-

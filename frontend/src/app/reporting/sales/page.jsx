@@ -1,546 +1,513 @@
 "use client";
 
-import React, { useState, useEffect } from 'react';
-import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-import { TrendingUp, TrendingDown, ChevronLeft, ArrowUpRight, ArrowDownRight, Store, Calendar, AlertTriangle } from 'lucide-react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
+import { useSyncStatus } from '@/context/SyncStatusContext';
+import TopBar from '@/components/layout/TopBar';
+import ReportTabs from '@/components/layout/ReportTabs';
+import { Wifi, WifiOff, ChevronDown, ChevronRight, AlertTriangle } from 'lucide-react';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 
 const PRESETS = [
-    { label: "This Week", value: "week" },
-    { label: "This Month", value: "month" },
-    { label: "This Quarter", value: "quarter" },
-    { label: "This Financial Year", value: "fy" },
-    { label: "Custom", value: "custom" },
+  { label: "Today", value: "today" },
+  { label: "7 days", value: "7days" },
+  { label: "This month", value: "month" },
+  { label: "30 days", value: "30days" },
+  { label: "Custom", value: "custom" },
 ];
 
-function formatCurrency(val) {
-    if (val === undefined || val === null) return "₹0.00";
-    return new Intl.NumberFormat('en-IN', {
-        style: 'currency',
-        currency: 'INR',
-        maximumFractionDigits: 0
-    }).format(val);
+const MODE_FILTERS = [
+  { label: "All", value: "all" },
+  { label: "Cash", value: "cash" },
+  { label: "UPI", value: "upi" },
+  { label: "Credit", value: "credit" },
+];
+
+// Dark-to-light accent steps -- mirrors the reference's per-store bar/legend
+// gradation (deep brown -> gold -> pale cream) using the shared accent ramp
+// so it still reacts correctly to the light/dark theme toggle. Deliberately
+// starts at 800, not 900 -- at swatch/bar-segment size 900 reads as near-black
+// rather than brown, which breaks the "no black, warm gold family" palette.
+const STORE_SWATCHES = ['bg-accent-800', 'bg-accent-500', 'bg-accent-300', 'bg-accent-600', 'bg-accent-200'];
+
+function fmtMoney(v) {
+  const n = Math.round(v || 0);
+  return `₹${n.toLocaleString('en-IN')}`;
 }
 
-function formatShortCurrency(val) {
-    if (val === undefined || val === null) return "0";
-    if (val >= 100000) return (val / 100000).toFixed(1) + 'L';
-    if (val >= 1000) return (val / 1000).toFixed(0) + 'K';
-    return val.toString();
-}
+function pad2(n) { return String(n).padStart(2, '0'); }
+function fmtYYYYMMDD(d) { return `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}`; }
 
-function getPresetDates(preset) {
-    const today = new Date();
-    const y = today.getFullYear();
-    const m = today.getMonth();
-    
-    let start, end;
-    
-    if (preset === "week") {
-        const day = today.getDay();
-        const diff = today.getDate() - day + (day === 0 ? -6 : 1);
-        start = new Date(today.setDate(diff));
-        end = new Date(today.setDate(diff + 6));
-    } else if (preset === "month") {
-        start = new Date(y, m, 1);
-        end = new Date(y, m + 1, 0);
-    } else if (preset === "quarter") {
-        const qMonth = Math.floor(m / 3) * 3;
-        start = new Date(y, qMonth, 1);
-        end = new Date(y, qMonth + 3, 0);
-    } else if (preset === "fy") {
-        const fyStartYear = m >= 3 ? y : y - 1;
-        start = new Date(fyStartYear, 3, 1);
-        end = new Date(fyStartYear + 1, 2, 31);
-    } else {
-        start = new Date(y, m, 1);
-        end = new Date(y, m + 1, 0);
-    }
-    
-    const fmt = (dt) => {
-        const yyyy = dt.getFullYear();
-        const mm = String(dt.getMonth() + 1).padStart(2, '0');
-        const dd = String(dt.getDate()).padStart(2, '0');
-        return `${yyyy}${mm}${dd}`;
-    };
+function getPresetDates(preset, custom) {
+  const today = new Date();
+  const fmt = fmtYYYYMMDD;
+
+  if (preset === "today") {
+    return { start: fmt(today), end: fmt(today) };
+  }
+  if (preset === "7days") {
+    const start = new Date(today); start.setDate(today.getDate() - 6);
+    return { start: fmt(start), end: fmt(today) };
+  }
+  if (preset === "month") {
+    const start = new Date(today.getFullYear(), today.getMonth(), 1);
+    const end = new Date(today.getFullYear(), today.getMonth() + 1, 0);
     return { start: fmt(start), end: fmt(end) };
+  }
+  if (preset === "30days") {
+    const start = new Date(today); start.setDate(today.getDate() - 29);
+    return { start: fmt(start), end: fmt(today) };
+  }
+  return custom || { start: fmt(today), end: fmt(today) };
 }
 
 const formatDateInput = (yyyymmdd) => {
-    if (!yyyymmdd || yyyymmdd.length !== 8) return "";
-    return `${yyyymmdd.substring(0, 4)}-${yyyymmdd.substring(4, 6)}-${yyyymmdd.substring(6, 8)}`;
+  if (!yyyymmdd || yyyymmdd.length !== 8) return "";
+  return `${yyyymmdd.substring(0, 4)}-${yyyymmdd.substring(4, 6)}-${yyyymmdd.substring(6, 8)}`;
 };
+const parseDateInput = (yyyy_mm_dd) => (yyyy_mm_dd ? yyyy_mm_dd.replace(/-/g, '') : "");
 
-const parseDateInput = (yyyy_mm_dd) => {
-    if (!yyyy_mm_dd) return "";
-    return yyyy_mm_dd.replace(/-/g, '');
-};
+function toDate(yyyymmdd) {
+  return new Date(+yyyymmdd.slice(0, 4), +yyyymmdd.slice(4, 6) - 1, +yyyymmdd.slice(6, 8));
+}
+function formatDateShort(yyyymmdd) {
+  return new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short' }).format(toDate(yyyymmdd));
+}
+function formatDateWeekday(yyyymmdd) {
+  return new Intl.DateTimeFormat('en-GB', { weekday: 'short', day: 'numeric', month: 'short' }).format(toDate(yyyymmdd));
+}
+function dayOfWeekLabel(yyyymmdd) {
+  const d = toDate(yyyymmdd);
+  const today = new Date();
+  const yesterday = new Date(); yesterday.setDate(today.getDate() - 1);
+  if (fmtYYYYMMDD(d) === fmtYYYYMMDD(today)) return 'Today';
+  if (fmtYYYYMMDD(d) === fmtYYYYMMDD(yesterday)) return 'Yesterday';
+  return new Intl.DateTimeFormat('en-GB', { weekday: 'short', day: 'numeric', month: 'short' }).format(d);
+}
+function daysBetween(start, end) {
+  const ms = toDate(end) - toDate(start);
+  return Math.round(ms / 86400000) + 1;
+}
 
-const formatDateShort = (yyyymmdd) => {
-    if (!yyyymmdd || yyyymmdd.length !== 8) return yyyymmdd;
-    const date = new Date(
-        parseInt(yyyymmdd.substring(0, 4)),
-        parseInt(yyyymmdd.substring(4, 6)) - 1,
-        parseInt(yyyymmdd.substring(6, 8))
-    );
-    return new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short' }).format(date);
-};
-
-const formatDateFull = (yyyymmdd) => {
-    if (!yyyymmdd || yyyymmdd.length !== 8) return yyyymmdd;
-    const date = new Date(
-        parseInt(yyyymmdd.substring(0, 4)),
-        parseInt(yyyymmdd.substring(4, 6)) - 1,
-        parseInt(yyyymmdd.substring(6, 8))
-    );
-    return new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }).format(date);
-};
+function ChangeIndicator({ pct }) {
+  if (pct === null || pct === undefined) return null;
+  const arrow = pct >= 0 ? '▲' : '▼';
+  return <span className="text-neutral-700">{arrow} {Math.abs(pct).toFixed(0)}%</span>;
+}
 
 export default function SalesReport() {
-    const router = useRouter();
-    const { user } = useAuth();
-    const lockedStore = user && !user.is_owner ? user.store_name : null;
-    const [isMounted, setIsMounted] = useState(false);
-    useEffect(() => setIsMounted(true), []);
+  const router = useRouter();
+  const { user } = useAuth();
+  const { isOnline } = useSyncStatus();
+  const lockedStore = user && !user.is_owner ? user.store_name : null;
 
-    const [loading, setLoading] = useState(false);
-    const [data, setData] = useState(null);
-    const [error, setError] = useState(null);
-    const [preset, setPreset] = useState("month");
-    const [dates, setDates] = useState(getPresetDates("month"));
-    const [costCentres, setCostCentres] = useState([]);
-    const [selectedStore, setSelectedStore] = useState(lockedStore || "");
+  const [preset, setPreset] = useState("7days");
+  const [customDates, setCustomDates] = useState(null);
+  const [selectedStore, setSelectedStore] = useState(lockedStore || "");
+  const [costCentres, setCostCentres] = useState([]);
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [queueCount, setQueueCount] = useState(null);
+  const [highlightedDate, setHighlightedDate] = useState(null);
+  const [expandedDay, setExpandedDay] = useState(null);
+  const [modeFilter, setModeFilter] = useState('all');
 
-    useEffect(() => {
-        if (lockedStore) setSelectedStore(lockedStore);
-    }, [lockedStore]);
+  const dates = useMemo(() => getPresetDates(preset, customDates), [preset, customDates]);
 
-    useEffect(() => {
-        fetch(`${API_BASE}/api/reporting/inspect/cost-centres`)
-            .then(res => res.json())
-            .then(d => {
-                if(Array.isArray(d)) setCostCentres(d);
-            })
-            .catch(err => console.error(err));
-    }, []);
+  useEffect(() => {
+    if (lockedStore) setSelectedStore(lockedStore);
+  }, [lockedStore]);
 
-    useEffect(() => {
-        if (!dates.start || !dates.end) return;
-        setLoading(true);
-        let url = `${API_BASE}/api/reporting/sales?start_date=${dates.start}&end_date=${dates.end}`;
-        if (selectedStore) url += `&cost_centre=${encodeURIComponent(selectedStore)}`;
+  useEffect(() => {
+    fetch(`${API_BASE}/api/reporting/inspect/cost-centres`)
+      .then(res => res.json())
+      .then(d => { if (Array.isArray(d)) setCostCentres(d); })
+      .catch(err => console.error(err));
 
-        fetch(url)
-            .then(res => {
-                if (!res.ok) throw new Error("Failed to fetch sales data");
-                return res.json();
-            })
-            .then(d => { setData(d); setError(null); })
-            .catch(err => setError(err.message))
-            .finally(() => setLoading(false));
-    }, [dates, selectedStore]);
+    fetch('/api/dashboard/stats')
+      .then(res => res.json())
+      .then(d => setQueueCount(d.queue_count ?? 0))
+      .catch(() => {});
+  }, []);
 
-    const handlePresetChange = (p) => {
-        setPreset(p);
-        if (p !== "custom") {
-            setDates(getPresetDates(p));
-        }
-    };
+  useEffect(() => {
+    if (!dates.start || !dates.end) return;
+    setLoading(true);
+    let url = `${API_BASE}/api/reporting/sales?start_date=${dates.start}&end_date=${dates.end}`;
+    if (selectedStore) url += `&cost_centre=${encodeURIComponent(selectedStore)}`;
 
-    if (!isMounted) return null;
+    fetch(url)
+      .then(res => {
+        if (!res.ok) throw new Error("Failed to fetch sales data");
+        return res.json();
+      })
+      .then(d => {
+        setData(d);
+        setError(null);
+        setHighlightedDate(null);
+        const days = (d.trend || []).map(t => t.date).sort();
+        const todayStr = fmtYYYYMMDD(new Date());
+        setExpandedDay(days.includes(todayStr) ? todayStr : (days[days.length - 1] || null));
+      })
+      .catch(err => setError(err.message))
+      .finally(() => setLoading(false));
+  }, [dates, selectedStore]);
 
-    // Derived Data Calculations
-    const trendData = data?.trend || [];
-    let highestDay = null;
-    let lowestDay = null;
-    let storeColors = ['bg-blue-500', 'bg-cyan-400', 'bg-purple-400', 'bg-indigo-500', 'bg-teal-400'];
-
-    if (trendData.length > 0) {
-        const sorted = [...trendData].sort((a, b) => b.Combined - a.Combined);
-        highestDay = sorted[0];
-        lowestDay = sorted.filter(d => d.Combined > 0).pop() || sorted[sorted.length - 1]; // Lowest non-zero day
+  // Zero-filled so the chart draws one bar per calendar day in the period,
+  // including days with no sales at all -- the API only ever returns rows
+  // for dates that actually had a voucher.
+  const trend = useMemo(() => {
+    const byDate = {};
+    (data?.trend || []).forEach(row => { byDate[row.date] = row; });
+    const days = [];
+    if (dates.start && dates.end) {
+      let cursor = toDate(dates.start);
+      const end = toDate(dates.end);
+      while (cursor <= end) {
+        const key = fmtYYYYMMDD(cursor);
+        days.push(byDate[key] || { date: key, Combined: 0, Combined_invoices: 0, cash: 0, upi: 0, credit: 0 });
+        cursor = new Date(cursor); cursor.setDate(cursor.getDate() + 1);
+      }
     }
+    return days;
+  }, [data, dates]);
+  const periodDays = daysBetween(dates.start, dates.end);
+  const avgPerDay = data?.summary?.net_sales ? data.summary.net_sales / periodDays : 0;
 
-    const storeComparison = data?.store_comparison?.filter(s => s.net_sales > 0).sort((a, b) => b.net_sales - a.net_sales) || [];
-    const totalSalesFromStores = storeComparison.reduce((sum, s) => sum + s.net_sales, 0);
+  const storeNamesFromTrend = useMemo(() => {
+    const names = new Set();
+    trend.forEach(row => Object.keys(row).forEach(k => {
+      if (!['date', 'Combined', 'Combined_invoices', 'cash', 'upi', 'credit'].includes(k)) names.add(k);
+    }));
+    return Array.from(names);
+  }, [trend]);
 
-    // Compute Day-by-Day Table Data
-    const dayByDay = [...trendData].reverse().filter(d => d.Combined > 0).map(d => {
-        // Find top store for the day
-        let topStore = "Unknown";
-        let maxStoreAmt = -1;
-        Object.keys(d).forEach(k => {
-            if (k !== 'date' && k !== 'Combined' && k !== 'Combined_invoices') {
-                if (d[k] > maxStoreAmt) {
-                    maxStoreAmt = d[k];
-                    topStore = k;
-                }
-            }
-        });
+  const maxBar = Math.max(1, ...trend.map(t => t.Combined || 0));
+  const currentHighlight = trend.find(t => t.date === highlightedDate)
+    || [...trend].reverse().find(t => t.Combined > 0)
+    || trend[trend.length - 1];
 
-        return {
-            date: d.date,
-            invoices: d.Combined_invoices || 0,
-            topStore,
-            amount: d.Combined
-        };
-    });
+  const storeComparison = data?.store_comparison?.filter(s => s.net_sales > 0).sort((a, b) => b.net_sales - a.net_sales) || [];
 
-    const CustomTooltip = ({ active, payload, label }) => {
-        if (active && payload && payload.length) {
-            return (
-                <div className="bg-slate-800 border border-slate-700 p-3 rounded-xl shadow-xl">
-                    <p className="text-slate-400 text-xs font-medium mb-1">{formatDateShort(label)}</p>
-                    <p className="text-white font-bold text-lg">{formatCurrency(payload[0].value)}</p>
-                </div>
-            );
+  // A single canonical store ordering (ranked by the "By store" totals, same
+  // list the swatch colors there use) shared with the chart/legend below --
+  // otherwise the same store could get two different swatch colors in the
+  // two sections since the chart would otherwise order stores by whichever
+  // date's trend row happened to mention them first.
+  const storeNames = useMemo(() => {
+    const primary = storeComparison.map(s => s.store_name);
+    const extra = storeNamesFromTrend.filter(n => !primary.includes(n));
+    return [...primary, ...extra];
+  }, [storeComparison, storeNamesFromTrend]);
+  const storeColorIndex = (name) => storeNames.indexOf(name) % STORE_SWATCHES.length;
+  const totalForStores = storeComparison.reduce((sum, s) => sum + s.net_sales, 0);
+
+  const dayRows = [...trend].reverse().filter(d => d.Combined > 0);
+  const modeAmount = (row, mode) => mode === 'all' ? row.Combined : (row[mode] || 0);
+  const maxModeAmount = Math.max(1, ...dayRows.map(r => modeAmount(r, modeFilter)));
+  const totalForMode = dayRows.reduce((sum, r) => sum + modeAmount(r, modeFilter), 0);
+
+  const now = new Date();
+  const monthKicker = new Intl.DateTimeFormat('en-US', { month: 'long', year: 'numeric' }).format(now).toUpperCase();
+  const storeLabel = selectedStore ? selectedStore.toUpperCase() : 'ALL STORES';
+  const periodLabelMap = { today: 'TODAY', '7days': 'LAST 7 DAYS', month: 'THIS MONTH', '30days': 'LAST 30 DAYS' };
+  const periodLabel = periodLabelMap[preset] || `${formatDateShort(dates.start)} – ${formatDateShort(dates.end)}`.toUpperCase();
+
+  return (
+    <div className="min-h-screen bg-bg pb-24">
+      <TopBar
+        title="Reports"
+        kicker={monthKicker}
+        rightContent={
+          <div className={`flex items-center gap-1.5 h-9 px-3 rounded-full border shrink-0 ${isOnline === false ? 'border-accent text-accent-700' : 'border-divider text-neutral-700'}`}>
+            {isOnline === false ? <WifiOff className="w-3.5 h-3.5" /> : <Wifi className="w-3.5 h-3.5" />}
+            <span className="text-xs font-medium whitespace-nowrap">
+              {isOnline === false ? 'Offline' : 'Online'}{queueCount > 0 ? ` · ${queueCount} saved` : ''}
+            </span>
+          </div>
         }
-        return null;
-    };
+      />
+      <ReportTabs />
 
-    return (
-        <div className="min-h-screen bg-[#0f172a] text-slate-200 pb-24 font-sans selection:bg-cyan-500/30">
-            {/* Header */}
-            <div className="px-5 pt-12 pb-4">
-                <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-3">
-                        <button onClick={() => router.back()} className="p-1 hover:bg-slate-800 rounded-full transition-colors">
-                            <ChevronLeft className="w-7 h-7 text-white" />
-                        </button>
-                        <div>
-                            <h1 className="text-2xl font-bold text-white tracking-tight whitespace-nowrap">Sales Report</h1>
-                            <p className="text-slate-400 text-xs sm:text-sm">Analyze your sales performance</p>
-                        </div>
-                    </div>
-                </div>
+      <div className="max-w-md mx-auto px-4">
+        {/* Store filter pills */}
+        {!lockedStore && (
+          <div className="flex gap-2 overflow-x-auto py-4 -mx-1 px-1" style={{ scrollbarWidth: 'none' }}>
+            <button
+              onClick={() => setSelectedStore('')}
+              className={`shrink-0 px-3.5 h-9 rounded-full border text-sm transition-colors ${!selectedStore ? 'border-accent text-accent-700 bg-accent/8' : 'border-divider text-text hover:border-text/45'}`}
+            >
+              All stores
+            </button>
+            {costCentres.map(c => (
+              <button
+                key={c.id}
+                onClick={() => setSelectedStore(c.name)}
+                className={`shrink-0 px-3.5 h-9 rounded-full border text-sm whitespace-nowrap transition-colors ${selectedStore === c.name ? 'border-accent text-accent-700 bg-accent/8' : 'border-divider text-text hover:border-text/45'}`}
+              >
+                {c.name}
+              </button>
+            ))}
+          </div>
+        )}
 
-                {/* Filters */}
-                <div className="flex gap-4 mt-6">
-                    <div className="flex-1">
-                        <label className="text-xs font-medium text-slate-500 mb-1.5 block">Store</label>
-                        <div className="relative">
-                            {lockedStore ? (
-                                <div className="w-full bg-[#1e293b] border border-slate-700/50 text-slate-200 text-sm py-3 pl-3 pr-8 rounded-xl truncate">
-                                    {lockedStore}
-                                </div>
-                            ) : (
-                            <select
-                                value={selectedStore}
-                                onChange={e => setSelectedStore(e.target.value)}
-                                className="w-full appearance-none bg-[#1e293b] border border-slate-700/50 text-slate-200 text-sm py-3 pl-3 pr-8 rounded-xl focus:outline-none focus:ring-2 focus:ring-cyan-500/50 truncate"
-                            >
-                                <option value="">Combined (All Stores)</option>
-                                {costCentres.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
-                            </select>
-                            )}
-                            <Store className="w-4 h-4 text-slate-500 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                        </div>
-                    </div>
-                    <div className="flex-1">
-                        <label className="text-xs font-medium text-slate-500 mb-1.5 block">Period</label>
-                        <div className="relative">
-                            <select 
-                                value={preset}
-                                onChange={e => handlePresetChange(e.target.value)}
-                                className="w-full appearance-none bg-[#1e293b] border border-slate-700/50 text-slate-200 text-sm py-3 pl-3 pr-8 rounded-xl focus:outline-none focus:ring-2 focus:ring-cyan-500/50 truncate"
-                            >
-                                {PRESETS.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
-                            </select>
-                            <Calendar className="w-4 h-4 text-slate-500 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                        </div>
-                    </div>
-                </div>
+        {/* Period preset pills */}
+        <div className="flex gap-2 overflow-x-auto pb-4 -mx-1 px-1" style={{ scrollbarWidth: 'none' }}>
+          {PRESETS.map(p => (
+            <button
+              key={p.value}
+              onClick={() => setPreset(p.value)}
+              className={`shrink-0 px-3.5 h-9 rounded-full border text-sm whitespace-nowrap transition-colors ${preset === p.value ? 'border-accent text-accent-700 bg-accent/8' : 'border-divider text-text hover:border-text/45'}`}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
 
-                {preset === "custom" && (
-                    <div className="flex gap-4 mt-4">
-                        <div className="flex-1">
-                            <label className="text-xs font-medium text-slate-500 mb-1.5 block">Start Date</label>
-                            <input 
-                                type="date"
-                                value={formatDateInput(dates.start)}
-                                onChange={e => setDates(prev => ({ ...prev, start: parseDateInput(e.target.value) }))}
-                                className="w-full bg-[#1e293b] border border-slate-700/50 text-slate-200 text-sm py-3 px-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-cyan-500/50"
-                            />
-                        </div>
-                        <div className="flex-1">
-                            <label className="text-xs font-medium text-slate-500 mb-1.5 block">End Date</label>
-                            <input 
-                                type="date"
-                                value={formatDateInput(dates.end)}
-                                onChange={e => setDates(prev => ({ ...prev, end: parseDateInput(e.target.value) }))}
-                                className="w-full bg-[#1e293b] border border-slate-700/50 text-slate-200 text-sm py-3 px-3 rounded-xl focus:outline-none focus:ring-2 focus:ring-cyan-500/50"
-                            />
-                        </div>
-                    </div>
-                )}
+        {preset === "custom" && (
+          <div className="flex gap-3 pb-4">
+            <div className="flex-1">
+              <label className="text-xs text-neutral-600 mb-1 block">Start date</label>
+              <input
+                type="date"
+                value={formatDateInput(customDates?.start || dates.start)}
+                onChange={e => setCustomDates(prev => ({ start: parseDateInput(e.target.value), end: prev?.end || dates.end }))}
+                className="w-full h-10 px-3 rounded-md border border-divider bg-bg text-text text-sm focus:outline-none focus:border-accent"
+              />
+            </div>
+            <div className="flex-1">
+              <label className="text-xs text-neutral-600 mb-1 block">End date</label>
+              <input
+                type="date"
+                value={formatDateInput(customDates?.end || dates.end)}
+                onChange={e => setCustomDates(prev => ({ start: prev?.start || dates.start, end: parseDateInput(e.target.value) }))}
+                className="w-full h-10 px-3 rounded-md border border-divider bg-bg text-text text-sm focus:outline-none focus:border-accent"
+              />
+            </div>
+          </div>
+        )}
+
+        {error && (
+          <div className="flex items-start gap-2 border border-accent rounded-md p-3 mb-4">
+            <AlertTriangle className="w-4 h-4 text-accent-700 shrink-0 mt-0.5" />
+            <p className="text-accent-700 text-xs leading-snug">{error}</p>
+          </div>
+        )}
+
+        {loading ? (
+          <p className="text-sm text-neutral-600 text-center py-16">Loading&hellip;</p>
+        ) : error ? null : (
+          <>
+            {data?.is_data_complete === false && (
+              <div className="flex items-start gap-2 border border-accent rounded-md p-3 mb-4">
+                <AlertTriangle className="w-4 h-4 text-accent-700 shrink-0 mt-0.5" />
+                <p className="text-accent-700 text-xs leading-snug">
+                  Reporting data for this period may be incomplete &mdash; run a Tally sync to make sure everything is up to date.
+                </p>
+              </div>
+            )}
+
+            {(data?.unsynced_sales?.pending_amount || 0) - (data?.summary?.pending_amount || 0) > 0.005 && (
+              <div className="flex items-start gap-2 border border-accent rounded-md p-3 mb-4">
+                <AlertTriangle className="w-4 h-4 text-accent-700 shrink-0 mt-0.5" />
+                <p className="text-accent-700 text-xs leading-snug">
+                  {fmtMoney(data.unsynced_sales.pending_amount - data.summary.pending_amount)} in sales has an uncertain Tally delivery status and is not included below &mdash; verify manually in the{' '}
+                  <button onClick={() => router.push('/queue')} className="underline font-semibold">Queue</button> before it can be counted.
+                </p>
+              </div>
+            )}
+
+            {data?.unsynced_sales?.failed_count > 0 && (
+              <div className="flex items-start gap-2 border border-accent rounded-md p-3 mb-4">
+                <AlertTriangle className="w-4 h-4 text-accent-700 shrink-0 mt-0.5" />
+                <p className="text-accent-700 text-xs leading-snug">
+                  {data.unsynced_sales.failed_count} sales entr{data.unsynced_sales.failed_count === 1 ? 'y' : 'ies'} totaling {fmtMoney(data.unsynced_sales.failed_amount)} failed to sync to Tally and need{data.unsynced_sales.failed_count === 1 ? 's' : ''} attention in the{' '}
+                  <button onClick={() => router.push('/queue')} className="underline font-semibold">Queue</button>.
+                </p>
+              </div>
+            )}
+
+            {/* Summary */}
+            <div className="text-[10.5px] tracking-[0.12em] uppercase text-accent-700">{storeLabel} · {periodLabel}</div>
+            <div className="font-heading text-5xl leading-tight mt-1">{fmtMoney(data?.summary?.net_sales)}</div>
+            <div className="text-sm text-neutral-700 mt-1.5">
+              {data?.summary?.invoice_count || 0} bills &nbsp; Avg bill {fmtMoney(data?.summary?.avg_bill)}
+              {data?.summary?.change_percentage !== null && data?.summary?.change_percentage !== undefined && (
+                <>&nbsp; <ChangeIndicator pct={data.summary.change_percentage} /> vs previous {periodDays === 1 ? 'day' : `${periodDays} days`}</>
+              )}
             </div>
 
-            {error && (
-                <div className="mx-5 mb-4 flex items-start gap-2 bg-rose-950/40 border border-rose-800/50 rounded-xl p-3">
-                    <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
-                    <p className="text-rose-300 text-xs leading-snug">{error}</p>
+            <div className="border-t border-divider my-5" />
+
+            {/* Sales trend */}
+            <div className="flex justify-between items-start mb-1">
+              <div>
+                <h3 className="font-heading font-semibold text-xl">Sales trend</h3>
+                <p className="text-sm text-neutral-600">Daily &middot; {periodDays} day{periodDays === 1 ? '' : 's'}</p>
+              </div>
+              {currentHighlight && (
+                <div className="text-right">
+                  <div className="text-sm text-neutral-700">{formatDateWeekday(currentHighlight.date)}</div>
+                  <div className="font-heading font-semibold text-xl">{fmtMoney(currentHighlight.Combined)}</div>
                 </div>
+              )}
+            </div>
+
+            {trend.length > 0 && (
+              <div className="mt-4">
+                <div className="text-xs text-neutral-600 mb-1">avg {fmtMoney(avgPerDay)}</div>
+                <div className="relative h-40 flex items-end gap-1.5 border-b border-divider">
+                  <div
+                    className="absolute left-0 right-0 border-t border-dashed border-neutral-500"
+                    style={{ bottom: `${Math.min(100, (avgPerDay / maxBar) * 100)}%` }}
+                  />
+                  {trend.map(day => {
+                    const hasSales = day.Combined > 0;
+                    const isActive = hasSales && day.date === (currentHighlight?.date);
+                    return (
+                      <button
+                        key={day.date}
+                        onClick={() => hasSales && setHighlightedDate(day.date)}
+                        disabled={!hasSales}
+                        className={`flex-1 min-w-[6px] h-full flex flex-col-reverse rounded-t-sm overflow-hidden transition-opacity ${hasSales ? (isActive ? '' : 'opacity-55 hover:opacity-80') : 'cursor-default opacity-55'}`}
+                        title={`${formatDateShort(day.date)}: ${fmtMoney(day.Combined)}`}
+                      >
+                        {storeNames.map((name, i) => {
+                          const val = day[name] || 0;
+                          const pct = maxBar > 0 ? (val / maxBar) * 100 : 0;
+                          return pct > 0 ? (
+                            <div key={name} className={STORE_SWATCHES[i % STORE_SWATCHES.length]} style={{ height: `${pct}%` }} />
+                          ) : null;
+                        })}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="flex justify-between text-xs text-neutral-600 mt-2">
+                  <span>{formatDateShort(trend[0].date)}</span>
+                  {trend.length > 2 && <span>{formatDateShort(trend[Math.floor(trend.length / 2)].date)}</span>}
+                  <span>{formatDateShort(trend[trend.length - 1].date)}</span>
+                </div>
+                {storeNames.length > 0 && (
+                  <div className="flex flex-wrap gap-x-4 gap-y-1.5 mt-4">
+                    {storeNames.map((name, i) => (
+                      <div key={name} className="flex items-center gap-1.5 text-sm text-neutral-700">
+                        <span className={`w-2.5 h-2.5 rounded-sm shrink-0 ${STORE_SWATCHES[i % STORE_SWATCHES.length]}`} />
+                        {name}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             )}
 
-            {loading ? (
-                <div className="flex justify-center items-center h-64">
-                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-cyan-400"></div>
+            <div className="border-t border-divider my-5" />
+
+            {/* By store */}
+            {storeComparison.length > 0 && !selectedStore && (
+              <>
+                <h3 className="font-heading font-semibold text-xl mb-4">By store</h3>
+                <div className="flex flex-col gap-5">
+                  {storeComparison.map((store) => {
+                    const pct = totalForStores > 0 ? (store.net_sales / totalForStores) * 100 : 0;
+                    const swatch = STORE_SWATCHES[storeColorIndex(store.store_name)];
+                    return (
+                      <div key={store.store_name}>
+                        <div className="flex items-center gap-2 mb-1.5">
+                          <span className={`w-2.5 h-2.5 rounded-sm shrink-0 ${swatch}`} />
+                          <span className="text-[15px]">{store.store_name}</span>
+                          <span className="flex-1" />
+                          <ChangeIndicator pct={store.change_percentage} />
+                          <span className="font-heading font-semibold text-lg w-24 text-right">{fmtMoney(store.net_sales)}</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <div className="flex-1 h-1.5 rounded-full bg-divider overflow-hidden">
+                            <div className={`h-full rounded-full ${swatch}`} style={{ width: `${pct}%` }} />
+                          </div>
+                          <span className="text-xs text-neutral-600 w-9 text-right">{pct.toFixed(0)}%</span>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
-            ) : error ? null : (
-                <div className="px-5 space-y-5">
-
-                    {/* Data-completeness warning -- the periodic Tally sync itself hasn't
-                        fully covered this date range yet, so the figures below may be
-                        missing vouchers Tally already has (distinct from unsynced_sales
-                        below, which is about entries still stuck in THIS app's own queue). */}
-                    {data?.is_data_complete === false && (
-                        <div className="flex items-start gap-2 bg-amber-950/40 border border-amber-800/50 rounded-xl p-3">
-                            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                            <p className="text-amber-300 text-xs leading-snug">
-                                Reporting data for this period may be incomplete -- run a Tally sync to make sure everything is up to date.
-                            </p>
-                        </div>
-                    )}
-
-                    {/* Unsynced sales warning. Plain pending entries are now folded into
-                        the figures below (see the "confirmed + pending" breakdown under
-                        Total Sales), so this only calls out the two cases that are NOT
-                        reflected anywhere above: delivery-uncertain entries (safety
-                        excluded -- see get_pending_sales_trend's docstring) and entries
-                        Tally has actively rejected. */}
-                    {(data?.unsynced_sales?.pending_amount || 0) - (data?.summary?.pending_amount || 0) > 0.005 && (
-                        <div className="flex items-start gap-2 bg-amber-950/40 border border-amber-800/50 rounded-xl p-3">
-                            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                            <p className="text-amber-300 text-xs leading-snug">
-                                {formatCurrency(data.unsynced_sales.pending_amount - data.summary.pending_amount)} in sales has an uncertain Tally delivery status and is not included above -- verify manually in the{' '}
-                                <button onClick={() => router.push('/queue')} className="underline font-semibold hover:text-amber-200">Queue</button> before it can be counted.
-                            </p>
-                        </div>
-                    )}
-
-                    {data?.unsynced_sales?.failed_count > 0 && (
-                        <div className="flex items-start gap-2 bg-rose-950/40 border border-rose-800/50 rounded-xl p-3">
-                            <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
-                            <p className="text-rose-300 text-xs leading-snug">
-                                {data.unsynced_sales.failed_count} sales entr{data.unsynced_sales.failed_count === 1 ? 'y' : 'ies'} totaling {formatCurrency(data.unsynced_sales.failed_amount)} failed to sync to Tally and need{data.unsynced_sales.failed_count === 1 ? 's' : ''} attention in the{' '}
-                                <button onClick={() => router.push('/queue')} className="underline font-semibold hover:text-rose-200">Queue</button>.
-                            </p>
-                        </div>
-                    )}
-
-                    {/* Total Sales Card */}
-                    <div className="bg-slate-800/50 border border-slate-700/50 rounded-2xl p-5 relative overflow-hidden backdrop-blur-sm">
-                        {/* Faint background decorative chart */}
-                        <div className="absolute -right-6 -bottom-6 opacity-[0.07] pointer-events-none">
-                            <svg width="200" height="150" viewBox="0 0 200 150">
-                                <path d="M0 150 L30 100 L70 120 L130 40 L170 60 L200 0" fill="none" stroke="white" strokeWidth="20" strokeLinecap="round" strokeLinejoin="round"/>
-                            </svg>
-                        </div>
-                        
-                        <div className="flex items-start gap-4 relative z-10">
-                            <div className="w-12 h-12 bg-cyan-950/50 rounded-xl flex items-center justify-center shrink-0 border border-cyan-900/50">
-                                <TrendingUp className="w-6 h-6 text-cyan-400" />
-                            </div>
-                            <div>
-                                <p className="text-slate-400 text-sm font-medium mb-1">Total Sales</p>
-                                <h2 className="text-4xl font-bold text-white tracking-tight mb-1">
-                                    {formatCurrency(data?.summary?.net_sales)}
-                                </h2>
-
-                                {data?.summary?.pending_amount > 0 && (
-                                    <p className="text-amber-400/90 text-xs mb-2">
-                                        {formatCurrency(data.summary.net_sales_confirmed)} confirmed + {formatCurrency(data.summary.pending_amount)} pending Tally confirmation
-                                    </p>
-                                )}
-
-                                {data?.summary?.change_percentage !== null && data?.summary?.change_percentage !== undefined && (
-                                    <div className="flex items-center gap-2">
-                                        <div className={`flex items-center gap-1 text-sm font-semibold ${data.summary.change_percentage >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                                            {data.summary.change_percentage >= 0 ? <ArrowUpRight className="w-4 h-4" /> : <ArrowDownRight className="w-4 h-4" />}
-                                            {Math.abs(data.summary.change_percentage).toFixed(1)}%
-                                        </div>
-                                        <p className="text-slate-500 text-xs">
-                                            vs. last period ({formatCurrency(data?.summary?.previous_net_sales)})
-                                        </p>
-                                    </div>
-                                )}
-                                {(data?.summary?.change_percentage === null || data?.summary?.change_percentage === undefined) && data?.previous_period?.is_data_complete === false && (
-                                    <p className="text-slate-500 text-xs italic">
-                                        vs. last period unavailable -- that period's Tally sync is incomplete
-                                    </p>
-                                )}
-                            </div>
-                        </div>
-                    </div>
-
-                    {/* Sales Trend Chart */}
-                    <div className="bg-slate-800/50 border border-slate-700/50 rounded-2xl p-5 backdrop-blur-sm">
-                        <div className="flex justify-between items-center mb-6">
-                            <div className="flex items-center gap-2">
-                                <div className="w-8 h-8 bg-blue-900/30 rounded-lg flex items-center justify-center">
-                                    <TrendingUp className="w-4 h-4 text-blue-400" />
-                                </div>
-                                <h3 className="text-base font-bold text-white">Sales Trend</h3>
-                            </div>
-                        </div>
-                        
-                        <div className="h-48 w-full -ml-4">
-                            <ResponsiveContainer width="100%" height="100%">
-                                <AreaChart data={trendData}>
-                                    <defs>
-                                        <linearGradient id="colorSales" x1="0" y1="0" x2="0" y2="1">
-                                            <stop offset="5%" stopColor="#06b6d4" stopOpacity={0.3}/>
-                                            <stop offset="95%" stopColor="#06b6d4" stopOpacity={0}/>
-                                        </linearGradient>
-                                    </defs>
-                                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#334155" opacity={0.5} />
-                                    <XAxis 
-                                        dataKey="date" 
-                                        tickFormatter={formatDateShort} 
-                                        axisLine={false} 
-                                        tickLine={false} 
-                                        tick={{fill: '#64748b', fontSize: 10}}
-                                        minTickGap={20}
-                                        dy={10}
-                                    />
-                                    <YAxis 
-                                        tickFormatter={formatShortCurrency}
-                                        axisLine={false}
-                                        tickLine={false}
-                                        tick={{fill: '#64748b', fontSize: 10}}
-                                        dx={-10}
-                                    />
-                                    <Tooltip content={<CustomTooltip />} />
-                                    <Area 
-                                        type="monotone" 
-                                        dataKey="Combined" 
-                                        stroke="#06b6d4" 
-                                        strokeWidth={3}
-                                        fillOpacity={1} 
-                                        fill="url(#colorSales)" 
-                                        activeDot={{ r: 6, fill: '#fff', stroke: '#06b6d4', strokeWidth: 3 }}
-                                    />
-                                </AreaChart>
-                            </ResponsiveContainer>
-                        </div>
-                    </div>
-
-                    {/* Store-wise Sales */}
-                    {storeComparison.length > 0 && !selectedStore && (
-                        <div className="bg-slate-800/50 border border-slate-700/50 rounded-2xl p-5 backdrop-blur-sm">
-                            <div className="flex justify-between items-center mb-6">
-                                <div className="flex items-center gap-2">
-                                    <div className="w-8 h-8 bg-indigo-900/30 rounded-lg flex items-center justify-center">
-                                        <Store className="w-4 h-4 text-indigo-400" />
-                                    </div>
-                                    <h3 className="text-base font-bold text-white">Store-wise Sales</h3>
-                                </div>
-                            </div>
-                            
-                            <div className="space-y-5">
-                                {storeComparison.map((store, idx) => {
-                                    const percentage = totalSalesFromStores > 0 ? (store.net_sales / totalSalesFromStores) * 100 : 0;
-                                    const color = storeColors[idx % storeColors.length];
-                                    
-                                    return (
-                                        <div key={store.store_name} className="flex flex-col gap-2">
-                                            <div className="flex justify-between items-end">
-                                                <span className="text-sm font-medium text-slate-300">{store.store_name}</span>
-                                                <div className="flex items-center gap-3">
-                                                    <span className="text-sm font-bold text-white">{formatCurrency(store.net_sales)}</span>
-                                                    <span className="text-xs text-slate-500 w-8 text-right">{percentage.toFixed(0)}%</span>
-                                                </div>
-                                            </div>
-                                            <div className="h-2 w-full bg-slate-700/50 rounded-full overflow-hidden">
-                                                <div className={`h-full ${color} rounded-full`} style={{ width: `${percentage}%` }}></div>
-                                            </div>
-                                        </div>
-                                    )
-                                })}
-                            </div>
-                        </div>
-                    )}
-
-                    {/* Highest / Lowest Cards */}
-                    <div className="grid grid-cols-2 gap-4">
-                        <div className="bg-slate-800/50 border border-slate-700/50 rounded-2xl p-4 backdrop-blur-sm flex flex-col items-start gap-2">
-                            <div className="w-8 h-8 bg-emerald-900/30 rounded-lg flex items-center justify-center shrink-0">
-                                <TrendingUp className="w-4 h-4 text-emerald-400" />
-                            </div>
-                            <div>
-                                <p className="text-[10px] font-medium text-slate-500 uppercase tracking-wider mb-0.5">Highest Day</p>
-                                <p className="text-[11px] font-semibold text-slate-300 mb-0.5">{highestDay ? formatDateFull(highestDay.date) : '-'}</p>
-                                <p className="text-sm font-bold text-white">{formatCurrency(highestDay?.Combined)}</p>
-                            </div>
-                        </div>
-                        <div className="bg-slate-800/50 border border-slate-700/50 rounded-2xl p-4 backdrop-blur-sm flex flex-col items-start gap-2">
-                            <div className="w-8 h-8 bg-rose-900/30 rounded-lg flex items-center justify-center shrink-0">
-                                <TrendingDown className="w-4 h-4 text-rose-400" />
-                            </div>
-                            <div>
-                                <p className="text-[10px] font-medium text-slate-500 uppercase tracking-wider mb-0.5">Lowest Day</p>
-                                <p className="text-[11px] font-semibold text-slate-300 mb-0.5">{lowestDay ? formatDateFull(lowestDay.date) : '-'}</p>
-                                <p className="text-sm font-bold text-white">{formatCurrency(lowestDay?.Combined)}</p>
-                            </div>
-                        </div>
-                    </div>
-
-                    {/* Day-by-Day Sales List */}
-                    <div className="bg-slate-800/50 border border-slate-700/50 rounded-2xl p-5 backdrop-blur-sm">
-                        <div className="flex justify-between items-center mb-5">
-                            <div className="flex items-center gap-2">
-                                <div className="w-8 h-8 bg-slate-700/50 rounded-lg flex items-center justify-center">
-                                    <Calendar className="w-4 h-4 text-slate-300" />
-                                </div>
-                                <h3 className="text-base font-bold text-white">Day-by-Day Sales</h3>
-                            </div>
-                        </div>
-                        {data?.summary?.pending_amount > 0 && (
-                            <p className="text-slate-500 text-[11px] italic mb-3 -mt-2">Includes entries still pending Tally confirmation.</p>
-                        )}
-
-                        <div className="overflow-x-auto">
-                            <table className="w-full text-sm text-left">
-                                <thead className="text-[10px] text-slate-500 uppercase tracking-wider border-b border-slate-700/50">
-                                    <tr>
-                                        <th className="pb-3 font-medium">Date</th>
-                                        <th className="pb-3 font-medium text-center">Invoices</th>
-                                        <th className="pb-3 font-medium hidden sm:table-cell">Top Store</th>
-                                        <th className="pb-3 font-medium text-right">Amount</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {dayByDay.length > 0 ? dayByDay.map((day, idx) => (
-                                        <tr key={idx} className="border-b border-slate-700/50 last:border-0 hover:bg-slate-700/20 transition-colors">
-                                            <td className="py-4 text-slate-300 whitespace-nowrap">
-                                                {formatDateFull(day.date)}
-                                            </td>
-                                            <td className="py-4 text-slate-400 text-center">
-                                                {day.invoices}
-                                            </td>
-                                            <td className="py-4 text-slate-400 hidden sm:table-cell">
-                                                {day.topStore}
-                                            </td>
-                                            <td className="py-4 font-semibold text-white text-right">
-                                                {formatCurrency(day.amount)}
-                                            </td>
-                                        </tr>
-                                    )) : (
-                                        <tr>
-                                            <td colSpan="4" className="py-8 text-center text-slate-500">
-                                                No sales recorded for this period.
-                                            </td>
-                                        </tr>
-                                    )}
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
-                </div>
+                <div className="border-t border-divider my-5" />
+              </>
             )}
-        </div>
-    );
+
+            {/* Day-wise sales */}
+            <div className="flex justify-between items-baseline mb-4">
+              <h3 className="font-heading font-semibold text-xl">Day-wise sales</h3>
+              <span className="text-sm text-neutral-700">Total {fmtMoney(totalForMode)}</span>
+            </div>
+
+            <div className="grid grid-cols-4 border border-divider rounded-md overflow-hidden mb-4">
+              {MODE_FILTERS.map(m => (
+                <button
+                  key={m.value}
+                  onClick={() => setModeFilter(m.value)}
+                  className={`h-9 text-[13px] transition-colors ${modeFilter === m.value ? 'border border-accent text-accent-700 bg-accent/8 -m-px' : 'hover:bg-text/5'}`}
+                >
+                  {m.label}
+                </button>
+              ))}
+            </div>
+
+            {dayRows.length === 0 ? (
+              <p className="text-sm text-neutral-600 text-center py-8">No sales recorded for this period.</p>
+            ) : dayRows.map(day => {
+              const amount = modeAmount(day, modeFilter);
+              const pct = maxModeAmount > 0 ? (amount / maxModeAmount) * 100 : 0;
+              const isOpen = expandedDay === day.date;
+              return (
+                <div key={day.date} className="border-b border-divider last:border-0">
+                  <button
+                    onClick={() => setExpandedDay(isOpen ? null : day.date)}
+                    className="w-full flex items-center gap-3 py-3.5 text-left"
+                  >
+                    <div className="w-24 shrink-0">
+                      <div className="text-[15px]">{dayOfWeekLabel(day.date)}</div>
+                      <div className="text-sm text-neutral-600">{day.Combined_invoices || 0} bill{day.Combined_invoices === 1 ? '' : 's'}</div>
+                    </div>
+                    <div className="flex-1 h-1.5 rounded-full bg-divider overflow-hidden">
+                      <div className="h-full rounded-full bg-accent-600" style={{ width: `${pct}%` }} />
+                    </div>
+                    <span className="font-heading font-semibold text-lg shrink-0">{fmtMoney(amount)}</span>
+                    {isOpen ? <ChevronDown className="w-4 h-4 text-neutral-500 shrink-0" /> : <ChevronRight className="w-4 h-4 text-neutral-500 shrink-0" />}
+                  </button>
+
+                  {isOpen && (
+                    <div className="pb-4 pl-8 flex flex-col gap-1">
+                      {['cash', 'upi', 'credit'].map(mode => (
+                        (day[mode] || 0) > 0 && (
+                          <div key={mode} className="flex justify-between text-sm py-1">
+                            <span className="text-neutral-700 capitalize">{mode}</span>
+                            <span className="text-text">{fmtMoney(day[mode])}</span>
+                          </div>
+                        )
+                      ))}
+                      {storeNames.length > 1 && (
+                        <div className="border-t border-divider mt-2 pt-2 flex flex-col gap-1">
+                          {storeNames.map(name => (
+                            (day[name] || 0) > 0 && (
+                              <div key={name} className="flex justify-between text-sm py-1">
+                                <span className="text-neutral-700">{name}</span>
+                                <span className="text-text">{fmtMoney(day[name])}</span>
+                              </div>
+                            )
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </>
+        )}
+      </div>
+    </div>
+  );
 }

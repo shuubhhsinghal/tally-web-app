@@ -52,6 +52,11 @@ async def get_latest_purchase_rate(exact_item_name: str) -> float:
 
 @router.post("/preview")
 async def preview_transfer(payload: PreviewRequest):
+    if payload.qty <= 0:
+        raise HTTPException(status_code=400, detail="Quantity must be greater than zero.")
+    if payload.from_store.strip().lower() == payload.to_store.strip().lower():
+        raise HTTPException(status_code=400, detail="From and To stores must be different.")
+
     fetched_rate = await get_latest_purchase_rate(payload.item_name)
     
     if fetched_rate <= 0:
@@ -118,6 +123,11 @@ async def post_transfer(payload: PostRequest, request: Request):
     from xml.sax.saxutils import escape
     from backend.services.tally_godown_stock import get_godown_stock, is_tally_reachable
     import uuid
+
+    if payload.qty <= 0:
+        raise HTTPException(status_code=400, detail="Quantity must be greater than zero.")
+    if payload.from_store.strip().lower() == payload.to_store.strip().lower():
+        raise HTTPException(status_code=400, detail="From and To stores must be different.")
 
     current_user = request.state.user
     enforce_store_access_either(current_user, payload.from_store, payload.to_store, "move stock for")

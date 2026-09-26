@@ -3,7 +3,7 @@ import numpy as np
 import pytesseract
 import re
 
-from backend.services.extraction_v3.image_preprocessor import warp_ordered_quad
+from backend.services.image_processing.image_preprocessor import warp_ordered_quad
 
 # ==========================================
 # EXPERIMENTAL PARAMETERS

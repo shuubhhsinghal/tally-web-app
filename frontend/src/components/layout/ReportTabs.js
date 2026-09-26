@@ -19,18 +19,19 @@ export default function ReportTabs() {
   ];
 
   return (
-    <div className="w-full bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800 sticky top-14 z-20 overflow-x-auto hide-scrollbar">
-      <div className="flex px-4 max-w-7xl mx-auto space-x-1 min-w-max">
+    <div className="w-full px-4 pt-4">
+      <div
+        className="grid border border-divider rounded-md overflow-hidden max-w-md mx-auto"
+        style={{ gridTemplateColumns: `repeat(${tabs.length}, minmax(0, 1fr))` }}
+      >
         {tabs.map((tab) => {
           const isActive = pathname === tab.href || pathname.startsWith(`${tab.href}/`);
           return (
             <Link
               key={tab.name}
               href={tab.href}
-              className={`px-4 py-3 text-sm font-medium whitespace-nowrap transition-colors border-b-2 ${
-                isActive
-                  ? 'border-blue-600 text-blue-600 dark:border-blue-500 dark:text-blue-400'
-                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300'
+              className={`h-11 flex items-center justify-center text-[13px] whitespace-nowrap transition-colors ${
+                isActive ? 'border border-accent text-accent-700 bg-accent/8 -m-px' : 'hover:bg-text/5'
               }`}
             >
               {tab.name}

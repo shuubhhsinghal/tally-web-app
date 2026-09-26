@@ -2,22 +2,15 @@
 
 import React, { useState, useEffect } from 'react';
 import TopBar from '@/components/layout/TopBar';
-import { Card } from '@/components/ui/Card';
 import { EmptyState } from '@/components/ui/EmptyState';
-import { Database, TrendingUp, Clock, AlertCircle, Settings as SettingsIcon } from 'lucide-react';
+import { ShoppingCart, ShoppingBag, CreditCard, ArrowRightLeft } from 'lucide-react';
 import Link from 'next/link';
-import { useUI } from '@/context/UIContext';
 import { ActivityRow } from '@/components/activity/ActivityRow';
-import { TransactionDetailView } from '@/components/activity/TransactionDetailView';
-
-const formatRupees = (amount) => `₹${Math.round(amount || 0).toLocaleString('en-IN')}`;
 
 export default function Dashboard() {
-  const { showToast } = useUI();
   const [stats, setStats] = useState({ queue_count: 0, cache_count: 0, failed_count: 0, today_sales: 0, today_sales_pending_count: 0, tally_online: false });
   const [activities, setActivities] = useState([]);
   const [mounted, setMounted] = useState(false);
-  const [selectedItemId, setSelectedItemId] = useState(null);
 
   const fetchStats = async () => {
     try {
@@ -57,115 +50,91 @@ export default function Dashboard() {
 
     // Then refresh from backend in background
     fetchStats();
-    const interval = setInterval(() => {
-      if (!selectedItemId) fetchStats();
-    }, 5000);
+    const interval = setInterval(fetchStats, 5000);
     return () => clearInterval(interval);
-  }, [selectedItemId]);
-
-  const handleClearFinished = async () => {
-    try {
-      const res = await fetch('/api/dashboard/activity/clear', { method: 'POST' });
-      if (!res.ok) throw new Error("Clear failed");
-      showToast("Cleared finished activities");
-      fetchStats();
-    } catch (err) {
-      console.error(err);
-      showToast("Failed to clear", "error");
-    }
-  };
+  }, []);
 
   if (!mounted) return null;
 
-  if (selectedItemId) {
-    return (
-      <TransactionDetailView
-        itemId={selectedItemId}
-        onBack={() => setSelectedItemId(null)}
-        onMutated={fetchStats}
-      />
-    );
-  }
+  const todayKicker = new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long' }).toUpperCase();
 
   return (
-    <div className="min-h-screen bg-gray-50 dark:bg-gray-900 pb-20">
-      <TopBar title="Mom's Pride" />
+    <div className="min-h-screen bg-bg pb-20">
+      <TopBar title="Mom's Pride" kicker={todayKicker} />
 
-      <div className="max-w-md mx-auto p-4 space-y-6 mt-4">
+      <div className="max-w-md mx-auto px-5 pt-7 space-y-7">
 
         {/* Hero: Today's Sales -- the number a shop owner actually cares
-            about, leading the page instead of internal sync counts. */}
-        <Card className="bg-gradient-to-br from-teal-600 to-teal-700 dark:from-teal-700 dark:to-teal-900 border-0 px-6 py-5">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-xs font-bold uppercase tracking-wider text-teal-100">Today&apos;s Sales</p>
-              <p className="text-4xl font-black text-white mt-1">{formatRupees(stats.today_sales)}</p>
-              {stats.today_sales_pending_count > 0 && (
-                <p className="text-xs font-medium text-teal-100 mt-1.5">
-                  {stats.today_sales_pending_count} sale{stats.today_sales_pending_count === 1 ? '' : 's'} still syncing to Tally
-                </p>
-              )}
-            </div>
-            <div className="w-12 h-12 rounded-full bg-white/15 flex items-center justify-center shrink-0">
-              <TrendingUp className="w-6 h-6 text-white" />
-            </div>
+            about, as a plain typographic figure matching the design
+            system's Home screen (no card, no gradient). */}
+        <div>
+          <p className="text-[10.5px] tracking-[0.12em] uppercase text-accent-700">Today&apos;s sales</p>
+          <div className="font-heading flex items-baseline gap-1 mt-1.5 [font-feature-settings:'tnum']">
+            <span className="text-3xl text-neutral-600">₹</span>
+            <span className="text-6xl leading-none tracking-tight">{Math.round(stats.today_sales || 0).toLocaleString('en-IN')}</span>
           </div>
-        </Card>
+          {stats.today_sales_pending_count > 0 && (
+            <p className="text-[13px] text-neutral-700 mt-2">
+              <span className="text-accent-700">{stats.today_sales_pending_count} sale{stats.today_sales_pending_count === 1 ? '' : 's'}</span> still syncing to Tally
+            </p>
+          )}
+        </div>
 
-        {/* Queue health -- quiet by default, only draws the eye when
-            something actually needs attention. */}
-        <div className="flex gap-3">
-          <Link href="/queue?status=PENDING" className="flex-1">
-            <div className="flex items-center gap-2.5 px-4 py-3 rounded-xl bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 hover:ring-2 hover:ring-teal-500/50 transition-all">
-              <Clock className="w-4 h-4 text-gray-400 shrink-0" />
-              <div className="min-w-0">
-                <p className="text-base font-bold text-gray-900 dark:text-gray-100 leading-none">{stats.queue_count}</p>
-                <p className="text-[10px] font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mt-1">Waiting</p>
-              </div>
-            </div>
+        {/* Queue health -- a quiet divided strip, only drawing the eye
+            (via the accent color) when something needs attention. Uses the
+            three real figures the dashboard stats endpoint has -- "Stock"
+            in place of the mockup's "To collect" (receivables), since
+            there's no accounts-receivable summary wired up yet. */}
+        <div className="grid grid-cols-3 border-t border-b border-divider">
+          <Link href="/queue?status=PENDING" className="py-3.5 pr-3 flex flex-col gap-0.5 hover:bg-text/4 transition-colors">
+            <span className="text-[10px] tracking-[0.1em] uppercase text-neutral-700">Sync queue</span>
+            <span className="font-heading text-2xl leading-tight [font-feature-settings:'tnum']">{stats.queue_count}</span>
+            <span className="text-[11.5px] text-neutral-700">waiting to sync</span>
           </Link>
-          <Link href="/queue?status=FAILED" className="flex-1">
-            <div className={`flex items-center gap-2.5 px-4 py-3 rounded-xl border transition-all hover:ring-2 ${stats.failed_count > 0
-              ? 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800 hover:ring-red-500/50'
-              : 'bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700 hover:ring-teal-500/50'
-              }`}>
-              <AlertCircle className={`w-4 h-4 shrink-0 ${stats.failed_count > 0 ? 'text-red-500' : 'text-gray-400'}`} />
-              <div className="min-w-0">
-                <p className={`text-base font-bold leading-none ${stats.failed_count > 0 ? 'text-red-600 dark:text-red-400' : 'text-gray-900 dark:text-gray-100'}`}>
-                  {stats.failed_count}
-                </p>
-                <p className="text-[10px] font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mt-1">Failed</p>
-              </div>
-            </div>
+          <Link href="/masters" className="py-3.5 px-3 border-l border-divider flex flex-col gap-0.5 hover:bg-text/4 transition-colors">
+            <span className="text-[10px] tracking-[0.1em] uppercase text-neutral-700">Stock</span>
+            <span className="font-heading text-2xl leading-tight [font-feature-settings:'tnum']">{stats.cache_count}</span>
+            <span className="text-[11.5px] text-neutral-700">items</span>
+          </Link>
+          <Link href="/queue?status=FAILED" className="py-3.5 pl-3 border-l border-divider flex flex-col gap-0.5 hover:bg-text/4 transition-colors">
+            <span className="text-[10px] tracking-[0.1em] uppercase text-neutral-700">Failed</span>
+            <span className={`font-heading text-2xl leading-tight [font-feature-settings:'tnum'] ${stats.failed_count > 0 ? 'text-accent-700' : ''}`}>
+              {stats.failed_count}
+            </span>
+            <span className="text-[11.5px] text-neutral-700">need attention</span>
           </Link>
         </div>
 
-        {/* Quick Links */}
-        <div className="flex gap-3">
-          <Link href="/masters" className="flex-1">
-            <Card className="flex items-center justify-center gap-2 py-3 hover:ring-2 hover:ring-teal-500/50 transition-all cursor-pointer bg-white dark:bg-gray-800">
-              <Database className="w-4 h-4 text-teal-600" />
-              <span className="text-sm font-bold text-gray-900 dark:text-gray-100">Masters Overview</span>
-            </Card>
-          </Link>
-          <Link href="/settings" className="flex-1">
-            <Card className="flex items-center justify-center gap-2 py-3 hover:ring-2 hover:ring-teal-500/50 transition-all cursor-pointer bg-white dark:bg-gray-800">
-              <SettingsIcon className="w-4 h-4 text-teal-600" />
-              <span className="text-sm font-bold text-gray-900 dark:text-gray-100">Settings</span>
-            </Card>
-          </Link>
+        {/* Record quickly -- "Receipt" from the mockup has no dedicated
+            route in this app (folded into other flows), so this uses
+            Transfer as the fourth real destination instead. */}
+        <div>
+          <p className="text-[10.5px] tracking-[0.12em] uppercase text-neutral-700 mb-2.5">Record quickly</p>
+          <div className="grid grid-cols-4 gap-2">
+            {[
+              { href: '/sales', label: 'Sale', Icon: ShoppingCart },
+              { href: '/purchase', label: 'Purchase', Icon: ShoppingBag },
+              { href: '/payment', label: 'Payment', Icon: CreditCard },
+              { href: '/transfer', label: 'Transfer', Icon: ArrowRightLeft },
+            ].map(({ href, label, Icon }) => (
+              <Link
+                key={href}
+                href={href}
+                className="h-[72px] flex flex-col items-center justify-center gap-1.5 border border-divider rounded-md text-[12.5px] hover:border-accent hover:text-accent-700 transition-colors"
+              >
+                <Icon className="w-4 h-4" />
+                <span>{label}</span>
+              </Link>
+            ))}
+          </div>
         </div>
 
-        {/* Recent Activity */}
-        <div className="space-y-3">
-          <div className="flex justify-between items-center px-1">
-            <h2 className="text-sm font-bold text-gray-900 dark:text-white uppercase tracking-wider">Recent Activity</h2>
-            <button
-              onClick={handleClearFinished}
-              className="text-[10px] font-bold uppercase tracking-wider text-teal-600 dark:text-teal-400 hover:text-teal-700 hover:underline"
-            >
-              Clear Finished
-            </button>
+        {/* Today -- Masters/Settings moved into the header's account sheet,
+            matching the design (they're no longer duplicated here). */}
+        <div>
+          <div className="flex justify-between items-baseline mb-2.5">
+            <h2 className="font-heading font-semibold text-xl">Today</h2>
+            <Link href="/reporting/sales" className="text-[13px] text-accent-700 hover:underline">All reports</Link>
           </div>
 
           {activities.length === 0 ? (
@@ -173,11 +142,7 @@ export default function Dashboard() {
           ) : (
             <div className="flex flex-col gap-3">
               {activities.map((activity) => (
-                <ActivityRow
-                  key={activity.id}
-                  activity={activity}
-                  onClick={() => setSelectedItemId(activity.id)}
-                />
+                <ActivityRow key={activity.id} activity={activity} />
               ))}
             </div>
           )}

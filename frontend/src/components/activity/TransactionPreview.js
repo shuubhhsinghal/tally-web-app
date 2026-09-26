@@ -1,16 +1,30 @@
 'use client';
 
-import { Card } from '@/components/ui/Card';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { MoveRight } from 'lucide-react';
 
+function fmtMoney2(v) {
+  const n = Number(v || 0);
+  return `₹${n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function Row({ label, value }) {
+  if (value === undefined || value === null || value === '') return null;
+  return (
+    <div className="flex justify-between items-baseline gap-3 py-2.5 border-t border-divider first:border-t-0">
+      <span className="text-[13px] text-neutral-700 shrink-0">{label}</span>
+      <span className="text-[15px] text-right truncate">{value}</span>
+    </div>
+  );
+}
+
 export const TransactionPreview = ({ operation, payloadStr }) => {
-  if (!payloadStr) return <EmptyState title="No Payload" message="There is no data to preview." />;
+  if (!payloadStr) return <EmptyState title="No payload" message="There is no data to preview." />;
   let data;
   try {
     data = JSON.parse(payloadStr);
   } catch (e) {
-    return <EmptyState title="Invalid Data" message="The payload is not valid JSON." />;
+    return <EmptyState title="Invalid data" message="The payload is not valid JSON." />;
   }
 
   if (operation.includes('VOUCHER')) {
@@ -19,120 +33,115 @@ export const TransactionPreview = ({ operation, payloadStr }) => {
       const subtotal = data.items.reduce((sum, item) => sum + (item.amount || 0), 0);
       const total = subtotal + (data.cgst || 0) + (data.sgst || 0) + (data.igst || 0) + (data.rounding_off || 0);
       return (
-        <div className="space-y-4">
-          <Card className="flex flex-col gap-3">
-            <div className="flex justify-between items-start border-b border-gray-100 dark:border-gray-800 pb-3">
-              <div>
-                <p className="text-xs font-bold text-gray-400 uppercase">Supplier</p>
-                <p className="text-sm font-bold text-gray-900 dark:text-white">{data.supplier || data.name}</p>
-              </div>
-              <div className="text-right">
-                <p className="text-xs font-bold text-gray-400 uppercase">Date</p>
-                <p className="text-sm font-medium text-gray-900 dark:text-gray-300">{data.date || data.tally_date}</p>
-              </div>
-            </div>
-            <div className="flex justify-between items-start">
-              <div>
-                <p className="text-xs font-bold text-gray-400 uppercase">Inv No</p>
-                <p className="text-sm font-medium text-gray-900 dark:text-gray-300">{data.invoice_number}</p>
-              </div>
-              <div className="text-right">
-                <p className="text-xs font-bold text-gray-400 uppercase">Cost Center</p>
-                <p className="text-sm font-medium text-gray-900 dark:text-gray-300">{data.cost_center}</p>
-              </div>
-            </div>
-          </Card>
+        <div className="flex flex-col">
+          <Row label="Invoice no." value={data.invoice_number} />
+          <Row label="Store" value={data.cost_center} />
 
-          <h3 className="text-xs font-bold text-gray-500 uppercase px-1">{data.items.length} Line Items</h3>
-          <div className="space-y-2">
+          <p className="text-[10.5px] tracking-[0.1em] uppercase text-neutral-600 mt-3 mb-1">
+            {data.items.length} item{data.items.length === 1 ? '' : 's'}
+          </p>
+          <div className="border-t border-divider">
             {data.items.map((item, idx) => (
-              <Card key={idx} className="p-3">
-                <div className="flex justify-between items-start">
-                  <p className="text-sm font-bold text-gray-900 dark:text-white">{item.mapped_name || item.name}</p>
-                  <p className="text-sm font-bold text-gray-900 dark:text-white">₹ {item.amount?.toFixed(2)}</p>
+              <div key={idx} className="flex justify-between gap-3 py-2.5 border-b border-divider">
+                <div className="min-w-0">
+                  <div className="text-[14px] truncate">{item.mapped_name || item.name}</div>
+                  <div className="text-[12px] text-neutral-700">{item.qty} {item.uom} × {fmtMoney2(item.rate)}</div>
                 </div>
-                <p className="text-xs font-medium text-gray-500 mt-1">{item.qty} {item.uom} × ₹{item.rate}</p>
-              </Card>
+                <div className="text-[14px] shrink-0">{fmtMoney2(item.amount)}</div>
+              </div>
             ))}
           </div>
 
-          <Card className="flex flex-col gap-2">
-            <div className="flex justify-between text-xs text-gray-500 font-medium"><span>Subtotal</span><span>₹ {subtotal.toFixed(2)}</span></div>
-            {(data.cgst > 0 || data.sgst > 0) && <div className="flex justify-between text-xs text-gray-500 font-medium"><span>CGST + SGST</span><span>₹ {(data.cgst + data.sgst).toFixed(2)}</span></div>}
-            {data.igst > 0 && <div className="flex justify-between text-xs text-gray-500 font-medium"><span>IGST</span><span>₹ {data.igst.toFixed(2)}</span></div>}
-            {data.rounding_off !== 0 && <div className="flex justify-between text-xs text-gray-500 font-medium"><span>Rounding</span><span>{data.rounding_off}</span></div>}
-            <div className="h-px bg-gray-100 dark:bg-gray-800 my-1" />
-            <div className="flex justify-between text-lg font-black text-gray-900 dark:text-white"><span>Total</span><span>₹ {total.toFixed(2)}</span></div>
-          </Card>
+          <div className="flex flex-col gap-1 mt-3">
+            <div className="flex justify-between text-sm text-neutral-700"><span>Subtotal</span><span>{fmtMoney2(subtotal)}</span></div>
+            {(data.cgst > 0 || data.sgst > 0) && <div className="flex justify-between text-sm text-neutral-700"><span>CGST + SGST</span><span>{fmtMoney2(data.cgst + data.sgst)}</span></div>}
+            {data.igst > 0 && <div className="flex justify-between text-sm text-neutral-700"><span>IGST</span><span>{fmtMoney2(data.igst)}</span></div>}
+            {data.rounding_off !== 0 && <div className="flex justify-between text-sm text-neutral-700"><span>Rounding</span><span>{fmtMoney2(data.rounding_off)}</span></div>}
+            <div className="flex justify-between items-baseline border-t border-text pt-2 mt-1">
+              <span className="font-heading font-semibold text-base">Total</span>
+              <span className="font-heading font-semibold text-lg">{fmtMoney2(total)}</span>
+            </div>
+          </div>
         </div>
       );
     } else if (data.ledger && data.amount !== undefined && !data.items) {
       // Sales Voucher
       return (
-        <Card className="flex flex-col gap-3">
-          <div className="flex justify-between items-start border-b border-gray-100 dark:border-gray-800 pb-3">
-            <div><p className="text-xs font-bold text-gray-400 uppercase">Customer</p><p className="text-sm font-bold text-gray-900 dark:text-white">{data.ledger}</p></div>
-            <div className="text-right"><p className="text-xs font-bold text-gray-400 uppercase">Amount</p><p className="text-lg font-black text-teal-600">₹ {Number(data.amount).toFixed(2)}</p></div>
-          </div>
-          {data.cost_center && <div><p className="text-xs font-bold text-gray-400 uppercase">Cost Center</p><p className="text-sm font-medium text-gray-900 dark:text-gray-300">{data.cost_center}</p></div>}
-          {data.narration && <div><p className="text-xs font-bold text-gray-400 uppercase">Narration</p><p className="text-sm font-medium text-gray-900 dark:text-gray-300">{data.narration}</p></div>}
-          {data.created_by && <div><p className="text-xs font-bold text-gray-400 uppercase">Recorded By</p><p className="text-sm font-medium text-gray-900 dark:text-gray-300">{data.created_by}</p></div>}
-        </Card>
+        <div className="flex flex-col">
+          <Row label="Store" value={data.cost_center} />
+          <Row label="Notes" value={data.narration} />
+          <Row label="Recorded by" value={data.created_by} />
+        </div>
+      );
+    } else if (data.supplier && data.invoice_number !== undefined && !data.items) {
+      // Purchase Voucher (accounting mode -- no item breakdown)
+      return (
+        <div className="flex flex-col">
+          <Row label="Invoice no." value={data.invoice_number} />
+          <Row label="Store" value={data.cost_center} />
+          <Row label="Notes" value={data.narration} />
+        </div>
+      );
+    } else if (data.bank_ledger_name) {
+      // Bank statement receipt/payment -- the bank ledger is the real
+      // settlement account regardless of direction (debit_ledger/credit_ledger
+      // swap depending on receipt vs payment).
+      const isReceipt = data.debit_ledger === data.bank_ledger_name;
+      return (
+        <div className="flex flex-col">
+          <Row label="Store" value={data.cost_center} />
+          <Row label={isReceipt ? 'Deposited into' : 'Paid via'} value={data.bank_ledger_name} />
+          <Row label="Notes" value={data.narration} />
+        </div>
       );
     } else if ((data.debit_ledger && data.credit_ledger) || (data.from_account && data.to_account)) {
-      // Payment or Transfer
-      const debit = data.debit_ledger || data.to_account;
+      // Payment or Transfer -- the title/amount are already shown in the
+      // sheet's header (the party being paid), so only the settlement
+      // account and any extra context are shown here.
       const credit = data.credit_ledger || data.from_account;
       return (
-        <Card className="flex flex-col gap-3">
-          <div className="flex justify-between items-start border-b border-gray-100 dark:border-gray-800 pb-3">
-            <div><p className="text-xs font-bold text-gray-400 uppercase">Amount</p><p className="text-2xl font-black text-teal-600">₹ {Number(data.amount).toFixed(2)}</p></div>
-            <div className="text-right"><p className="text-xs font-bold text-gray-400 uppercase">Date</p><p className="text-sm font-medium text-gray-900 dark:text-gray-300">{data.date || 'Today'}</p></div>
-          </div>
-          <div className="grid grid-cols-2 gap-4">
-            <div><p className="text-xs font-bold text-gray-400 uppercase">Debit (To)</p><p className="text-sm font-bold text-gray-900 dark:text-white">{debit}</p></div>
-            <div><p className="text-xs font-bold text-gray-400 uppercase">Credit (From)</p><p className="text-sm font-bold text-gray-900 dark:text-white">{credit}</p></div>
-          </div>
-          {data.cost_center && <div><p className="text-xs font-bold text-gray-400 uppercase">Cost Center</p><p className="text-sm font-medium text-gray-900 dark:text-gray-300">{data.cost_center}</p></div>}
-          {data.narration && <div><p className="text-xs font-bold text-gray-400 uppercase">Narration</p><p className="text-sm font-medium text-gray-900 dark:text-gray-300">{data.narration}</p></div>}
-        </Card>
+        <div className="flex flex-col">
+          <Row label="Account" value={credit} />
+          <Row label="Store" value={data.cost_center} />
+          <Row label="Notes" value={data.narration} />
+        </div>
       );
     } else if (data.from_store && data.to_store) {
       // Stock Transfer
       return (
-        <Card className="flex flex-col gap-3">
-          <div className="flex justify-between items-center border-b border-gray-100 dark:border-gray-800 pb-3">
-            <div className="flex-1"><p className="text-xs font-bold text-gray-400 uppercase">From</p><p className="text-sm font-bold text-gray-900 dark:text-white">{data.from_store}</p></div>
-            <MoveRight className="w-5 h-5 text-gray-400 mx-2" />
-            <div className="flex-1 text-right"><p className="text-xs font-bold text-gray-400 uppercase">To</p><p className="text-sm font-bold text-gray-900 dark:text-white">{data.to_store}</p></div>
+        <div className="flex flex-col">
+          <div className="flex items-center justify-between gap-3 py-2.5">
+            <div className="min-w-0">
+              <p className="text-[10.5px] tracking-[0.1em] uppercase text-neutral-600">From</p>
+              <p className="text-[15px] truncate">{data.from_store}</p>
+            </div>
+            <MoveRight className="w-4 h-4 text-neutral-500 shrink-0" />
+            <div className="min-w-0 text-right">
+              <p className="text-[10.5px] tracking-[0.1em] uppercase text-neutral-600">To</p>
+              <p className="text-[15px] truncate">{data.to_store}</p>
+            </div>
           </div>
-          <div><p className="text-xs font-bold text-gray-400 uppercase">Item</p><p className="text-sm font-bold text-gray-900 dark:text-white">{data.item_name}</p></div>
-          <div className="grid grid-cols-2 gap-4">
-            <div><p className="text-xs font-bold text-gray-400 uppercase">Quantity</p><p className="text-sm font-medium text-gray-900 dark:text-gray-300">{data.qty}</p></div>
-            <div><p className="text-xs font-bold text-gray-400 uppercase">Date</p><p className="text-sm font-medium text-gray-900 dark:text-gray-300">{data.tally_date || 'Today'}</p></div>
-          </div>
-          {data.narration && <div><p className="text-xs font-bold text-gray-400 uppercase">Narration</p><p className="text-sm font-medium text-gray-900 dark:text-gray-300">{data.narration}</p></div>}
-        </Card>
+          <Row label="Item" value={data.item_name} />
+          <Row label="Quantity" value={data.qty} />
+          <Row label="Notes" value={data.narration} />
+        </div>
       );
     } else if (Array.isArray(data)) {
       // Bank Statement multiple vouchers
       return (
-        <div className="space-y-4">
-          <h3 className="text-xs font-bold text-gray-500 uppercase px-1">{data.length} Bank Transactions</h3>
-          <div className="space-y-2">
+        <div className="flex flex-col">
+          <p className="text-[10.5px] tracking-[0.1em] uppercase text-neutral-600 mb-1">{data.length} bank transactions</p>
+          <div className="border-t border-divider">
             {data.map((txn, idx) => (
-              <Card key={idx} className="p-3 flex flex-col gap-2">
-                <div className="flex justify-between">
-                  <p className="text-sm font-bold text-gray-900 dark:text-white">{txn.target_ledger}</p>
-                  <p className={`text-sm font-bold ${txn.withdrawal > 0 ? 'text-red-600' : 'text-green-600'}`}>
-                    {txn.withdrawal > 0 ? `- ₹${txn.withdrawal}` : `+ ₹${txn.deposit}`}
-                  </p>
+              <div key={idx} className="flex justify-between gap-3 py-2.5 border-b border-divider">
+                <div className="min-w-0">
+                  <div className="text-[14px] truncate">{txn.target_ledger}</div>
+                  <div className="text-[12px] text-neutral-700">{txn.date} · {txn.cost_center || 'Unallocated'}</div>
                 </div>
-                <div className="flex justify-between text-xs text-gray-500">
-                  <span>{txn.date}</span>
-                  <span>{txn.cost_center || 'No CC'}</span>
+                <div className="text-[14px] shrink-0">
+                  {txn.withdrawal > 0 ? `− ${fmtMoney2(txn.withdrawal)}` : `${fmtMoney2(txn.deposit)}`}
                 </div>
-              </Card>
+              </div>
             ))}
           </div>
         </div>
@@ -142,10 +151,8 @@ export const TransactionPreview = ({ operation, payloadStr }) => {
 
   // Fallback
   return (
-    <Card className="flex flex-col gap-2">
-      <p className="text-sm font-medium text-gray-700 dark:text-gray-300 text-center py-4">
-        Preview not available for this operation type.<br />Please use the Raw Data view.
-      </p>
-    </Card>
+    <p className="text-sm text-neutral-700 text-center py-4">
+      A preview isn&rsquo;t available for this operation type — use Raw data below.
+    </p>
   );
 };

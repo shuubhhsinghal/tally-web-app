@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
-from backend.routers import stock_transfer, transfer, sales, payment, purchase, purchase_item, bank_statement, sync, dashboard, masters, settings, purchase_drafts, reporting, reporting_pl, repack, auth, loans
+from backend.routers import stock_transfer, transfer, sales, payment, journal, purchase, purchase_item, bank_statement, sync, dashboard, masters, settings, purchase_drafts, reporting, reporting_pl, repack, auth, loans, stock_count
 from backend.database import init_db, get_user_by_session_token
 from backend.services.tally_sync_worker import sync_worker_loop
 from backend.connector.router import router as connector_router
@@ -116,9 +116,11 @@ async def require_session(request: Request, call_next):
 
 app.include_router(auth.router, prefix="/api/auth", tags=["Auth"])
 app.include_router(stock_transfer.router, prefix="/api/stock-transfer", tags=["Stock Transfer"])
+app.include_router(stock_count.router, prefix="/api/stock-count", tags=["Stock Count"])
 app.include_router(transfer.router, prefix="/api/transfer", tags=["Fund Transfer"])
 app.include_router(sales.router, prefix="/api/sales", tags=["Sales"])
 app.include_router(payment.router, prefix="/api/payment", tags=["Payment"])
+app.include_router(journal.router, prefix="/api/journal", tags=["Journal"])
 app.include_router(purchase.router, prefix="/api/purchase", tags=["Purchase"])
 app.include_router(purchase_item.router, prefix="/api/purchase-item", tags=["Purchase Item"])
 app.include_router(purchase_drafts.router, prefix="/api/purchase-drafts", tags=["Purchase Drafts"])

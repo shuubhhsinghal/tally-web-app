@@ -4,9 +4,34 @@ clears up within a few seconds, but without a retry it previously turned
 into a permanently "Parsing Failed" draft on the very first hiccup, forcing
 the user to notice and manually re-upload."""
 
+import os
 import time
 
 _TRANSIENT_MARKERS = ("503", "UNAVAILABLE", "overloaded", "RESOURCE_EXHAUSTED", "429")
+
+_VALID_EXTRACTION_PROVIDERS = ("gemini", "qwen")
+
+
+def get_extraction_provider(override: str = None) -> str:
+    """Which vision model powers invoice extraction: "gemini" or "qwen".
+    Read fresh from the DB on every call (never cached), so flipping the
+    toggle in Settings takes effect on the very next upload -- no backend
+    restart needed. The DB setting (set from Settings) takes priority; the
+    env var only supplies the default before it's ever been set there.
+
+    `override`, when given a valid provider name, wins over both -- this is
+    how a specific upload channel (e.g. WhatsApp, which always wants Qwen
+    regardless of the Settings toggle used for manual uploads) pins its own
+    provider without touching the global default."""
+    if override:
+        override = override.strip().lower()
+        if override in _VALID_EXTRACTION_PROVIDERS:
+            return override
+
+    from backend.database import get_app_setting
+    stored = get_app_setting("extraction_provider")
+    provider = (stored or os.getenv("EXTRACTION_PROVIDER", "gemini")).strip().lower()
+    return provider if provider in _VALID_EXTRACTION_PROVIDERS else "gemini"
 
 
 def is_transient_gemini_error(exc: Exception) -> bool:

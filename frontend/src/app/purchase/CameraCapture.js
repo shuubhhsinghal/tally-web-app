@@ -434,7 +434,7 @@ export function CameraCapture({ onCapture, onClose, initialPhotoFile, onRetake }
               Retake
             </Button>
             <Button
-              className="bg-teal-500 hover:bg-teal-600 text-white h-12 px-6 rounded-full"
+              className="bg-accent hover:bg-accent-600 text-bg h-12 px-6 rounded-full"
               onClick={handleUsePhoto}
             >
               <Check className="w-5 h-5 mr-2" />

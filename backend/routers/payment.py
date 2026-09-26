@@ -102,11 +102,15 @@ async def get_payment_metadata():
                 unique[n] = item
         return sorted(list(unique.values()), key=lambda x: x["name"])
 
+    from backend.database import get_active_stores
+    store_names = [s['store_name'] for s in get_active_stores()]
+
     return {
         "expense_paid_to": sort_ledgers(expense_paid_to),
         "party_paid_to": sort_ledgers(party_paid_to),
         "paid_from": sort_ledgers(paid_from),
-        "groups": sorted(list(valid_groups))
+        "groups": sorted(list(valid_groups)),
+        "stores": store_names
     }
 
 @router.post("/create-ledger")
@@ -158,22 +162,32 @@ async def create_payment_ledger(payload: CreateLedgerRequest):
 
 @router.post("/post")
 async def post_payment(payload: PaymentRequest, request: Request):
+    if payload.amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be greater than zero.")
+
     current_user = request.state.user
-    # A payment tagged with a cost centre must match the caller's own store;
-    # a payment with no cost centre at all (e.g. paying off a loan) isn't
-    # tied to any store, so it's left open to any account.
-    if payload.mode == "expenses" and payload.cost_center:
-        enforce_store_access(current_user, payload.cost_center, "post expenses for")
+    cost_center = payload.cost_center
+    # A payment tagged with a cost centre must match the caller's own store.
+    # A non-owner is never trusted to supply the cost centre themselves --
+    # their own store is always used, so there's no way to omit it and post
+    # an unattributed expense. A payment with no cost centre at all (e.g.
+    # paying off a loan) isn't tied to any store, so it's left open to any
+    # account -- but only in non-expense mode.
+    if payload.mode == "expenses":
+        if not current_user['is_owner']:
+            cost_center = current_user['store_name']
+        elif cost_center:
+            enforce_store_access(current_user, cost_center, "post expenses for")
 
     safe_debit = escape(str(payload.debit_ledger))
     safe_credit = escape(str(payload.credit_ledger))
     safe_nar = escape(str(payload.narration))
-    
+
     allocation = ""
-    # If expense mode, cost_center is required, otherwise optional. 
+    # If expense mode, cost_center is required, otherwise optional.
     # But we just pass it if it exists and mode is expenses.
-    if payload.mode == "expenses" and payload.cost_center:
-        safe_cc = escape(str(payload.cost_center))
+    if payload.mode == "expenses" and cost_center:
+        safe_cc = escape(str(cost_center))
         allocation = f"""
               <CATEGORYALLOCATIONS.LIST>
                 <CATEGORY>Primary Cost Category</CATEGORY>
@@ -210,6 +224,7 @@ async def post_payment(payload: PaymentRequest, request: Request):
 
     # Queue-First Architecture: Always save transaction to DB before attempting to send
     queue_payload = payload.model_dump()
+    queue_payload['cost_center'] = cost_center
     queue_payload['created_by'] = current_user['name']
     queue_id = queue_operation("POST_VOUCHER", xml_data, queue_payload, f"Payment: {payload.amount} to {payload.debit_ledger}")
 

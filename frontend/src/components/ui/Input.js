@@ -4,19 +4,19 @@ export function Input({ label, error, className = '', ...props }) {
   return (
     <div className={`w-full flex flex-col gap-1.5 ${className}`}>
       {label && (
-        <label className="text-sm font-medium text-gray-700 dark:text-gray-300 ml-1">
+        <label className="text-xs text-text/70 ml-1">
           {label}
         </label>
       )}
-      <input 
-        className={`appearance-none min-w-0 w-full min-h-[48px] px-4 rounded-xl border bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 text-base
-          placeholder-gray-400 dark:placeholder-gray-500
-          focus:outline-none focus:ring-2 focus:ring-teal-500/50 focus:border-teal-500 transition-all
-          ${error ? 'border-red-500 focus:ring-red-500/50 focus:border-red-500' : 'border-gray-200 dark:border-gray-700'}
+      <input
+        className={`appearance-none min-w-0 w-full min-h-[48px] px-4 rounded-md border bg-transparent text-text text-base
+          placeholder-neutral-500
+          focus:outline-none focus-visible:border-accent transition-colors hover:border-text/45
+          ${error ? 'border-accent' : 'border-divider'}
         `}
         {...props}
       />
-      {error && <span className="text-xs text-red-500 ml-1 mt-0.5">{error}</span>}
+      {error && <span className="text-xs text-accent-800 ml-1 mt-0.5">{error}</span>}
     </div>
   );
 }

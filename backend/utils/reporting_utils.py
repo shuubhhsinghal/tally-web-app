@@ -121,15 +121,23 @@ def merge_trend_rows(base_trend: list[dict], extra_trend: list[dict]) -> list[di
             merged[date][key] = merged[date].get(key, 0.0) + value
     return sorted(merged.values(), key=lambda r: r['date'])
 
-def merge_pending_into_store_comparison(store_comparison: list[dict], pending_trend: list[dict]) -> list[dict]:
+def merge_pending_into_store_comparison(store_comparison: list[dict], pending_trend: list[dict], value_key: str = 'net_purchases') -> list[dict]:
     """Adds a pending trend's per-store totals (summed across all its dates)
     into an existing store_comparison list ({store_name, net_sales} or
     {store_name, net_purchases} shaped rows), so a store with amounts still
-    stuck in the queue isn't left out of the store-wise breakdown. The
-    caller's own value key (net_sales/net_purchases) is preserved."""
+    stuck in the queue isn't left out of the store-wise breakdown.
+
+    value_key must be passed explicitly by the caller (defaulting to
+    'net_purchases', this function's only caller today) rather than guessed
+    from store_comparison's own shape -- guessing silently produced the wrong
+    key ('net_sales') whenever store_comparison came back empty, which is now
+    the common case for Purchases: its confirmed-side rows are permanently
+    excluded once a voucher type is owned by the offline queue instead (see
+    reporting_purchase_service._PURCHASE_QUEUE_OWNED_VOUCHER_EXCLUSION_SQL),
+    so an all-queue-sourced period has nothing on the confirmed side to
+    guess a key from."""
     if not store_comparison and not pending_trend:
         return []
-    value_key = next((k for k in store_comparison[0].keys() if k != 'store_name'), 'net_sales') if store_comparison else 'net_sales'
     totals = {row['store_name']: row[value_key] for row in store_comparison}
     for row in pending_trend:
         for key, value in row.items():

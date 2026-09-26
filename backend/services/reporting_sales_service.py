@@ -4,16 +4,45 @@ from dateutil.relativedelta import relativedelta
 from backend.database import get_db
 from backend.utils.reporting_utils import check_data_completeness, get_previous_period
 
+def classify_payment_mode(ledger_name: str, parent: str) -> str:
+    """Buckets a sale's receiving ledger into Cash / UPI / Credit for the
+    reports' payment-mode breakdown. There's no explicit "payment mode"
+    field anywhere in the data model -- this is inferred from which ledger
+    actually received the money: a Sundry Debtor (customer not yet paid) is
+    Credit, a Cash-in-Hand ledger is Cash, and everything else (UPI handles
+    like Paytm/Gpay, or a plain bank account) is bucketed as UPI, since
+    these shops only ever receive sales via cash, UPI or on credit."""
+    name = (ledger_name or '').lower()
+    parent_lower = (parent or '').lower()
+    if 'debtor' in parent_lower:
+        return 'credit'
+    if any(k in name for k in ('paytm', 'gpay', 'google pay', 'phonepe', 'upi')):
+        return 'upi'
+    if 'cash' in parent_lower or 'cash' in name:
+        return 'cash'
+    return 'upi'
+
 def calculate_sales(start_date: str, end_date: str, cost_centre: str = None) -> float:
     """
     Net Sales = SUM(alloc.amount * -1) where ledgers.parent = 'Sales Accounts'
     This elegantly handles Credit (Income) as positive and Debit (Returns) as negative.
     Excludes GST ledgers inherently.
+
+    Deliberately excludes VCHTYPE=Sales vouchers themselves: every sale is
+    entered exclusively through this app's own Sales feature, which is
+    permanently counted straight from the offline queue instead (see
+    get_queue_sales_trend) the moment it's SYNCED -- not only once the
+    *separate* reporting sync has re-pulled it into reporting_ledger_entries,
+    which can lag up to 30 minutes behind a real, already-successful post.
+    Mirrors get_ledger_current_balance's exclusion of loan Receipt/Interest
+    vouchers for the exact same reason. A Sales Return/Credit Note (a
+    different voucher type this app doesn't currently post) would still be
+    counted normally here once Tally confirms it.
     """
     query = """
-        SELECT 
+        SELECT
             COALESCE(SUM(
-                (CASE WHEN rca.id IS NOT NULL THEN rca.amount ELSE rle.amount END) * 
+                (CASE WHEN rca.id IS NOT NULL THEN rca.amount ELSE rle.amount END) *
                 (CASE WHEN rle.is_deemed_positive = 1 THEN -1 ELSE 1 END)
             ), 0.0) as net_sales
         FROM reporting_vouchers rv
@@ -21,6 +50,7 @@ def calculate_sales(start_date: str, end_date: str, cost_centre: str = None) -> 
         JOIN ledgers l ON LOWER(rle.ledger_name) = LOWER(l.name)
         LEFT JOIN reporting_cost_centre_allocations rca ON rle.id = rca.ledger_entry_id
         WHERE l.parent = 'Sales Accounts'
+          AND rv.voucher_type != 'Sales'
           AND CAST(rv.date AS INTEGER) >= CAST(? AS INTEGER)
           AND CAST(rv.date AS INTEGER) <= CAST(? AS INTEGER)
     """
@@ -88,23 +118,29 @@ def get_unsynced_sales(start_date: str, end_date: str, cost_centre: str = None) 
         "failed_amount": round(failed_amount, 2),
     }
 
-def get_pending_sales_trend(start_date: str, end_date: str, cost_centre: str = None) -> list[dict]:
-    """The subset of get_unsynced_sales' PENDING entries that are safe to
-    actually fold into the report's own figures -- same per-date/per-store
-    shape as get_sales_trend, so the caller can merge the two directly.
+def get_queue_sales_trend(start_date: str, end_date: str, cost_centre: str = None) -> list[dict]:
+    """Every sale this app has ever posted -- PENDING (still queued) or
+    SYNCED (delivered) -- that's safe to fold into the report's own figures,
+    in the same per-date/per-store shape as get_sales_trend so the caller can
+    merge the two directly. This is the permanent, authoritative source for
+    every sale (see calculate_sales' matching VCHTYPE=Sales exclusion): a
+    SYNCED sale is trusted here immediately rather than waiting for the
+    separate reporting sync to re-confirm it from Tally, which can lag up to
+    30 minutes behind an already-successful post.
 
     Deliberately excludes any row flagged delivery_uncertain (an ambiguous
     Tally timeout -- the voucher may already exist in Tally with no local way
     to tell), since blending an uncertain one into a REPORT figure risks a
-    real double-count once the next sync confirms it independently as a
-    Tally voucher. Those still count toward get_unsynced_sales' warning
+    real double-count if it also lands in reporting_ledger_entries once the
+    reporting sync eventually catches up. A FAILED sale is also excluded --
+    it never happened. Those still count toward get_unsynced_sales' warning
     banner; they just aren't added to the numbers here."""
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT payload FROM offline_queue
             WHERE operation_type = 'POST_VOUCHER' AND description LIKE 'Sales:%'
-              AND status = 'PENDING'
+              AND status IN ('PENDING', 'SYNCED')
         """)
         rows = cursor.fetchall()
 
@@ -141,6 +177,155 @@ def get_pending_sales_trend(start_date: str, end_date: str, cost_centre: str = N
 
     return list(trend_dict.values())
 
+def get_sales_invoice_count(start_date: str, end_date: str, cost_centre: str = None) -> int:
+    query = """
+        SELECT COUNT(DISTINCT rv.id) as cnt
+        FROM reporting_vouchers rv
+        JOIN reporting_ledger_entries rle ON rv.id = rle.voucher_id
+        JOIN ledgers l ON LOWER(rle.ledger_name) = LOWER(l.name)
+        LEFT JOIN reporting_cost_centre_allocations rca ON rle.id = rca.ledger_entry_id
+        WHERE l.parent = 'Sales Accounts'
+          AND rv.voucher_type != 'Sales'
+          AND CAST(rv.date AS INTEGER) >= CAST(? AS INTEGER)
+          AND CAST(rv.date AS INTEGER) <= CAST(? AS INTEGER)
+    """
+    params = [start_date, end_date]
+    if cost_centre:
+        if cost_centre == "Unallocated":
+            query += " AND rca.id IS NULL"
+        else:
+            query += " AND rca.cost_centre_name = ?"
+            params.append(cost_centre)
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        return cursor.fetchone()['cnt']
+
+def get_payment_mode_trend(start_date: str, end_date: str, cost_centre: str = None) -> list[dict]:
+    """Per-day Cash/UPI/Credit split of confirmed sales, in the same
+    {date, cash, upi, credit} shape merge_trend_rows expects. Classifies
+    each sale by whichever ledger entry on its voucher actually received the
+    money (i.e. not the Sales/tax/rounding side) -- see classify_payment_mode.
+    Excludes VCHTYPE=Sales vouchers, same reasoning as calculate_sales --
+    counted permanently from the queue instead (get_queue_payment_mode_trend)."""
+    query = """
+        WITH voucher_store AS (
+            SELECT rle.voucher_id, COALESCE(MAX(rca.cost_centre_name), 'Unallocated') as store_name
+            FROM reporting_ledger_entries rle
+            JOIN ledgers l ON LOWER(rle.ledger_name) = LOWER(l.name) AND l.parent = 'Sales Accounts'
+            LEFT JOIN reporting_cost_centre_allocations rca ON rle.id = rca.ledger_entry_id
+            GROUP BY rle.voucher_id
+        )
+        SELECT rv.date, rle.ledger_name, l.parent, rle.amount
+        FROM reporting_vouchers rv
+        JOIN reporting_ledger_entries rle ON rv.id = rle.voucher_id
+        JOIN ledgers l ON LOWER(rle.ledger_name) = LOWER(l.name)
+        JOIN voucher_store vs ON vs.voucher_id = rv.id
+        WHERE (l.parent IS NULL OR (l.parent != 'Sales Accounts' AND l.parent != 'Duties & Taxes'))
+          AND LOWER(l.name) NOT LIKE '%round%'
+          AND rle.is_deemed_positive = 1
+          AND rv.voucher_type != 'Sales'
+          AND CAST(rv.date AS INTEGER) >= CAST(? AS INTEGER)
+          AND CAST(rv.date AS INTEGER) <= CAST(? AS INTEGER)
+    """
+    params = [start_date, end_date]
+    if cost_centre:
+        if cost_centre == "Unallocated":
+            query += " AND vs.store_name = 'Unallocated'"
+        else:
+            query += " AND vs.store_name = ?"
+            params.append(cost_centre)
+
+    by_date = {}
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        for row in cursor.fetchall():
+            date = row['date']
+            mode = classify_payment_mode(row['ledger_name'], row['parent'])
+            if date not in by_date:
+                by_date[date] = {"date": date, "cash": 0.0, "upi": 0.0, "credit": 0.0}
+            # Every row here is is_deemed_positive=1 (a debit) per the WHERE
+            # clause above -- same sign convention as calculate_sales, where
+            # a debit's raw amount is stored negative, so flip it positive.
+            by_date[date][mode] += -row['amount']
+
+    return [
+        {**row, "cash": round(row['cash'], 2), "upi": round(row['upi'], 2), "credit": round(row['credit'], 2)}
+        for row in by_date.values()
+    ]
+
+def get_queue_payment_mode_trend(start_date: str, end_date: str, cost_centre: str = None) -> list[dict]:
+    """The queue-sourced (PENDING or SYNCED) counterpart to
+    get_payment_mode_trend -- same exclusion of delivery_uncertain rows as
+    get_queue_sales_trend, for the same reason (avoiding a double-count if an
+    ambiguous one also lands in reporting_ledger_entries independently)."""
+    from backend.database import get_all_ledgers
+    ledger_parents = {l['name'].lower(): l.get('parent') for l in get_all_ledgers()}
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT payload FROM offline_queue
+            WHERE operation_type = 'POST_VOUCHER' AND description LIKE 'Sales:%'
+              AND status IN ('PENDING', 'SYNCED')
+        """)
+        rows = cursor.fetchall()
+
+    by_date = {}
+    for row in rows:
+        try:
+            payload = json.loads(row['payload']) if row['payload'] else {}
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+        if payload.get('delivery_uncertain') is True:
+            continue
+
+        date = payload.get('tally_date')
+        if not date or not (start_date <= date <= end_date):
+            continue
+
+        store = payload.get('cost_center') or 'Unallocated'
+        if cost_centre:
+            if cost_centre == "Unallocated":
+                if store != 'Unallocated':
+                    continue
+            elif store != cost_centre:
+                continue
+
+        ledger = payload.get('ledger') or ''
+        mode = classify_payment_mode(ledger, ledger_parents.get(ledger.lower()))
+        amount = payload.get('amount') or 0.0
+
+        if date not in by_date:
+            by_date[date] = {"date": date, "cash": 0.0, "upi": 0.0, "credit": 0.0}
+        by_date[date][mode] += amount
+
+    return list(by_date.values())
+
+def get_store_comparisons_with_change(start_date: str, end_date: str) -> list[dict]:
+    """get_store_comparisons, plus each store's change vs the same length
+    period immediately before it -- the per-store equivalent of the overall
+    summary's change_percentage."""
+    current = get_store_comparisons(start_date, end_date)
+    prev_s, prev_e = get_previous_period(start_date, end_date)
+    previous_by_store = {row['store_name']: row['net_sales'] for row in get_store_comparisons(prev_s, prev_e)}
+
+    result = []
+    for row in current:
+        prev_val = previous_by_store.get(row['store_name'])
+        change_pct = None
+        if prev_val:
+            change_pct = round((row['net_sales'] - prev_val) / prev_val * 100, 1)
+        result.append({
+            **row,
+            "previous_net_sales": round(prev_val, 2) if prev_val is not None else None,
+            "change_percentage": change_pct,
+        })
+    return result
+
 def get_store_comparisons(start_date: str, end_date: str) -> list[dict]:
     query = """
         SELECT 
@@ -154,6 +339,7 @@ def get_store_comparisons(start_date: str, end_date: str) -> list[dict]:
         JOIN ledgers l ON LOWER(rle.ledger_name) = LOWER(l.name)
         LEFT JOIN reporting_cost_centre_allocations rca ON rle.id = rca.ledger_entry_id
         WHERE l.parent = 'Sales Accounts'
+          AND rv.voucher_type != 'Sales'
           AND CAST(rv.date AS INTEGER) >= CAST(? AS INTEGER)
           AND CAST(rv.date AS INTEGER) <= CAST(? AS INTEGER)
         GROUP BY store_name
@@ -178,11 +364,12 @@ def get_sales_trend(start_date: str, end_date: str, cost_centre: str = None) -> 
         JOIN ledgers l ON LOWER(rle.ledger_name) = LOWER(l.name)
         LEFT JOIN reporting_cost_centre_allocations rca ON rle.id = rca.ledger_entry_id
         WHERE l.parent = 'Sales Accounts'
+          AND rv.voucher_type != 'Sales'
           AND CAST(rv.date AS INTEGER) >= CAST(? AS INTEGER)
           AND CAST(rv.date AS INTEGER) <= CAST(? AS INTEGER)
     """
     params = [start_date, end_date]
-    
+
     if cost_centre:
         if cost_centre == "Unallocated":
             query += " AND rca.ledger_entry_id IS NULL"

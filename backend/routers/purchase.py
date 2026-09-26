@@ -140,7 +140,7 @@ async def post_purchase(payload: PurchaseRequest, request: Request):
           </BILLALLOCATIONS.LIST>
         </ALLLEDGERENTRIES.LIST>
         <ALLLEDGERENTRIES.LIST>
-          <LEDGERNAME>Purchases</LEDGERNAME>
+          <LEDGERNAME>Purchase</LEDGERNAME>
           <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
           <AMOUNT>-{payload.amount}</AMOUNT>{cost_center_xml}
         </ALLLEDGERENTRIES.LIST>

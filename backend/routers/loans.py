@@ -150,6 +150,17 @@ async def create_loan_endpoint(payload: CreateLoanRequest, request: Request):
     queue_payload['ledger_name'] = ledger_name
     queue_id = queue_operation("POST_VOUCHER", xml_data, queue_payload, f"Loan Received: {payload.principal_amount} from {lender_name}")
 
+    # Deliberately attempted BEFORE create_loan below: _deliver_or_queue_voucher
+    # raises an HTTPException on an outright failure (a rejected voucher or a
+    # failed/missing/conflicting ledger dependency), which must stop execution
+    # here and never reach create_loan. Otherwise a rejected receipt voucher
+    # would still leave a loan row behind -- invisible to the user (the
+    # frontend only shows the error and never refreshes the list on failure),
+    # but very much visible to the interest-accrual background job, which
+    # would start posting real monthly interest against a loan whose
+    # principal was never actually received in Tally.
+    delivery_result = await _deliver_or_queue_voucher(queue_id, xml_data, [received_into, ledger_name])
+
     loan = create_loan(
         lender_name=lender_name,
         ledger_name=ledger_name,
@@ -159,7 +170,7 @@ async def create_loan_endpoint(payload: CreateLoanRequest, request: Request):
         start_date=payload.start_date,
         received_into_ledger=received_into,
         created_by=current_user['name'],
+        queue_id=queue_id,
     )
 
-    delivery_result = await _deliver_or_queue_voucher(queue_id, xml_data, [received_into, ledger_name])
     return {**delivery_result, "loan": loan}

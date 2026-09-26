@@ -1,13 +1,15 @@
-import { Geist, Geist_Mono } from "next/font/google";
+import { Cormorant_Garamond, Lora } from "next/font/google";
 import "./globals.css";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
+const fontHeading = Cormorant_Garamond({
+  variable: "--font-heading",
+  weight: ["400", "600"],
   subsets: ["latin"],
 });
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
+const fontBody = Lora({
+  variable: "--font-body",
+  weight: ["400", "500", "600"],
   subsets: ["latin"],
 });
 
@@ -25,7 +27,7 @@ export const metadata = {
 };
 
 export const viewport = {
-  themeColor: "#111827",
+  themeColor: "#171615",
   width: "device-width",
   initialScale: 1,
   maximumScale: 1,
@@ -34,8 +36,8 @@ export const viewport = {
 
 export default function RootLayout({ children }) {
   return (
-    <html lang="en" suppressHydrationWarning>
-      <body className="min-h-full flex flex-col bg-gray-50 dark:bg-gray-900 transition-colors" suppressHydrationWarning>
+    <html lang="en" suppressHydrationWarning className={`${fontHeading.variable} ${fontBody.variable}`}>
+      <body className="min-h-full flex flex-col transition-colors" suppressHydrationWarning>
         <Providers>{children}</Providers>
       </body>
     </html>
