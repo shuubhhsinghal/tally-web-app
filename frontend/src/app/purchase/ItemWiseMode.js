@@ -605,17 +605,17 @@ export function ItemWiseMode({ onPostSuccess }) {
  const items = [...next.extracted_data.items];
  const rawItem = { ...items[index] };
  
- if (field === 'name') rawItem.description = value;
+ if (field === 'name') rawItem.name = value;
  if (field === 'qty') {
- rawItem.quantity = value;
+ rawItem.qty = value;
  rawItem._manual_qty = value;
  }
- if (field === 'uom') rawItem.unit = value;
+ if (field === 'uom') rawItem.uom = value;
  if (field === 'amount' || field === 'final_amount') {
  rawItem._manual_line_amount = value;
  }
  if (field === 'rate' || field === 'final_rate') {
- const qty = parseFloat(rawItem._manual_qty !== undefined ? rawItem._manual_qty : rawItem.quantity) || 1;
+ const qty = parseFloat(rawItem._manual_qty !== undefined ? rawItem._manual_qty : rawItem.qty) || 1;
  rawItem._manual_line_amount = parseFloat(value) * qty;
  }
  
