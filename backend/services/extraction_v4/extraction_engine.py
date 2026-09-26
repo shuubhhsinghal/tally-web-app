@@ -366,6 +366,12 @@ def _build_qwen_combined_prompt() -> str:
         PART 1 -- INVOICE METADATA
         =====================================================================
         1. Dates must be YYYY-MM-DD. If year is missing, assume {year}.
+           - "date" must be the INVOICE DATE -- the date the invoice/bill itself was issued,
+             typically labeled "Invoice Date", "Bill Date", or just "Date" near the invoice number.
+           - Many invoices ALSO print a separate "Due Date" / "Payment Due Date" / "Due On" --
+             the date payment is expected, always on or after the invoice date. That is a
+             DIFFERENT field. NEVER extract the due date into "date", even if it is printed more
+             prominently, first, or closer to the invoice number than the actual invoice date.
         2. "supplier_name" must be the main vendor issuing the invoice.
         3. Extract the exact CGST, SGST, IGST, and rounding_off amounts from the bottom summary.
         4. TAX RATE EXTRACTION (HIGHEST PRIORITY):
