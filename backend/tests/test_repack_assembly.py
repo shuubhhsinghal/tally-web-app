@@ -175,22 +175,15 @@ def test_execute_repack_records_rate_history(monkeypatch):
 
 
 def test_execute_repack_ignores_godown_valuation_rate_when_reachable(monkeypatch):
-    # Even when Tally IS reachable and its own Godown valuation would give a
-    # different (e.g. weighted-average) rate, the repack's cost must be
-    # computed from get_purchase_rate -- not from Tally's live valuation.
+    # The repack's cost must be computed from get_purchase_rate -- Tally's
+    # live Godown valuation (a weighted-average blending old and new stock)
+    # is never consulted for costing, and isn't queried for anything else
+    # here either (see the no-app-side-stock-check comment in repack.py).
     from backend.database import record_purchase_rate
     record_purchase_rate("bulk chips", 100.0, "Test Supplier", "2026-09-01")
     record_purchase_rate("300g box", 5.0, "Test Supplier", "2026-09-01")
 
     monkeypatch.setattr(connector_manager, "is_tally_reachable", lambda: True)
-
-    async def mock_get_godown_stock(item_name, godown_name):
-        # Deliberately a different rate than get_purchase_rate, simulating a
-        # weighted-average Godown valuation blending old and new stock.
-        return {"qty": 1000.0, "rate": 999.0, "amount": 999000.0}
-
-    import backend.services.tally_godown_stock
-    monkeypatch.setattr(backend.services.tally_godown_stock, "get_godown_stock", mock_get_godown_stock)
 
     payload = {
         "new_product_name": "Test Ignores Valuation Item",
@@ -220,20 +213,19 @@ def test_execute_repack_ignores_godown_valuation_rate_when_reachable(monkeypatch
         assert row["source_amount"] == 350.0
 
 
-def test_execute_repack_blocks_on_insufficient_stock_when_tally_reachable(monkeypatch):
+def test_execute_repack_does_not_check_stock_sufficiency(monkeypatch):
+    """get_godown_stock's underlying Tally query doesn't actually filter by
+    item (it returns identical numbers for any item requested), so it can
+    never be trusted to block a repack -- the app no longer calls it at all
+    here. Tally's own "Allow Negative Stock" setting is the real source of
+    truth for whether an overdraw is accepted or rejected."""
     from backend.database import record_purchase_rate
     record_purchase_rate("bulk chips", 100.0, "Test Supplier", "2026-09-01")
 
     monkeypatch.setattr(connector_manager, "is_tally_reachable", lambda: True)
 
-    async def mock_get_godown_stock(item_name, godown_name):
-        return {"qty": 1.0, "rate": 100.0, "amount": 100.0}  # far less than required
-
-    import backend.services.tally_godown_stock
-    monkeypatch.setattr(backend.services.tally_godown_stock, "get_godown_stock", mock_get_godown_stock)
-
     payload = {
-        "new_product_name": "Test Insufficient Stock Item",
+        "new_product_name": "Test No Stock Check Item",
         "output_unit": "PCS",
         "components": [
             {"item_name": "Bulk Chips", "unit": "KGS", "quantity": 0.3},
@@ -245,27 +237,22 @@ def test_execute_repack_blocks_on_insufficient_stock_when_tally_reachable(monkey
         "date": "2026-09-15",
         "store_name": "Test Store",
         "conversion_id": conv_id,
-        "dest_qty": 100.0  # needs 30 KGS, only 1 KGS "available"
+        "dest_qty": 100.0  # would need 30 KGS -- no longer checked against anything
     }
     response = client.post("/api/repack/execute", json=exec_payload)
-    assert response.status_code == 400
-    assert "insufficient stock" in response.json()["detail"].lower()
+    assert response.status_code == 200
 
 
 def _setup_reachable_with_stock(monkeypatch, rate=100.0, stock_qty=1000.0):
-    """Common setup for the three tests below: Tally reachable, stock
-    sufficient, so execute_repack gets past its pre-checks and reaches the
-    immediate live-post attempt this test file is verifying."""
+    """Common setup for the three tests below: Tally reachable, so
+    execute_repack reaches the immediate live-post attempt this test file
+    is verifying. stock_qty is unused now (no app-side stock check calls
+    get_godown_stock any more) but kept as a param so callers don't need
+    updating."""
     from backend.database import record_purchase_rate
     record_purchase_rate("bulk chips", rate, "Test Supplier", "2026-09-01")
 
     monkeypatch.setattr(connector_manager, "is_tally_reachable", lambda: True)
-
-    async def mock_get_godown_stock(item_name, godown_name):
-        return {"qty": stock_qty, "rate": rate, "amount": stock_qty * rate}
-
-    import backend.services.tally_godown_stock
-    monkeypatch.setattr(backend.services.tally_godown_stock, "get_godown_stock", mock_get_godown_stock)
 
     payload = {
         "new_product_name": "Test Live Post Item " + str(id(monkeypatch)),

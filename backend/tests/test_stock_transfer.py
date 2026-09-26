@@ -113,27 +113,25 @@ def test_post_transfer_queues_both_vouchers_when_tally_offline(monkeypatch):
     assert "<AMOUNT>-500.00</AMOUNT>" in in_section
 
 
-def test_post_transfer_blocks_on_insufficient_stock_when_tally_reachable(monkeypatch):
+def test_post_transfer_does_not_check_stock_sufficiency(monkeypatch):
+    """get_godown_stock's underlying Tally query doesn't actually filter by
+    item (it returns identical numbers for any item requested), so it can
+    never be trusted to block a transfer -- the app no longer calls it at
+    all here. Tally's own "Allow Negative Stock" setting is the real source
+    of truth for whether an overdraw is accepted or rejected."""
     monkeypatch.setattr(connector_manager, "is_tally_reachable", lambda: True)
 
-    import backend.services.tally_godown_stock as godown_module
-    async def mock_get_godown_stock(item_name, godown_name):
-        return {"qty": 2.0, "rate": 50.0, "amount": 100.0}
-    monkeypatch.setattr(godown_module, "get_godown_stock", mock_get_godown_stock)
+    mock_resp = MagicMock()
+    mock_resp.text = SUCCESS_XML
+    monkeypatch.setattr("backend.routers.stock_transfer.tally_transport.post", AsyncMock(return_value=mock_resp))
 
     response = client.post("/api/stock-transfer/post", json=_post_payload(qty=10.0))
-    assert response.status_code == 400
-    assert "Insufficient stock" in response.json()["detail"]
-    assert len(_queued_xmls()) == 0
+    assert response.status_code == 200
+    assert response.json()["status"] == "success"
 
 
 def test_post_transfer_success_when_reachable_and_sufficient(monkeypatch):
     monkeypatch.setattr(connector_manager, "is_tally_reachable", lambda: True)
-
-    import backend.services.tally_godown_stock as godown_module
-    async def mock_get_godown_stock(item_name, godown_name):
-        return {"qty": 100.0, "rate": 50.0, "amount": 5000.0}
-    monkeypatch.setattr(godown_module, "get_godown_stock", mock_get_godown_stock)
 
     mock_resp = MagicMock()
     mock_resp.text = SUCCESS_XML
@@ -149,11 +147,6 @@ def test_post_transfer_success_when_reachable_and_sufficient(monkeypatch):
 
 def test_post_transfer_reports_failed_when_tally_rejects(monkeypatch):
     monkeypatch.setattr(connector_manager, "is_tally_reachable", lambda: True)
-
-    import backend.services.tally_godown_stock as godown_module
-    async def mock_get_godown_stock(item_name, godown_name):
-        return {"qty": 100.0, "rate": 50.0, "amount": 5000.0}
-    monkeypatch.setattr(godown_module, "get_godown_stock", mock_get_godown_stock)
 
     mock_resp = MagicMock()
     mock_resp.text = REJECTED_XML

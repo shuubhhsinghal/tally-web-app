@@ -121,7 +121,6 @@ async def _attempt_post_voucher(queue_id: int, xml_payload: str) -> dict:
 @router.post("/post")
 async def post_transfer(payload: PostRequest, request: Request):
     from xml.sax.saxutils import escape
-    from backend.services.tally_godown_stock import get_godown_stock, is_tally_reachable
     import uuid
 
     if payload.qty <= 0:
@@ -148,23 +147,15 @@ async def post_transfer(payload: PostRequest, request: Request):
     from_godown = escape(from_mapping['godown_name'])
     to_godown = escape(to_mapping['godown_name'])
 
-    # Best-effort stock-sufficiency check at the source godown -- same
-    # philosophy as repack.py: a single upfront reachability ping so an
-    # offline Tally skips this in one shot rather than a connection timeout,
-    # but a genuine insufficient-stock result (while Tally IS reachable)
-    # still hard-blocks the transfer.
-    if is_tally_reachable():
-        try:
-            stock = await get_godown_stock(payload.item_name, from_mapping['godown_name'])
-            if stock["qty"] < payload.qty:
-                raise HTTPException(status_code=400, detail=f"Insufficient stock for '{payload.item_name}' in Godown '{from_mapping['godown_name']}'. Required: {payload.qty}, Available: {stock['qty']}")
-        except HTTPException:
-            raise
-        except requests.exceptions.RequestException:
-            pass  # Tally became unreachable between the ping and this call -- proceed without the check.
-        except Exception as e:
-            print(f"Unexpected error: {e}")
-            raise HTTPException(status_code=400, detail="Something went wrong. Please try again.")
+    # No app-side stock-sufficiency check here -- get_godown_stock's
+    # underlying Tally "Godown Summary" query doesn't actually filter by
+    # item (confirmed live: two different items returned identical numbers),
+    # so it always reported qty=0.0 for real items and hard-blocked valid
+    # transfers rather than genuinely protecting against overdrawing stock.
+    # Tally itself is the real source of truth for this: its own "Allow
+    # Negative Stock" company setting decides whether an overdraw is
+    # rejected outright (surfaces as a normal FAILED queue entry with
+    # Tally's own error, same as any other rejected voucher) or permitted.
 
     amount_str = ""
     amount_str_pos = ""

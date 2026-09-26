@@ -205,8 +205,6 @@ async def execute_repack(payload: RepackExecuteRequest, request: Request):
         raise HTTPException(status_code=400, detail="Quantity must be positive.")
 
     from backend.database import get_db, queue_operation, get_purchase_rate
-    from backend.services.tally_godown_stock import get_godown_stock, is_tally_reachable
-    import requests
     import uuid
     import json
 
@@ -235,11 +233,6 @@ async def execute_repack(payload: RepackExecuteRequest, request: Request):
     if not components:
         raise HTTPException(status_code=400, detail="Product recipe has no components.")
 
-    # A single quick reachability check up front, so an offline Tally skips
-    # the stock-sufficiency check for every component in one shot rather than
-    # paying a separate connection timeout per component.
-    tally_reachable = is_tally_reachable()
-
     # 3. Calculate requirements, using each component's latest purchase rate
     total_source_amount = 0.0
     inventory_out_xml = ""
@@ -262,26 +255,13 @@ async def execute_repack(payload: RepackExecuteRequest, request: Request):
         if comp_rate <= 0:
             raise HTTPException(status_code=400, detail=f"Could not resolve a purchase rate for '{comp_name}'. Refresh masters or record a purchase for it first.")
 
-        # Stock-sufficiency is still worth checking live against Tally when
-        # possible, but it's best-effort: unlike rate, there's no local cache
-        # of physical stock quantity to fall back on, so if Tally is simply
-        # unreachable we skip this check and trust the recipe rather than
-        # blocking the whole (otherwise fully offline-capable) operation.
-        # Gated on the single upfront reachability ping above so an offline
-        # Tally skips this for every component at once, not one timeout each.
-        try:
-            if not tally_reachable:
-                raise requests.exceptions.ConnectionError("Tally is offline (skipped by upfront reachability check).")
-            stock = await get_godown_stock(comp_name, godown_name)
-            if stock["qty"] < qty_required:
-                raise HTTPException(status_code=400, detail=f"Insufficient stock for '{comp_name}' in Godown '{godown_name}'. Required: {qty_required}, Available: {stock['qty']}")
-        except HTTPException:
-            raise
-        except requests.exceptions.RequestException:
-            pass  # Tally unreachable -- proceed without the stock-sufficiency check.
-        except Exception as e:
-            print(f"Unexpected error: {e}")
-            raise HTTPException(status_code=400, detail="Something went wrong. Please try again.")
+        # No app-side stock-sufficiency check here -- get_godown_stock's
+        # underlying Tally "Godown Summary" query doesn't actually filter by
+        # item (confirmed live: two different items returned identical
+        # numbers), so it always reported qty=0.0 for real components and
+        # hard-blocked valid repacks rather than genuinely protecting against
+        # overdrawing stock. Tally itself is the real source of truth for
+        # this via its own "Allow Negative Stock" company setting.
 
         comp_amount = qty_required * comp_rate
         total_source_amount += comp_amount
