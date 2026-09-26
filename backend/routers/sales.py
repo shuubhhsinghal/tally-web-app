@@ -25,7 +25,14 @@ async def get_sales_metadata():
         for l in ledgers:
             parent = (l.get('parent') or '').lower()
             name = l['name'].title()
-            if "debtor" in parent or "cash" in parent or "bank" in parent or "paytm" in parent or "gpay" in parent:
+            # Deliberately includes Cash-in-Hand and Sundry Debtors -- many
+            # shops record a sale straight into a cash/UPI/wallet ledger they
+            # created as a stand-in "customer" (money received via that
+            # channel, pending settlement), not just formal named debtors.
+            # Excludes real bank ledgers (Bank Accounts/Bank OD A/c) -- a
+            # sale should never be recorded directly against the bank
+            # itself, only reconciled into it later via a bank statement.
+            if "debtor" in parent or "cash" in parent:
                 customers.append(name)
     except Exception:
         pass
